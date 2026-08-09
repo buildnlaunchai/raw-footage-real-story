@@ -1,0 +1,57 @@
+# --- Environment / secrets -------------------------------------------------
+# TEMPLATE.md law 1: zero hardcoded secrets. Real values live here, never in git.
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# --- Node / Vite -----------------------------------------------------------
+node_modules
+dist
+dist-ssr
+*.local
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# --- Rust / Tauri ----------------------------------------------------------
+# src-tauri/.gitignore also covers /target and /gen/schemas; kept here so the
+# repo root is self-explanatory.
+src-tauri/target/
+src-tauri/gen/schemas/
+src-tauri/WixTools/
+**/*.rs.bk
+
+# --- App working data ------------------------------------------------------
+# Generated media and scratch output: large, machine-local, never committed.
+/out/
+/renders/
+/tmp/
+*.mp4
+*.mov
+*.mkv
+*.wav
+*.mp3
+*.m4a
+# ...but keep any deliberate fixtures used by tests.
+!tests/fixtures/**
+
+# --- Editors / OS ----------------------------------------------------------
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# --- Tooling ---------------------------------------------------------------
+.claude/settings.local.json
