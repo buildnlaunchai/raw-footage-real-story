@@ -1,6 +1,11 @@
+mod assembly;
+mod assembly_tests;
+mod ffmpeg;
 mod g2p;
 mod ollama;
+mod project;
 mod resources;
+mod timeline;
 mod tts;
 
 use tauri::Manager;
@@ -9,6 +14,7 @@ use tauri::Manager;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(tts::TtsState::default())
         .setup(|app| {
             // Where the bundled model, voices and lexicons live. In `tauri dev`
@@ -24,7 +30,13 @@ pub fn run() {
             ollama::ollama_health,
             tts::tts_list_voices,
             tts::tts_synthesize,
-            tts::tts_preview
+            tts::tts_preview,
+            assembly::ffmpeg_detect,
+            assembly::ffmpeg_set_path,
+            assembly::assembly_make_placeholders,
+            assembly::assembly_render,
+            assembly::assembly_export_bundle,
+            assembly::assembly_export_project_only
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

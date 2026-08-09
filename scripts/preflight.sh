@@ -60,9 +60,11 @@ else
     | grep -oE '[A-Z][A-Z0-9_]{2,}' | sort -u || true)
   documented=$(grep -oE '^[A-Z][A-Z0-9_]*(?==)' -P .env.example 2>/dev/null \
     || grep -oE '^[A-Z][A-Z0-9_]*=' .env.example | tr -d '=')
-  # Cargo/Rust supply these at compile time; they are not app configuration and
-  # have no business in .env.example.
-  BUILTINS="CARGO_MANIFEST_DIR CARGO_PKG_VERSION CARGO_PKG_NAME CARGO_BIN_NAME OUT_DIR TARGET PROFILE"
+  # Supplied by the toolchain, the bundler, or the OS. None of these are app
+  # configuration, so none belong in .env.example.
+  BUILTINS="CARGO_MANIFEST_DIR CARGO_PKG_VERSION CARGO_PKG_NAME CARGO_BIN_NAME OUT_DIR TARGET PROFILE"   # cargo
+  BUILTINS="$BUILTINS DEV PROD MODE SSR BASE_URL"                                                        # vite
+  BUILTINS="$BUILTINS PATH HOME TMPDIR APPDATA PROGRAMFILES"                                             # os
   missing=""
   for var in $used; do
     case " $BUILTINS " in *" $var "*) continue ;; esac

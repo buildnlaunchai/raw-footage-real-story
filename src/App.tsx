@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { ClipEditor } from "./components/ClipEditor";
 import { ScriptResult } from "./components/ScriptResult";
 import { VoiceoverPanel } from "./components/VoiceoverPanel";
+import { AssemblyPanel } from "./components/AssemblyPanel";
+import { FfmpegSetup } from "./components/FfmpegSetup";
 import { OLLAMA_MODEL } from "./config/ollama";
 import { generateScript, ScriptGenerationError } from "./lib/scriptGeneration";
 import { asOllamaError } from "./lib/ollama";
@@ -14,6 +16,14 @@ import {
   type VoiceInfo,
   type VoicedLine,
 } from "./lib/voiceover";
+import {
+  detectFfmpeg,
+  makePlaceholderClips,
+  renderRoughCut,
+  type AssembleResult,
+  type FfmpegInfo,
+  type RenderProgress,
+} from "./lib/assembly";
 import type { Clip, ScriptLine } from "./lib/types";
 import "./App.css";
 
@@ -42,6 +52,14 @@ function App() {
   const [ttsError, setTtsError] = useState<string | null>(null);
   const [ttsElapsedMs, setTtsElapsedMs] = useState<number | null>(null);
 
+  const [createdAt] = useState(() => new Date().toISOString());
+  const [ffmpeg, setFfmpeg] = useState<FfmpegInfo | null>(null);
+  const [assembly, setAssembly] = useState<AssembleResult | null>(null);
+  const [assemblyBusy, setAssemblyBusy] = useState(false);
+  const [makingPlaceholders, setMakingPlaceholders] = useState(false);
+  const [renderProgress, setRenderProgress] = useState<RenderProgress | null>(null);
+  const [assemblyError, setAssemblyError] = useState<string | null>(null);
+
   const filled = clips.filter((c) => c.description.trim().length > 0).length;
 
   useEffect(() => {
@@ -53,7 +71,54 @@ function App() {
         }
       })
       .catch((err) => setTtsError(err.message));
+    void detectFfmpeg().then(setFfmpeg);
   }, []);
+
+  async function onMakePlaceholders() {
+    if (!voiced) return;
+    setMakingPlaceholders(true);
+    setAssemblyError(null);
+    try {
+      const generated = await makePlaceholderClips(clips, voiced, projectId);
+      const byId = new Map(generated.map((g) => [g.clipId, g]));
+      setClips((cs) =>
+        cs.map((c) => {
+          const g = byId.get(c.id);
+          return g
+            ? { ...c, sourcePath: g.sourcePath, sourceDurationMs: g.sourceDurationMs }
+            : c;
+        }),
+      );
+    } catch (err) {
+      setAssemblyError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setMakingPlaceholders(false);
+    }
+  }
+
+  async function onRender() {
+    if (!voiced) return;
+    setAssemblyBusy(true);
+    setAssemblyError(null);
+    setRenderProgress(null);
+    try {
+      const result = await renderRoughCut(clips, voiced, {
+        projectId,
+        projectName: "Untitled project",
+        model: OLLAMA_MODEL,
+        voice,
+        createdAt,
+        onProgress: setRenderProgress,
+      });
+      setAssembly(result);
+    } catch (err) {
+      setAssemblyError(err instanceof Error ? err.message : String(err));
+      setAssembly(null);
+    } finally {
+      setAssemblyBusy(false);
+      setRenderProgress(null);
+    }
+  }
 
   async function onGenerate() {
     setBusy(true);
@@ -92,6 +157,7 @@ function App() {
       });
       setVoiced(result);
       setTtsElapsedMs(performance.now() - started);
+      setAssembly(null);
     } catch (err) {
       setTtsError(err instanceof Error ? err.message : String(err));
       setVoiced(null);
@@ -190,9 +256,32 @@ function App() {
         />
       )}
 
+      {voiced && !ttsBusy && !ffmpeg && (
+        <FfmpegSetup
+          onFound={setFfmpeg}
+          onRecheck={async () => setFfmpeg(await detectFfmpeg())}
+        />
+      )}
+
+      {voiced && !ttsBusy && ffmpeg && (
+        <AssemblyPanel
+          clips={clips}
+          ffmpeg={ffmpeg}
+          result={assembly}
+          busy={assemblyBusy}
+          progress={renderProgress}
+          error={assemblyError}
+          hasPlaceholders={clips.some((c) => c.sourcePath)}
+          makingPlaceholders={makingPlaceholders}
+          projectId={projectId}
+          onMakePlaceholders={onMakePlaceholders}
+          onRender={onRender}
+        />
+      )}
+
       <footer className="footer">
-        <span className="badge">Stage 2 of 4</span>
-        <p>Script and voiceover. Rough-cut assembly comes next.</p>
+        <span className="badge">Stage 3 of 4</span>
+        <p>Script, voiceover and rough cut. Real video upload comes next.</p>
       </footer>
     </main>
   );

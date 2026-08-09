@@ -347,6 +347,98 @@ body {
   cursor: help;
 }
 
+/* --- assembly ------------------------------------------------------- */
+
+.preview {
+  width: 100%;
+  margin-top: 1.25rem;
+  border-radius: 0.6rem;
+  background: #000;
+  aspect-ratio: 16 / 9;
+}
+
+.timeline-list {
+  margin-top: 1.25rem;
+}
+
+.fit-chip {
+  font-size: 0.7rem;
+  padding: 0.15rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--ink-dim);
+}
+
+.fit-trimmed {
+  border-color: rgba(23, 190, 187, 0.45);
+  color: #17bebb;
+}
+
+.fit-held {
+  border-color: rgba(255, 176, 32, 0.45);
+  color: #ffb020;
+}
+
+.dev-strip {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+  padding: 0.7rem 0.85rem;
+  background: rgba(131, 50, 172, 0.1);
+  border: 1px dashed rgba(131, 50, 172, 0.5);
+  border-radius: 0.6rem;
+}
+
+.dev-strip p {
+  flex: 1 1 16rem;
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--ink-dim);
+}
+
+.dev-badge {
+  font-size: 0.65rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 0.2rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid #a76fd0;
+  color: #a76fd0;
+}
+
+.install-list {
+  margin: 1rem 0 0;
+  display: grid;
+  gap: 0.4rem;
+}
+
+.install-row {
+  display: flex;
+  gap: 0.75rem;
+  align-items: baseline;
+}
+
+.install-row dt {
+  flex: none;
+  width: 5rem;
+  font-size: 0.8rem;
+  color: var(--ink-dim);
+}
+
+.install-row dd {
+  margin: 0;
+}
+
+code {
+  padding: 0.1rem 0.35rem;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 0.3rem;
+  font-size: 0.82rem;
+}
+
 /* --- footer --------------------------------------------------------- */
 
 .footer {
