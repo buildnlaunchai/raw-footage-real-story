@@ -1,0 +1,2 @@
+src-tauri/resources/kokoro/*.onnx filter=lfs diff=lfs merge=lfs -text
+src-tauri/resources/kokoro/voices/*.bin filter=lfs diff=lfs merge=lfs -text

@@ -28,6 +28,10 @@ src-tauri/gen/schemas/
 src-tauri/WixTools/
 **/*.rs.bk
 
+# --- Bundled model assets --------------------------------------------------
+# Kokoro weights and voice packs are tracked via Git LFS (see .gitattributes),
+# not ignored: they must ship with the app for the offline guarantee to hold.
+
 # --- App working data ------------------------------------------------------
 # Generated media and scratch output: large, machine-local, never committed.
 /out/
