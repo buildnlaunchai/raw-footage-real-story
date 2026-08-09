@@ -1,21 +1,28 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ClipEditor } from "./components/ClipEditor";
 import { ScriptResult } from "./components/ScriptResult";
+import { VoiceoverPanel } from "./components/VoiceoverPanel";
 import { OLLAMA_MODEL } from "./config/ollama";
 import { generateScript, ScriptGenerationError } from "./lib/scriptGeneration";
 import { asOllamaError } from "./lib/ollama";
+import {
+  audioUrl,
+  generateVoiceover,
+  listVoices,
+  previewVoice,
+  type TtsProgress,
+  type VoiceInfo,
+  type VoicedLine,
+} from "./lib/voiceover";
 import type { Clip, ScriptLine } from "./lib/types";
 import "./App.css";
 
-// Ids must be unique for the lifetime of the list, and a module-level counter
-// isn't: Vite resets it on every hot reload and React StrictMode runs the
-// initialiser twice, so a later "Add clip" re-mints an id that already exists.
-// Duplicate ids become duplicate React keys, and React then reconciles two rows
-// onto one element — which shows up as a repeated row rather than as a key error.
 const newClip = (description = ""): Clip => ({
   id: crypto.randomUUID(),
   description,
 });
+
+const DEFAULT_VOICE = "af_heart";
 
 function App() {
   const [clips, setClips] = useState<Clip[]>(() => [newClip(), newClip(), newClip()]);
@@ -24,7 +31,29 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [elapsedMs, setElapsedMs] = useState<number | null>(null);
 
+  // One project id per app session; audio is written under it.
+  const [projectId] = useState(() => crypto.randomUUID());
+  const [voices, setVoices] = useState<VoiceInfo[]>([]);
+  const [voice, setVoice] = useState(DEFAULT_VOICE);
+  const [voiced, setVoiced] = useState<VoicedLine[] | null>(null);
+  const [ttsBusy, setTtsBusy] = useState(false);
+  const [previewing, setPreviewing] = useState(false);
+  const [progress, setProgress] = useState<TtsProgress | null>(null);
+  const [ttsError, setTtsError] = useState<string | null>(null);
+  const [ttsElapsedMs, setTtsElapsedMs] = useState<number | null>(null);
+
   const filled = clips.filter((c) => c.description.trim().length > 0).length;
+
+  useEffect(() => {
+    listVoices()
+      .then((list) => {
+        setVoices(list);
+        if (!list.some((v) => v.id === DEFAULT_VOICE) && list.length > 0) {
+          setVoice(list[0].id);
+        }
+      })
+      .catch((err) => setTtsError(err.message));
+  }, []);
 
   async function onGenerate() {
     setBusy(true);
@@ -34,9 +63,10 @@ function App() {
       const result = await generateScript(clips);
       setScript(result);
       setElapsedMs(performance.now() - started);
+      // The old audio belongs to the old script.
+      setVoiced(null);
+      setTtsElapsedMs(null);
     } catch (err) {
-      // A bad script contract and a dead server are different problems, and
-      // only one of them is the user's to fix.
       setError(
         err instanceof ScriptGenerationError
           ? err.message
@@ -48,20 +78,56 @@ function App() {
     }
   }
 
+  async function onGenerateVoiceover() {
+    if (!script) return;
+    setTtsBusy(true);
+    setTtsError(null);
+    setProgress({ done: 0, total: script.length, clipId: "" });
+    const started = performance.now();
+    try {
+      const result = await generateVoiceover(script, {
+        voice,
+        projectId,
+        onProgress: setProgress,
+      });
+      setVoiced(result);
+      setTtsElapsedMs(performance.now() - started);
+    } catch (err) {
+      setTtsError(err instanceof Error ? err.message : String(err));
+      setVoiced(null);
+    } finally {
+      setTtsBusy(false);
+      setProgress(null);
+    }
+  }
+
+  async function onPreview() {
+    setPreviewing(true);
+    setTtsError(null);
+    try {
+      const sample = await previewVoice(voice);
+      await new Audio(audioUrl(sample.audioPath)).play();
+    } catch (err) {
+      setTtsError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPreviewing(false);
+    }
+  }
+
   return (
     <main className="app">
       <header className="masthead">
         <p className="eyebrow">Build &amp; Launch AI</p>
         <h1>Raw Footage, Real Story</h1>
         <p className="lede">
-          Describe your clips and a local model writes the narration. Nothing
-          leaves this machine.
+          Describe your clips and a local model writes the narration, then speaks
+          it. Nothing leaves this machine.
         </p>
       </header>
 
       <ClipEditor
         clips={clips}
-        disabled={busy}
+        disabled={busy || ttsBusy}
         onAdd={() => setClips((cs) => [...cs, newClip()])}
         onRemove={(id) => setClips((cs) => cs.filter((c) => c.id !== id))}
         onChange={(id, description) =>
@@ -74,7 +140,7 @@ function App() {
           type="button"
           className="primary-button"
           onClick={onGenerate}
-          disabled={busy || filled === 0}
+          disabled={busy || ttsBusy || filled === 0}
         >
           {busy ? "Writing script…" : "Generate script"}
         </button>
@@ -107,9 +173,26 @@ function App() {
         />
       )}
 
+      {script && !busy && (
+        <VoiceoverPanel
+          clips={clips}
+          voices={voices}
+          voice={voice}
+          voiced={voiced}
+          busy={ttsBusy}
+          previewing={previewing}
+          progress={progress}
+          error={ttsError}
+          elapsedMs={ttsElapsedMs}
+          onSelectVoice={setVoice}
+          onPreview={onPreview}
+          onGenerate={onGenerateVoiceover}
+        />
+      )}
+
       <footer className="footer">
-        <span className="badge">Stage 1 of 4</span>
-        <p>Script generation. Voiceover and rough-cut assembly come next.</p>
+        <span className="badge">Stage 2 of 4</span>
+        <p>Script and voiceover. Rough-cut assembly comes next.</p>
       </footer>
     </main>
   );

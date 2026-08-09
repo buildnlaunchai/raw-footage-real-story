@@ -60,8 +60,12 @@ else
     | grep -oE '[A-Z][A-Z0-9_]{2,}' | sort -u || true)
   documented=$(grep -oE '^[A-Z][A-Z0-9_]*(?==)' -P .env.example 2>/dev/null \
     || grep -oE '^[A-Z][A-Z0-9_]*=' .env.example | tr -d '=')
+  # Cargo/Rust supply these at compile time; they are not app configuration and
+  # have no business in .env.example.
+  BUILTINS="CARGO_MANIFEST_DIR CARGO_PKG_VERSION CARGO_PKG_NAME CARGO_BIN_NAME OUT_DIR TARGET PROFILE"
   missing=""
   for var in $used; do
+    case " $BUILTINS " in *" $var "*) continue ;; esac
     printf '%s\n' "$documented" | grep -qx "$var" || missing="$missing $var"
   done
   if [ -n "$missing" ]; then
@@ -70,6 +74,38 @@ else
     ok "  complete"
   fi
 fi
+
+# --- 4. no GPL phonemiser in the dependency graph --------------------------
+# Kokoro's usual G2P backend is espeak-ng, which is GPL. Linking it would put
+# GPL obligations on the whole distributed bundle, so the app phonemises from
+# permissively-licensed lexicons instead (see src-tauri/src/g2p.rs). This guard
+# exists because the dependency is easy to reintroduce by accident: several
+# Kokoro crates pull espeak-ng in as a *default* cargo feature.
+say "→ checking espeak-ng has not entered the dependency graph"
+espeak_hits=0
+if [ -f src-tauri/Cargo.lock ]; then
+  if grep -inE 'espeak|phonemizer' src-tauri/Cargo.lock >/dev/null 2>&1; then
+    bad "  espeak-ng appears in src-tauri/Cargo.lock:"
+    grep -inE 'espeak|phonemizer' src-tauri/Cargo.lock | sed 's/^/    /'
+    espeak_hits=1
+  fi
+fi
+# Only application code — this script names espeak in its own comments, and
+# g2p.rs explains at length why it is absent. Actual linkage would show up as a
+# use/extern/dependency line, which is what this pattern looks for.
+if grep -rInE "${EXCLUDES[@]}" \
+     -e '^[[:space:]]*(use|extern crate)[[:space:]]+espeak' \
+     -e '^[[:space:]]*espeak[a-z_-]*[[:space:]]*=' \
+     -e 'espeak[a-z_-]*::' \
+     src src-tauri/src 2>/dev/null; then
+  bad "  application code links espeak (see above)"
+  espeak_hits=1
+fi
+if grep -rInE '^[[:space:]]*espeak' src-tauri/Cargo.toml 2>/dev/null; then
+  bad "  espeak is declared in Cargo.toml (see above)"
+  espeak_hits=1
+fi
+[ "$espeak_hits" -eq 0 ] && ok "  clean — no GPL phonemiser"
 
 say ""
 if [ "$fail" -ne 0 ]; then

@@ -3,8 +3,10 @@
   "identifier": "default",
   "description": "Capability for the main window",
   "windows": ["main"],
+  "comment": "Audio playback goes through the asset protocol, which is gated by app.security.assetProtocol.scope in tauri.conf.json rather than by a capability permission.",
   "permissions": [
     "core:default",
-    "opener:default"
+    "opener:default",
+    "core:webview:allow-internal-toggle-devtools"
   ]
 }

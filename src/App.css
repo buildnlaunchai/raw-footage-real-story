@@ -248,6 +248,105 @@ body {
   line-height: 1.55;
 }
 
+/* --- voiceover ------------------------------------------------------ */
+
+.voice-picker {
+  display: grid;
+  gap: 0.4rem;
+  margin-bottom: 0.25rem;
+}
+
+.field-label {
+  font-size: 0.78rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+}
+
+.voice-row {
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.select {
+  flex: 1 1 14rem;
+  min-width: 0;
+  padding: 0.5rem 0.7rem;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 0.5rem;
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.9rem;
+}
+
+.select:disabled {
+  opacity: 0.55;
+}
+
+.ghost-button.small {
+  padding: 0.3rem 0.6rem;
+  font-size: 0.8rem;
+}
+
+.progress-track {
+  height: 4px;
+  margin-top: 0.9rem;
+  background: var(--surface-2);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.2s ease;
+}
+
+.voiced-list {
+  margin-top: 1.25rem;
+}
+
+.voiced-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.voiced-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  margin-top: 0.55rem;
+}
+
+.warning {
+  display: grid;
+  gap: 0.3rem;
+  margin-top: 1.25rem;
+  padding: 0.85rem 1rem;
+  background: rgba(255, 176, 32, 0.08);
+  border: 1px solid rgba(255, 176, 32, 0.35);
+  border-radius: 0.6rem;
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+
+.warning strong {
+  color: #ffb020;
+}
+
+.skip-chip {
+  font-size: 0.72rem;
+  padding: 0.15rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 176, 32, 0.4);
+  color: #ffb020;
+  cursor: help;
+}
+
 /* --- footer --------------------------------------------------------- */
 
 .footer {
