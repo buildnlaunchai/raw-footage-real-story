@@ -119,7 +119,7 @@ fn tone_maps_real_hdr_footage_with_zscale() {
         );
 
         clip_inputs.push(ClipInput::whole(format!("c{i}"), Some(media.duration_ms)));
-        line_inputs.push(LineInput { clip_id: format!("c{i}"), duration_ms: narration });
+        line_inputs.push(LineInput::whole(format!("c{i}"), narration));
     }
 
     let items = timeline::plan(&clip_inputs, &line_inputs);

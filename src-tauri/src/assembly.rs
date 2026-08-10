@@ -107,6 +107,9 @@ pub struct VoicedSpec {
     pub skipped: Vec<String>,
     #[serde(default)]
     pub edited: bool,
+    /// Where in the clip this line's segment begins.
+    #[serde(default)]
+    pub source_start_ms: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -145,6 +148,7 @@ pub fn assembly_make_placeholders(
 
     for (i, clip) in clips.iter().enumerate() {
         let Some(line) = voiced.iter().find(|v| v.clip_id == clip.id) else {
+            // Placeholders are per clip, so the first line for it is enough.
             continue; // nothing said over it, so it never reaches the timeline
         };
         let duration = timeline::on_screen_ms(line.duration_ms);
@@ -333,18 +337,29 @@ pub async fn assembly_render(
     std::fs::create_dir_all(dir.join("render"))
         .map_err(|e| FfmpegError { code: "MKDIR_FAILED".into(), message: e.to_string() })?;
 
-    let clip_inputs: Vec<ClipInput> = clips
+    // One entry per narrated line, not per clip: a story may return to the same
+    // clip for a different moment, and each needs its own source offset.
+    let clip_inputs: Vec<ClipInput> = voiced
         .iter()
-        .map(|c| ClipInput {
-            clip_id: c.id.clone(),
-            source_duration_ms: c.source_duration_ms,
-            source_start_ms: c.source_start_ms.unwrap_or(0),
+        .map(|v| ClipInput {
+            clip_id: v.clip_id.clone(),
+            segment_index: v.segment_index,
+            source_duration_ms: clips
+                .iter()
+                .find(|c| c.id == v.clip_id)
+                .and_then(|c| c.source_duration_ms),
+            source_start_ms: v.source_start_ms.unwrap_or(0),
         })
         .collect();
     let line_inputs: Vec<LineInput> = voiced
         .iter()
-        .map(|v| LineInput { clip_id: v.clip_id.clone(), duration_ms: v.duration_ms })
+        .map(|v| LineInput {
+            clip_id: v.clip_id.clone(),
+            segment_index: v.segment_index,
+            duration_ms: v.duration_ms,
+        })
         .collect();
+
     let items = timeline::plan(&clip_inputs, &line_inputs);
 
     if items.is_empty() {
@@ -363,6 +378,7 @@ pub async fn assembly_render(
     let mut render_items = Vec::with_capacity(items.len());
     for (i, item) in items.iter().enumerate() {
         let spec = clips.iter().find(|c| c.id == item.clip_id);
+        // Audio is per line, so match the pair; the media file is per clip.
         let video = match spec.and_then(|c| c.source_path.clone()) {
             Some(p) if Path::new(&p).is_file() => PathBuf::from(p),
             _ => {
@@ -381,11 +397,14 @@ pub async fn assembly_render(
         };
         let audio = voiced
             .iter()
-            .find(|v| v.clip_id == item.clip_id)
+            .find(|v| v.clip_id == item.clip_id && v.segment_index == item.segment_index)
             .map(|v| PathBuf::from(&v.audio_path))
             .ok_or_else(|| FfmpegError {
                 code: "MISSING_AUDIO".into(),
-                message: format!("no narration audio for clip {}", item.clip_id),
+                message: format!(
+                    "no narration audio for clip {} segment {}",
+                    item.clip_id, item.segment_index
+                ),
             })?;
 
         render_items.push(RenderItem {

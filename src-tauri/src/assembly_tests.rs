@@ -65,10 +65,10 @@ fn assembles_a_rough_cut_with_correct_order_and_timing() {
 
     // Narration durations chosen to exercise every branch of the planner.
     let lines = [
-        LineInput { clip_id: "c0".into(), duration_ms: 2_000 }, // vs 10s source -> Trimmed
-        LineInput { clip_id: "c1".into(), duration_ms: 3_000 }, // vs 1s source  -> Held
-        LineInput { clip_id: "c2".into(), duration_ms: 1_700 }, // vs 2s source  -> Exact
-        LineInput { clip_id: "c3".into(), duration_ms: 2_500 }, // no source     -> placeholder
+        LineInput::whole("c0", 2_000), // vs 10s source -> Trimmed
+        LineInput::whole("c1", 3_000), // vs 1s source  -> Held
+        LineInput::whole("c2", 1_700), // vs 2s source  -> Exact
+        LineInput::whole("c3", 2_500), // no source     -> placeholder
     ];
     let sources = [Some(10_000u64), Some(1_000), Some(2_000), None];
     let clips: Vec<ClipInput> = lines
@@ -179,7 +179,7 @@ fn rotation_survives_filter_complex() {
         "display size should be portrait even though the coded frame is landscape"
     );
 
-    let lines = [LineInput { clip_id: "r".into(), duration_ms: 1_000 }];
+    let lines = [LineInput::whole("r", 1_000)];
     let clips = [ClipInput::whole("r", Some(2_000))];
     let items = timeline::plan(&clips, &lines);
 
@@ -333,10 +333,7 @@ fn handles_awkward_sources_and_normalises_them() {
     let lines: Vec<LineInput> = sources
         .iter()
         .enumerate()
-        .map(|(i, _)| LineInput {
-            clip_id: format!("c{i}"),
-            duration_ms: 1_200 + (i as u64 * 200),
-        })
+        .map(|(i, _)| LineInput::whole(format!("c{i}"), 1_200 + (i as u64 * 200)))
         .collect();
     let clips: Vec<ClipInput> = sources
         .iter()
@@ -469,6 +466,84 @@ fn explicit_choice_is_never_overridden_by_a_more_capable_build() {
     assert!(same_dir, "ffprobe {} should sit beside the chosen ffmpeg", info.ffprobe);
 }
 
+/// The same clip, used twice at different moments, must show different footage.
+///
+/// Planning-level tests can only prove the numbers differ. This builds a clip
+/// whose first half is red and second half is blue, asks for both halves in one
+/// story, and reads the rendered frames back — so a regression that quietly
+/// reused one offset for both would show the same colour twice and fail.
+#[test]
+fn one_clip_used_twice_shows_two_different_moments() {
+    let Some(fx) = Fixture::new("twice") else {
+        eprintln!("ffmpeg not available; skipping");
+        return;
+    };
+
+    // A six second clip: red for the first three, blue for the last three.
+    let red = fx.dir.join("red.mp4");
+    let blue = fx.dir.join("blue.mp4");
+    ffmpeg::make_placeholder(&fx.ffmpeg, &red, "0xFF0000", 3_000, 640, 360, 30).expect("red");
+    ffmpeg::make_placeholder(&fx.ffmpeg, &blue, "0x0000FF", 3_000, 640, 360, 30).expect("blue");
+    let list = fx.dir.join("list.txt");
+    std::fs::write(
+        &list,
+        format!("file '{}'\nfile '{}'\n", red.display(), blue.display()),
+    )
+    .unwrap();
+    let source = fx.dir.join("two-halves.mp4");
+    let status = std::process::Command::new(&fx.ffmpeg)
+        .args(["-y", "-v", "error", "-f", "concat", "-safe", "0", "-i"])
+        .arg(&list)
+        .args(["-c", "copy"])
+        .arg(&source)
+        .status()
+        .expect("concat");
+    assert!(status.success(), "could not build the two-halves clip");
+
+    // Story order: the blue moment first, then the red one.
+    let clips = [
+        ClipInput { clip_id: "a".into(), segment_index: 1, source_duration_ms: Some(6_000), source_start_ms: 3_200 },
+        ClipInput { clip_id: "a".into(), segment_index: 0, source_duration_ms: Some(6_000), source_start_ms: 0 },
+    ];
+    let lines = [
+        LineInput { clip_id: "a".into(), segment_index: 1, duration_ms: 1_200 },
+        LineInput { clip_id: "a".into(), segment_index: 0, duration_ms: 1_200 },
+    ];
+    let items = timeline::plan(&clips, &lines);
+    assert_eq!(items[0].source_in_ms, 3_200, "blue moment keeps its own offset");
+    assert_eq!(items[1].source_in_ms, 0, "red moment is unaffected");
+
+    let settings = RenderSettings { width: 640, height: 360, fps: 30 };
+    let mut render_items = Vec::new();
+    for (i, item) in items.iter().enumerate() {
+        let audio = fx.dir.join(format!("a{i}.wav"));
+        tts::write_wav(&audio, &vec![0f32; 1_200 * 24]).expect("wav");
+        render_items.push(RenderItem {
+            video: source.clone(),
+            audio,
+            item: item.clone(),
+            is_hdr: false,
+        });
+    }
+
+    let out = fx.dir.join("twice.mp4");
+    ffmpeg::render_rough_cut(&fx.ffmpeg, &render_items, &settings, &ffmpeg::FfmpegCaps::default(), &out)
+        .expect("render");
+
+    let first = ffmpeg::frame_rgb(
+        &fx.ffmpeg, &out, items[0].timeline_start_ms + items[0].timeline_duration_ms / 2,
+    ).expect("frame 1");
+    let second = ffmpeg::frame_rgb(
+        &fx.ffmpeg, &out, items[1].timeline_start_ms + items[1].timeline_duration_ms / 2,
+    ).expect("frame 2");
+    println!("\n  item 1 (segment 1, from 3.2s): rgb{first:?} -> {}", nearest(first));
+    println!("  item 2 (segment 0, from 0.0s): rgb{second:?} -> {}", nearest(second));
+
+    assert_eq!(nearest(first), "blue", "first item should show the clip's later half");
+    assert_eq!(nearest(second), "red", "second item should show the clip's earlier half");
+    assert_ne!(nearest(first), nearest(second), "the two moments must differ");
+}
+
 #[test]
 fn probe_reads_real_media_properties() {
     let Some(fx) = Fixture::new("probe") else {
@@ -548,7 +623,7 @@ fn output_has_the_expected_streams_and_format() {
         return;
     };
 
-    let lines = [LineInput { clip_id: "c0".into(), duration_ms: 1_200 }];
+    let lines = [LineInput::whole("c0", 1_200)];
     let clips = [ClipInput::whole("c0", None)];
     let items = timeline::plan(&clips, &lines);
 

@@ -121,13 +121,20 @@ function toClipSpecs(clips: Clip[]) {
   }));
 }
 
-function toVoicedSpecs(voiced: VoicedLine[]) {
+/**
+ * One spec per narrated line. `sourceStartMs` travels with the line rather than
+ * the clip because a story may use two different moments from the same clip,
+ * and each needs its own offset.
+ */
+function toVoicedSpecs(voiced: VoicedLine[], startsByKey?: Map<string, number>) {
   return voiced.map((v) => ({
     clipId: v.clipId,
+    segmentIndex: v.segmentIndex ?? 0,
     text: v.text,
     audioPath: v.audioPath,
     durationMs: v.durationMs,
     skipped: v.skipped,
+    sourceStartMs: startsByKey?.get(`${v.clipId}#${v.segmentIndex ?? 0}`) ?? 0,
   }));
 }
 
@@ -157,6 +164,8 @@ export interface RenderOptions {
   /** Which video within the project this render belongs to. */
   videoId?: string;
   videoTitle?: string;
+  /** `clipId#segmentIndex` -> where that segment starts in the clip. */
+  segmentStarts?: Map<string, number>;
   onProgress?: (p: RenderProgress) => void;
 }
 
@@ -171,7 +180,7 @@ export async function renderRoughCut(
   try {
     return await invoke<AssembleResult>("assembly_render", {
       clips: toClipSpecs(clips),
-      voiced: toVoicedSpecs(voiced),
+      voiced: toVoicedSpecs(voiced, opts.segmentStarts),
       projectId: opts.projectId,
       projectName: opts.projectName,
       model: opts.model,

@@ -267,7 +267,7 @@ fn project_with_video() -> ProjectFile {
     });
     v.timeline = timeline::plan(
         &[ClipInput::whole("c0", Some(9_000))],
-        &[LineInput { clip_id: "c0".into(), duration_ms: 2_000 }],
+        &[LineInput::whole("c0", 2_000)],
     );
     v.render = Some(RenderSection {
         settings: RenderSettings::default(),
@@ -380,4 +380,28 @@ fn bundle_drops_paths_whose_media_is_missing() {
     }
     let bundled: ProjectFile = serde_json::from_str(&raw).unwrap();
     assert_eq!(bundled.clips[0].source_path, None, "dangling path should be cleared");
+}
+
+/// Loads the real 300-clip demo project from app data, when it exists.
+/// Skipped otherwise so the suite stays self-contained.
+#[test]
+fn loads_the_real_scale_demo_project_if_present() {
+    let path = PathBuf::from(std::env::var("HOME").unwrap())
+        .join("Library/Application Support/com.buildnlaunchai.raw-footage-real-story")
+        .join("projects/scale-300-clip-demo/project.json");
+    if !path.is_file() {
+        eprintln!("scale demo project not present; skipping");
+        return;
+    }
+    let t = Instant::now();
+    let p = project::load(&path).expect("load real scale project");
+    let ms = t.elapsed().as_secs_f64() * 1000.0;
+    println!(
+        "\n  real project: {} clips, {} segments, {:.1} KB, loaded in {ms:.1} ms",
+        p.clips.len(),
+        p.segment_count(),
+        std::fs::metadata(&path).unwrap().len() as f64 / 1024.0
+    );
+    assert_eq!(p.clips.len(), 300);
+    assert!(p.clips.iter().all(|c| c.thumbnail_path.is_some()), "every clip should have a thumbnail");
 }

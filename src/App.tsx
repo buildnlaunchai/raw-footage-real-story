@@ -437,20 +437,23 @@ function App() {
     setAssemblyBusy(true);
     setAssemblyError(null);
     try {
-      const clipSpecs = manifest.clips.map((c) => {
-        // A line may use a segment starting partway into the clip.
-        const used = voiced.find((v) => v.clipId === c.id);
-        const seg = used ? c.segments[used.segmentIndex] : undefined;
-        return {
-          id: c.id,
-          description: seg?.text ?? c.segments[0]?.text ?? "",
-          sourcePath: c.sourcePath ?? undefined,
-          sourceDurationMs: c.sourceDurationMs ?? undefined,
-          isPlaceholder: c.isPlaceholder,
-          isHdr: c.isHdr,
-          sourceStartMs: seg ? Math.round(seg.startSec * 1000) : 0,
-        };
-      });
+      // Clip specs describe the media; segment offsets travel per line, so a
+      // clip used twice at different moments gets two independent starts.
+      const clipSpecs = manifest.clips.map((c) => ({
+        id: c.id,
+        description: c.segments[0]?.text ?? "",
+        sourcePath: c.sourcePath ?? undefined,
+        sourceDurationMs: c.sourceDurationMs ?? undefined,
+        isPlaceholder: c.isPlaceholder,
+        isHdr: c.isHdr,
+      }));
+      const segmentStarts = new Map<string, number>();
+      for (const v of voiced) {
+        const seg = manifest.clips.find((c) => c.id === v.clipId)?.segments[v.segmentIndex];
+        if (seg) {
+          segmentStarts.set(`${v.clipId}#${v.segmentIndex}`, Math.round(seg.startSec * 1000));
+        }
+      }
       const result = await renderRoughCut(clipSpecs, voiced, {
         projectId: manifest.project.id,
         projectName: manifest.project.name,
@@ -459,6 +462,7 @@ function App() {
         createdAt: manifest.project.createdAt,
         videoId: "video-1",
         videoTitle: title,
+        segmentStarts,
         onProgress: setRenderProgress,
       });
       setAssembly(result);

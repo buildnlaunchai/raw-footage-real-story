@@ -36,9 +36,15 @@ pub enum Fit {
     Held,
 }
 
+/// Identity of a described moment.
+///
+/// A clip id alone is not enough: one story may return to the same clip for two
+/// different moments, and each needs its own source offset. Matching on the
+/// pair is what keeps them independent.
 #[derive(Debug, Clone)]
 pub struct ClipInput {
     pub clip_id: String,
+    pub segment_index: usize,
     /// None until video upload exists, or for generated placeholders.
     pub source_duration_ms: Option<u64>,
     /// Where in the source this item starts. Non-zero when a story uses one
@@ -47,22 +53,37 @@ pub struct ClipInput {
 }
 
 impl ClipInput {
-    /// A whole clip, as the pre-segment flow always used.
+    /// A whole clip: segment 0, starting at the beginning.
     pub fn whole(clip_id: impl Into<String>, source_duration_ms: Option<u64>) -> Self {
-        Self { clip_id: clip_id.into(), source_duration_ms, source_start_ms: 0 }
+        Self {
+            clip_id: clip_id.into(),
+            segment_index: 0,
+            source_duration_ms,
+            source_start_ms: 0,
+        }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct LineInput {
     pub clip_id: String,
+    pub segment_index: usize,
     pub duration_ms: u64,
+}
+
+impl LineInput {
+    pub fn whole(clip_id: impl Into<String>, duration_ms: u64) -> Self {
+        Self { clip_id: clip_id.into(), segment_index: 0, duration_ms }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TimelineItem {
     pub clip_id: String,
+    /// Which described moment of that clip this item shows.
+    #[serde(default)]
+    pub segment_index: usize,
     /// Where in the source media this item starts.
     pub source_in_ms: u64,
     /// Where in the source media it stops. For `Held`, this is the full source
@@ -90,7 +111,11 @@ pub fn plan(clips: &[ClipInput], lines: &[LineInput]) -> Vec<TimelineItem> {
 
     for line in lines {
         let target = on_screen_ms(line.duration_ms);
-        let matched = clips.iter().find(|c| c.clip_id == line.clip_id);
+        // Match on the pair, not the clip alone: the same clip can appear
+        // twice in one story at different moments.
+        let matched = clips
+            .iter()
+            .find(|c| c.clip_id == line.clip_id && c.segment_index == line.segment_index);
         let start = matched.map_or(0, |c| c.source_start_ms);
         // How much material is available from the start point onward. A segment
         // late in a clip has less runway than the clip's full length suggests.
@@ -109,6 +134,7 @@ pub fn plan(clips: &[ClipInput], lines: &[LineInput]) -> Vec<TimelineItem> {
 
         out.push(TimelineItem {
             clip_id: line.clip_id.clone(),
+            segment_index: line.segment_index,
             source_in_ms,
             source_out_ms,
             timeline_start_ms: cursor,
@@ -135,10 +161,21 @@ mod tests {
         ClipInput::whole(id, dur)
     }
     fn segment_of(id: &str, dur: Option<u64>, start_ms: u64) -> ClipInput {
-        ClipInput { clip_id: id.into(), source_duration_ms: dur, source_start_ms: start_ms }
+        seg_at(id, 0, dur, start_ms)
+    }
+    fn seg_at(id: &str, idx: usize, dur: Option<u64>, start_ms: u64) -> ClipInput {
+        ClipInput {
+            clip_id: id.into(),
+            segment_index: idx,
+            source_duration_ms: dur,
+            source_start_ms: start_ms,
+        }
     }
     fn line(id: &str, dur: u64) -> LineInput {
-        LineInput { clip_id: id.into(), duration_ms: dur }
+        LineInput::whole(id, dur)
+    }
+    fn line_at(id: &str, idx: usize, dur: u64) -> LineInput {
+        LineInput { clip_id: id.into(), segment_index: idx, duration_ms: dur }
     }
 
     #[test]
@@ -232,16 +269,48 @@ mod tests {
         assert_eq!(items[0].timeline_duration_ms, 4_700);
     }
 
+    /// One story returning to the same clip for two different moments must get
+    /// two independent offsets. Keying on the clip alone silently gave the
+    /// second item the first one's start, showing the wrong footage under it.
     #[test]
     fn the_same_clip_can_appear_twice_at_different_moments() {
-        // A story may return to a clip for a different described moment.
-        let clips = [segment_of("a", Some(60_000), 0), segment_of("a", Some(60_000), 30_000)];
-        // Both lines reference clip "a"; the first match wins per line, so this
-        // documents the current limitation rather than pretending otherwise.
-        let items = plan(&clips[..1], &[line("a", 2_000)]);
-        assert_eq!(items[0].source_in_ms, 0);
-        let items = plan(&clips[1..], &[line("a", 2_000)]);
-        assert_eq!(items[0].source_in_ms, 30_000);
+        let clips = [
+            seg_at("a", 0, Some(60_000), 0),
+            seg_at("a", 3, Some(60_000), 30_000),
+            seg_at("b", 1, Some(20_000), 5_000),
+        ];
+        let lines = [
+            line_at("a", 3, 2_000), // the later moment first: story order, not clip order
+            line_at("b", 1, 2_000),
+            line_at("a", 0, 2_000), // back to the same clip, earlier moment
+        ];
+        let items = plan(&clips, &lines);
+
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].clip_id, "a");
+        assert_eq!(items[0].segment_index, 3);
+        assert_eq!(items[0].source_in_ms, 30_000, "second moment keeps its own offset");
+        assert_eq!(items[1].source_in_ms, 5_000);
+        assert_eq!(items[2].clip_id, "a");
+        assert_eq!(items[2].segment_index, 0);
+        assert_eq!(items[2].source_in_ms, 0, "first moment is unaffected by the other");
+
+        // And they still tile the timeline without gaps.
+        let mut expected = 0;
+        for item in &items {
+            assert_eq!(item.timeline_start_ms, expected);
+            expected += item.timeline_duration_ms;
+        }
+    }
+
+    /// A line whose segment has no matching clip entry must not silently borrow
+    /// another segment's offset.
+    #[test]
+    fn an_unmatched_segment_does_not_borrow_another_offset() {
+        let clips = [seg_at("a", 0, Some(60_000), 45_000)];
+        let items = plan(&clips, &[line_at("a", 7, 2_000)]);
+        assert_eq!(items[0].source_in_ms, 0, "no match means no offset, not the wrong one");
+        assert_eq!(items[0].segment_index, 7, "the line's own identity is preserved");
     }
 
     #[test]
