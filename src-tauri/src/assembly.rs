@@ -6,6 +6,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::ffmpeg::{self, FfmpegError, FfmpegInfo, FfmpegSettings, RenderItem, RenderSettings};
 use crate::project::{self, *};
+
 use crate::timeline::{self, ClipInput, LineInput};
 
 /// Distinct, widely separated colours so placeholder clips are told apart at a
@@ -94,10 +95,14 @@ pub struct ClipSpec {
 #[serde(rename_all = "camelCase")]
 pub struct VoicedSpec {
     pub clip_id: String,
+    #[serde(default)]
+    pub segment_index: usize,
     pub text: String,
     pub audio_path: String,
     pub duration_ms: u64,
     pub skipped: Vec<String>,
+    #[serde(default)]
+    pub edited: bool,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -316,6 +321,8 @@ pub async fn assembly_render(
     voice: String,
     created_at: String,
     updated_at: String,
+    video_id: Option<String>,
+    video_title: Option<String>,
 ) -> Result<AssembleResult, FfmpegError> {
     let info = ffmpeg::detect(&load_settings(&app))?;
     let dir = project_dir(&app, &project_id)?;
@@ -394,68 +401,115 @@ pub async fn assembly_render(
     ffmpeg::render_rough_cut(&info.ffmpeg, &render_items, &settings, &info.caps, &out)?;
 
     // --- manifest -----------------------------------------------------------
-    let project_clips: Vec<ProjectClip> = clips
-        .iter()
-        .map(|c| {
-            let path = c.source_path.as_ref().map(PathBuf::from);
-            // No media at all is still a placeholder slot; otherwise trust the
-            // flag the importer set.
-            let is_placeholder = path.is_none() || c.is_placeholder;
-            ProjectClip {
-                id: c.id.clone(),
-                source_path: path.as_ref().map(|p| project::relative_to(&dir, p)),
-                sha256: path.as_ref().filter(|p| p.is_file()).and_then(|p| project::sha256_file(p).ok()),
-                source_duration_ms: c.source_duration_ms,
-                description: c.description.clone(),
-                is_placeholder,
-            }
-        })
-        .collect();
-
-    let manifest = ProjectFile {
-        schema_version: SCHEMA_VERSION,
-        app: AppInfo {
-            slug: "raw-footage-real-story".into(),
-            version: env!("CARGO_PKG_VERSION").into(),
-        },
-        project: ProjectMeta {
-            id: project_id.clone(),
-            name: project_name,
-            created_at,
-            updated_at,
-        },
-        clips: project_clips,
-        script: ScriptSection {
-            model,
-            generated_at: chrono_stub(),
-            lines: voiced
-                .iter()
-                .map(|v| ScriptLineRecord { clip_id: v.clip_id.clone(), text: v.text.clone() })
-                .collect(),
-        },
-        audio: AudioSection {
-            voice,
-            sample_rate: crate::tts::SAMPLE_RATE,
-            lines: voiced
-                .iter()
-                .map(|v| AudioLineRecord {
-                    clip_id: v.clip_id.clone(),
-                    path: project::relative_to(&dir, Path::new(&v.audio_path)),
-                    duration_ms: v.duration_ms,
-                    skipped_words: v.skipped.clone(),
-                })
-                .collect(),
-        },
-        timeline: items.clone(),
-        render: RenderSection {
-            settings,
-            vcodec: "h264".into(),
-            acodec: "aac".into(),
-            output_path: Some(project::relative_to(&dir, &out)),
-        },
-    };
-
+    // The project manifest is the source of truth for the clip library, so this
+    // merges into it rather than overwriting: segment descriptions and other
+    // videos must survive a render.
     let manifest_path = dir.join("project.json");
+    let mut manifest = project::load(&manifest_path)
+        .unwrap_or_else(|_| ProjectFile::new(project_id.clone(), project_name.clone(), created_at.clone()));
+    manifest.project.name = project_name;
+    manifest.project.updated_at = updated_at;
+
+    for c in &clips {
+        let path = c.source_path.as_ref().map(PathBuf::from);
+        // No media at all is still a placeholder slot; otherwise trust the
+        // flag the importer set.
+        let is_placeholder = path.is_none() || c.is_placeholder;
+        let source_path = path.as_ref().map(|p| project::relative_to(&dir, p));
+        let sha256 = path
+            .as_ref()
+            .filter(|p| p.is_file())
+            .and_then(|p| project::sha256_file(p).ok());
+
+        match manifest.clips.iter_mut().find(|existing| existing.id == c.id) {
+            Some(existing) => {
+                // Never clobber segment descriptions the user has entered.
+                existing.source_path = source_path;
+                existing.sha256 = sha256;
+                existing.source_duration_ms = c.source_duration_ms;
+                existing.is_placeholder = is_placeholder;
+                existing.is_hdr = c.is_hdr.unwrap_or(existing.is_hdr);
+            }
+            None => manifest.clips.push(ProjectClip {
+                id: c.id.clone(),
+                source_path,
+                sha256,
+                source_duration_ms: c.source_duration_ms,
+                is_placeholder,
+                file_name: None,
+                thumbnail_path: None,
+                is_hdr: c.is_hdr.unwrap_or(false),
+                segments: if c.description.trim().is_empty() {
+                    Vec::new()
+                } else {
+                    vec![project::Segment {
+                        start_sec: 0.0,
+                        end_sec: c.source_duration_ms.unwrap_or(0) as f64 / 1000.0,
+                        text: c.description.clone(),
+                    }]
+                },
+            }),
+        }
+    }
+
+    let video_id = video_id.unwrap_or_else(|| "default".into());
+    let now = chrono_stub();
+    if manifest.video(&video_id).is_none() {
+        manifest.videos.push(VideoProject::new(
+            video_id.clone(),
+            video_title.clone().unwrap_or_else(|| "Untitled video".into()),
+            now.clone(),
+        ));
+    }
+    let existing_target = manifest
+        .video(&video_id)
+        .and_then(|v| v.script.as_ref())
+        .and_then(|s| s.word_count_target);
+    let video = manifest.video_mut(&video_id).expect("just inserted");
+    if let Some(t) = video_title {
+        video.title = t;
+    }
+    video.updated_at = now.clone();
+    video.selection = voiced
+        .iter()
+        .map(|v| SelectedSegment { clip_id: v.clip_id.clone(), segment_index: v.segment_index })
+        .collect();
+    video.script = Some(ScriptSection {
+        model,
+        generated_at: now,
+        lines: voiced
+            .iter()
+            .map(|v| ScriptLineRecord {
+                clip_id: v.clip_id.clone(),
+                segment_index: v.segment_index,
+                text: v.text.clone(),
+                edited: v.edited,
+            })
+            .collect(),
+        word_count_target: existing_target,
+    });
+    video.audio = Some(AudioSection {
+        voice,
+        sample_rate: crate::tts::SAMPLE_RATE,
+        lines: voiced
+            .iter()
+            .map(|v| AudioLineRecord {
+                clip_id: v.clip_id.clone(),
+                segment_index: v.segment_index,
+                path: project::relative_to(&dir, Path::new(&v.audio_path)),
+                duration_ms: v.duration_ms,
+                skipped_words: v.skipped.clone(),
+            })
+            .collect(),
+    });
+    video.timeline = items.clone();
+    video.render = Some(RenderSection {
+        settings,
+        vcodec: "h264".into(),
+        acodec: "aac".into(),
+        output_path: Some(project::relative_to(&dir, &out)),
+    });
+
     project::write_json(&manifest, &manifest_path)
         .map_err(|e| FfmpegError { code: "MANIFEST_WRITE_FAILED".into(), message: e.to_string() })?;
 

@@ -1,24 +1,34 @@
-//! The project file — the contract with the v2 web timeline editor.
+//! The project file — a clip library plus the videos cut from it.
 //!
-//! This is an interface between two codebases, so it is versioned from the
-//! start and documented in `docs/project-file.md`.
+//! Also the contract with the v2 web timeline editor, so it is versioned and
+//! documented in `docs/project-file.md`.
 //!
-//! The governing principle: **the timeline is stored explicitly, never
-//! derived**. If the editor had to re-run our reconciliation to know where
-//! things sit, any later change to that algorithm would silently move every
-//! previously exported project. Absolute computed timings make old projects
-//! immutable and correct forever.
+//! Two principles govern the shape:
+//!
+//! 1. **The timeline is stored explicitly, never derived.** If the editor
+//!    recomputed our reconciliation, any later change to those rules would
+//!    silently move every project already exported.
+//! 2. **A project is a library, not a video.** Footage is imported once and
+//!    described once; any number of videos can then be cut from it. Each video
+//!    owns its own selection, script, audio and render.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use crate::ffmpeg::RenderSettings;
 use crate::timeline::TimelineItem;
 
-/// Bump only for breaking changes. The editor refuses versions it predates.
-pub const SCHEMA_VERSION: u32 = 1;
+/// v2 introduced timestamped segments and multiple videos per project.
+///
+/// This is a deliberate breaking change from v1, which had one flat
+/// description per clip and one video per project. v1 had no users, and
+/// carrying a compatibility shim for a format nobody had written would have
+/// cost more than it saved. v1 files are migrated on load rather than rejected,
+/// so anything produced during development still opens.
+pub const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -27,7 +37,7 @@ pub struct AppInfo {
     pub version: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectMeta {
     pub id: String,
@@ -36,46 +46,105 @@ pub struct ProjectMeta {
     pub updated_at: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+/// A described moment inside a clip.
+///
+/// Segments are what later stages actually reason over: a story can pull the
+/// eight seconds of a plane landing without dragging in the ninety seconds of
+/// taxiing that follow it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ProjectClip {
-    pub id: String,
-    /// Relative to the project file, so a bundle relocates cleanly.
-    pub source_path: Option<String>,
-    /// Lets the editor detect media that moved or changed underneath it.
-    pub sha256: Option<String>,
-    pub source_duration_ms: Option<u64>,
-    pub description: String,
-    pub is_placeholder: bool,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ScriptLineRecord {
-    pub clip_id: String,
+pub struct Segment {
+    pub start_sec: f64,
+    pub end_sec: f64,
     pub text: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+impl Segment {
+    pub fn duration_ms(&self) -> u64 {
+        (((self.end_sec - self.start_sec).max(0.0)) * 1000.0).round() as u64
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectClip {
+    pub id: String,
+    /// Relative to the project file when inside it, absolute when referenced.
+    pub source_path: Option<String>,
+    pub sha256: Option<String>,
+    pub source_duration_ms: Option<u64>,
+    pub is_placeholder: bool,
+    #[serde(default)]
+    pub file_name: Option<String>,
+    #[serde(default)]
+    pub thumbnail_path: Option<String>,
+    #[serde(default)]
+    pub is_hdr: bool,
+    /// Ordered by `start_sec`. Empty until the clip has been described.
+    #[serde(default)]
+    pub segments: Vec<Segment>,
+}
+
+impl ProjectClip {
+    /// Everything said about this clip, for prompts that want one blob.
+    pub fn combined_text(&self) -> String {
+        self.segments
+            .iter()
+            .map(|s| s.text.trim())
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<_>>()
+            .join(". ")
+    }
+
+    pub fn is_described(&self) -> bool {
+        self.segments.iter().any(|s| !s.text.trim().is_empty())
+    }
+}
+
+/// One segment chosen for one video, in story order.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectedSegment {
+    pub clip_id: String,
+    /// Index into that clip's `segments`.
+    pub segment_index: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScriptLineRecord {
+    pub clip_id: String,
+    #[serde(default)]
+    pub segment_index: usize,
+    pub text: String,
+    /// True once the user has edited this line by hand, so regeneration can
+    /// warn before overwriting deliberate work.
+    #[serde(default)]
+    pub edited: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScriptSection {
     pub model: String,
     pub generated_at: String,
     pub lines: Vec<ScriptLineRecord>,
+    #[serde(default)]
+    pub word_count_target: Option<u32>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioLineRecord {
     pub clip_id: String,
+    #[serde(default)]
+    pub segment_index: usize,
     pub path: String,
     pub duration_ms: u64,
-    /// G2P misses carried through from stage 2, so the editor can flag lines
-    /// worth re-recording instead of rediscovering the problem.
     pub skipped_words: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioSection {
     pub voice: String,
@@ -83,7 +152,7 @@ pub struct AudioSection {
     pub lines: Vec<AudioLineRecord>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RenderSection {
     #[serde(flatten)]
@@ -93,17 +162,177 @@ pub struct RenderSection {
     pub output_path: Option<String>,
 }
 
+/// One video cut from the library.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoProject {
+    pub id: String,
+    pub title: String,
+    pub created_at: String,
+    pub updated_at: String,
+    /// The chosen segments, in the order the story wants them.
+    #[serde(default)]
+    pub selection: Vec<SelectedSegment>,
+    pub script: Option<ScriptSection>,
+    pub audio: Option<AudioSection>,
+    #[serde(default)]
+    pub timeline: Vec<TimelineItem>,
+    pub render: Option<RenderSection>,
+    /// Word -> phoneme or replacement text, for words the phonemiser cannot
+    /// pronounce. Lives per video because a correction is a creative choice
+    /// about this narration, not a fact about the footage.
+    #[serde(default)]
+    pub pronunciations: BTreeMap<String, String>,
+}
+
+impl VideoProject {
+    pub fn new(id: String, title: String, now: String) -> Self {
+        Self {
+            id,
+            title,
+            created_at: now.clone(),
+            updated_at: now,
+            selection: Vec::new(),
+            script: None,
+            audio: None,
+            timeline: Vec::new(),
+            render: None,
+            pronunciations: BTreeMap::new(),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectFile {
     pub schema_version: u32,
     pub app: AppInfo,
     pub project: ProjectMeta,
+    /// The clip library. Described once, reused by every video.
     pub clips: Vec<ProjectClip>,
-    pub script: ScriptSection,
-    pub audio: AudioSection,
-    pub timeline: Vec<TimelineItem>,
-    pub render: RenderSection,
+    #[serde(default)]
+    pub videos: Vec<VideoProject>,
+}
+
+impl ProjectFile {
+    pub fn new(id: String, name: String, now: String) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION,
+            app: AppInfo {
+                slug: "raw-footage-real-story".into(),
+                version: env!("CARGO_PKG_VERSION").into(),
+            },
+            project: ProjectMeta { id, name, created_at: now.clone(), updated_at: now },
+            clips: Vec::new(),
+            videos: Vec::new(),
+        }
+    }
+
+    pub fn segment_count(&self) -> usize {
+        self.clips.iter().map(|c| c.segments.len()).sum()
+    }
+
+    pub fn video(&self, id: &str) -> Option<&VideoProject> {
+        self.videos.iter().find(|v| v.id == id)
+    }
+
+    pub fn video_mut(&mut self, id: &str) -> Option<&mut VideoProject> {
+        self.videos.iter_mut().find(|v| v.id == id)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Loading, with migration from v1
+// ---------------------------------------------------------------------------
+
+/// Read a project, upgrading a v1 file in memory if needed.
+///
+/// v1 stored one flat `description` per clip and a single script/audio/timeline
+/// at project level. Both map cleanly onto v2: the description becomes a single
+/// segment spanning the whole clip, and the video becomes the project's first
+/// and only `VideoProject`.
+pub fn load(path: &Path) -> Result<ProjectFile, String> {
+    let raw = std::fs::read(path).map_err(|e| format!("read project: {e}"))?;
+    let value: serde_json::Value =
+        serde_json::from_slice(&raw).map_err(|e| format!("parse project: {e}"))?;
+
+    let version = value["schemaVersion"].as_u64().unwrap_or(0) as u32;
+    if version > SCHEMA_VERSION {
+        return Err(format!(
+            "This project was written by a newer version of the app (schema v{version}); \
+             this build understands up to v{SCHEMA_VERSION}."
+        ));
+    }
+    if version == SCHEMA_VERSION {
+        return serde_json::from_value(value).map_err(|e| format!("parse project: {e}"));
+    }
+    migrate_v1(value)
+}
+
+fn migrate_v1(value: serde_json::Value) -> Result<ProjectFile, String> {
+    let meta: ProjectMeta = serde_json::from_value(value["project"].clone())
+        .map_err(|e| format!("v1 project meta: {e}"))?;
+
+    let empty = vec![];
+    let clips = value["clips"].as_array().unwrap_or(&empty);
+    let mut out_clips = Vec::with_capacity(clips.len());
+
+    for c in clips {
+        let duration = c["sourceDurationMs"].as_u64();
+        let description = c["description"].as_str().unwrap_or("").trim().to_string();
+        // One segment spanning the whole clip preserves the v1 meaning exactly.
+        let segments = if description.is_empty() {
+            Vec::new()
+        } else {
+            vec![Segment {
+                start_sec: 0.0,
+                end_sec: duration.unwrap_or(0) as f64 / 1000.0,
+                text: description,
+            }]
+        };
+        out_clips.push(ProjectClip {
+            id: c["id"].as_str().unwrap_or_default().to_string(),
+            source_path: c["sourcePath"].as_str().map(str::to_string),
+            sha256: c["sha256"].as_str().map(str::to_string),
+            source_duration_ms: duration,
+            is_placeholder: c["isPlaceholder"].as_bool().unwrap_or(false),
+            file_name: None,
+            thumbnail_path: None,
+            is_hdr: false,
+            segments,
+        });
+    }
+
+    // The single v1 video, if it got as far as having a script.
+    let mut videos = Vec::new();
+    if value["script"].is_object() {
+        let mut video = VideoProject::new(
+            format!("{}-v1", meta.id),
+            "Untitled video".into(),
+            meta.created_at.clone(),
+        );
+        video.script = serde_json::from_value(value["script"].clone()).ok();
+        video.audio = serde_json::from_value(value["audio"].clone()).ok();
+        video.timeline = serde_json::from_value(value["timeline"].clone()).unwrap_or_default();
+        video.render = serde_json::from_value(value["render"].clone()).ok();
+        video.selection = video
+            .timeline
+            .iter()
+            .map(|t| SelectedSegment { clip_id: t.clip_id.clone(), segment_index: 0 })
+            .collect();
+        videos.push(video);
+    }
+
+    Ok(ProjectFile {
+        schema_version: SCHEMA_VERSION,
+        app: AppInfo {
+            slug: "raw-footage-real-story".into(),
+            version: env!("CARGO_PKG_VERSION").into(),
+        },
+        project: meta,
+        clips: out_clips,
+        videos,
+    })
 }
 
 pub fn sha256_file(path: &Path) -> std::io::Result<String> {
@@ -126,7 +355,11 @@ pub fn write_json(project: &ProjectFile, path: &Path) -> std::io::Result<()> {
     }
     let json = serde_json::to_string_pretty(project)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(path, json)
+    // Write-then-rename so an interrupted save cannot leave a truncated project
+    // behind — losing a described 300-clip library to a crash would be brutal.
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json)?;
+    std::fs::rename(&tmp, path)
 }
 
 fn add_dir_to_zip<W: Write + std::io::Seek>(
@@ -156,21 +389,16 @@ fn add_dir_to_zip<W: Write + std::io::Seek>(
 
 /// Self-contained `.zip` of the project: media, audio, render and manifest.
 ///
-/// This is the default export because it is the only form that round-trips —
-/// a manifest referencing media on the author's disk is useless to the editor.
-///
 /// Media is *referenced* while editing, not copied, so a working project.json
-/// can legitimately hold absolute paths to files anywhere on disk. Those files
-/// are copied in here and the manifest is rewritten as it goes, so the bundle
-/// always satisfies the "every path is relative" invariant the format promises,
-/// whatever state the working directory was in.
+/// can hold absolute paths to files anywhere on disk. Those files are copied in
+/// here and the manifest rewritten as it goes, so the bundle always satisfies
+/// the "every path is relative" invariant the format promises.
 pub fn write_bundle(project_dir: &Path, out_zip: &Path) -> std::io::Result<()> {
     if let Some(parent) = out_zip.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let file = std::fs::File::create(out_zip)?;
     let mut zip = zip::ZipWriter::new(file);
-    // Media is already compressed; storing avoids a pointless second pass.
     let opts = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
 
@@ -185,7 +413,7 @@ pub fn write_bundle(project_dir: &Path, out_zip: &Path) -> std::io::Result<()> {
                     let Some(src) = clip.source_path.clone() else { continue };
                     let p = Path::new(&src);
                     if !p.is_absolute() {
-                        continue; // already inside the project
+                        continue;
                     }
                     let name = p
                         .file_name()
@@ -196,14 +424,11 @@ pub fn write_bundle(project_dir: &Path, out_zip: &Path) -> std::io::Result<()> {
                         external.push((entry.clone(), p.to_path_buf()));
                         clip.source_path = Some(entry);
                     } else {
-                        // Media went missing; say so in the manifest rather than
-                        // shipping a path that resolves to nothing.
                         clip.source_path = None;
                     }
                 }
                 serde_json::to_vec_pretty(&manifest).unwrap_or(raw)
             }
-            // Unparseable manifest still gets bundled verbatim rather than lost.
             Err(_) => raw,
         }
     } else {
@@ -237,209 +462,4 @@ pub fn relative_to(base: &Path, path: &Path) -> String {
         .map(|c| c.as_os_str().to_string_lossy().to_string())
         .collect::<Vec<_>>()
         .join("/")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::timeline::{ClipInput, LineInput};
-
-    fn sample_project() -> ProjectFile {
-        let clips = [ClipInput { clip_id: "c0".into(), source_duration_ms: Some(9_000) }];
-        let lines = [LineInput { clip_id: "c0".into(), duration_ms: 2_000 }];
-        ProjectFile {
-            schema_version: SCHEMA_VERSION,
-            app: AppInfo { slug: "raw-footage-real-story".into(), version: "0.1.0".into() },
-            project: ProjectMeta {
-                id: "p1".into(),
-                name: "Test".into(),
-                created_at: "2026-08-10T00:00:00Z".into(),
-                updated_at: "2026-08-10T00:00:00Z".into(),
-            },
-            clips: vec![ProjectClip {
-                id: "c0".into(),
-                source_path: Some("clips/c0.mp4".into()),
-                sha256: None,
-                source_duration_ms: Some(9_000),
-                description: "harbour".into(),
-                is_placeholder: true,
-            }],
-            script: ScriptSection {
-                model: "qwen2.5:7b".into(),
-                generated_at: "2026-08-10T00:00:00Z".into(),
-                lines: vec![ScriptLineRecord { clip_id: "c0".into(), text: "The harbour.".into() }],
-            },
-            audio: AudioSection {
-                voice: "af_heart".into(),
-                sample_rate: 24_000,
-                lines: vec![AudioLineRecord {
-                    clip_id: "c0".into(),
-                    path: "audio/line-01.wav".into(),
-                    duration_ms: 2_000,
-                    skipped_words: vec!["Aqsa".into()],
-                }],
-            },
-            timeline: crate::timeline::plan(&clips, &lines),
-            render: RenderSection {
-                settings: RenderSettings::default(),
-                vcodec: "h264".into(),
-                acodec: "aac".into(),
-                output_path: Some("render/rough-cut.mp4".into()),
-            },
-        }
-    }
-
-    #[test]
-    fn round_trips_through_json() {
-        let original = sample_project();
-        let json = serde_json::to_string_pretty(&original).expect("serialize");
-        let back: ProjectFile = serde_json::from_str(&json).expect("deserialize");
-
-        assert_eq!(back.schema_version, SCHEMA_VERSION);
-        assert_eq!(back.timeline, original.timeline, "timeline must survive verbatim");
-        assert_eq!(back.audio.lines[0].skipped_words, vec!["Aqsa".to_string()]);
-        assert_eq!(back.render.settings.width, 1920);
-    }
-
-    #[test]
-    fn json_uses_camel_case_for_the_web_editor() {
-        let json = serde_json::to_string(&sample_project()).expect("serialize");
-        for key in [
-            "schemaVersion", "sourceDurationMs", "isPlaceholder", "skippedWords",
-            "timelineStartMs", "timelineDurationMs", "sourceInMs", "sourceOutMs", "holdMs",
-        ] {
-            assert!(json.contains(&format!("\"{key}\"")), "missing key {key} in {json}");
-        }
-        assert!(!json.contains("schema_version"), "snake_case leaked into the manifest");
-    }
-
-    #[test]
-    fn timeline_is_absolute_not_derived() {
-        // The editor must be able to place every item without recomputing.
-        let p = sample_project();
-        let item = &p.timeline[0];
-        assert_eq!(item.timeline_start_ms, 0);
-        assert_eq!(item.timeline_duration_ms, 2_300);
-        assert_eq!(item.source_out_ms, 2_300);
-        assert_eq!(format!("{:?}", item.fit), "Trimmed");
-    }
-
-    #[test]
-    fn relative_paths_use_forward_slashes() {
-        let base = Path::new("/tmp/proj");
-        let p = base.join("audio").join("line-01.wav");
-        assert_eq!(relative_to(base, &p), "audio/line-01.wav");
-    }
-
-    #[test]
-    fn bundle_contains_manifest_and_media() {
-        let dir = std::env::temp_dir().join("rfrs-bundle-test");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("audio")).unwrap();
-        std::fs::create_dir_all(dir.join("render")).unwrap();
-        write_json(&sample_project(), &dir.join("project.json")).unwrap();
-        std::fs::write(dir.join("audio/line-01.wav"), b"fake").unwrap();
-        std::fs::write(dir.join("render/rough-cut.mp4"), b"fake").unwrap();
-
-        let zip_path = dir.join("bundle.zip");
-        write_bundle(&dir, &zip_path).unwrap();
-
-        let f = std::fs::File::open(&zip_path).unwrap();
-        let mut archive = zip::ZipArchive::new(f).unwrap();
-        let names: Vec<String> = (0..archive.len())
-            .map(|i| archive.by_index(i).unwrap().name().to_string())
-            .collect();
-        println!("\n  bundle contains: {names:?}");
-        for expected in ["project.json", "audio/line-01.wav", "render/rough-cut.mp4"] {
-            assert!(names.contains(&expected.to_string()), "bundle missing {expected}");
-        }
-    }
-
-    /// Media is referenced while editing, so a working manifest holds absolute
-    /// paths. A bundle must not: it has to be openable on another machine.
-    #[test]
-    fn bundle_pulls_in_externally_referenced_media_and_rewrites_paths() {
-        let root = std::env::temp_dir().join("rfrs-external-test");
-        let _ = std::fs::remove_dir_all(&root);
-        let dir = root.join("project");
-        let elsewhere = root.join("Movies");
-        std::fs::create_dir_all(dir.join("audio")).unwrap();
-        std::fs::create_dir_all(&elsewhere).unwrap();
-
-        // A real clip living outside the project, as a referenced import would.
-        let external = elsewhere.join("holiday.mp4");
-        std::fs::write(&external, b"pretend this is video").unwrap();
-
-        let mut p = sample_project();
-        p.clips[0].source_path = Some(external.to_string_lossy().to_string());
-        p.clips[0].is_placeholder = false;
-        write_json(&p, &dir.join("project.json")).unwrap();
-        std::fs::write(dir.join("audio/line-01.wav"), b"fake").unwrap();
-
-        let zip_path = root.join("bundle.zip");
-        write_bundle(&dir, &zip_path).unwrap();
-
-        let f = std::fs::File::open(&zip_path).unwrap();
-        let mut archive = zip::ZipArchive::new(f).unwrap();
-        let names: Vec<String> = (0..archive.len())
-            .map(|i| archive.by_index(i).unwrap().name().to_string())
-            .collect();
-        println!("\n  bundle: {names:?}");
-
-        let copied = names.iter().find(|n| n.ends_with("holiday.mp4")).cloned();
-        assert!(copied.is_some(), "external media should be copied in: {names:?}");
-
-        let mut manifest_raw = String::new();
-        {
-            use std::io::Read;
-            archive.by_name("project.json").unwrap().read_to_string(&mut manifest_raw).unwrap();
-        }
-        let bundled: ProjectFile = serde_json::from_str(&manifest_raw).unwrap();
-        let path = bundled.clips[0].source_path.as_ref().expect("path present");
-        println!("  rewritten sourcePath: {path}");
-
-        assert!(!Path::new(path).is_absolute(), "bundle path must be relative, got {path}");
-        assert_eq!(Some(path.clone()), copied, "manifest must point at the copied entry");
-        // The timeline must survive the rewrite untouched.
-        assert_eq!(bundled.timeline, p.timeline);
-    }
-
-    /// Media that vanished before export should be reported as absent, not
-    /// shipped as a path that resolves to nothing.
-    #[test]
-    fn bundle_drops_paths_whose_media_is_missing() {
-        let dir = std::env::temp_dir().join("rfrs-missing-test");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-
-        let mut p = sample_project();
-        p.clips[0].source_path = Some("/nowhere/gone.mp4".into());
-        write_json(&p, &dir.join("project.json")).unwrap();
-
-        let zip_path = dir.join("bundle.zip");
-        write_bundle(&dir, &zip_path).unwrap();
-
-        let f = std::fs::File::open(&zip_path).unwrap();
-        let mut archive = zip::ZipArchive::new(f).unwrap();
-        let mut raw = String::new();
-        {
-            use std::io::Read;
-            archive.by_name("project.json").unwrap().read_to_string(&mut raw).unwrap();
-        }
-        let bundled: ProjectFile = serde_json::from_str(&raw).unwrap();
-        assert_eq!(bundled.clips[0].source_path, None, "dangling path should be cleared");
-    }
-
-    #[test]
-    fn hashes_are_stable_and_content_dependent() {
-        let dir = std::env::temp_dir().join("rfrs-hash-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let a = dir.join("a.bin");
-        std::fs::write(&a, b"hello").unwrap();
-        let h1 = sha256_file(&a).unwrap();
-        let h2 = sha256_file(&a).unwrap();
-        assert_eq!(h1, h2, "same content must hash the same");
-        std::fs::write(&a, b"hello!").unwrap();
-        assert_ne!(h1, sha256_file(&a).unwrap(), "changed content must hash differently");
-    }
 }

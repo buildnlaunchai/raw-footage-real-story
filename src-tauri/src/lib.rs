@@ -5,6 +5,8 @@ mod g2p;
 mod hdr_check;
 mod ollama;
 mod project;
+mod store;
+mod store_tests;
 mod resources;
 mod timeline;
 mod tts;
@@ -39,7 +41,12 @@ pub fn run() {
             assembly::assembly_import_media,
             assembly::assembly_consolidate_media,
             assembly::assembly_export_bundle,
-            assembly::assembly_export_project_only
+            assembly::assembly_export_project_only,
+            store::project_create,
+            store::project_save,
+            store::project_open,
+            store::project_list,
+            store::project_delete
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

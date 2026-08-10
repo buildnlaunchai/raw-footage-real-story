@@ -1,325 +1,226 @@
-import { useEffect, useState } from "react";
-import { ClipEditor } from "./components/ClipEditor";
-import { ScriptResult } from "./components/ScriptResult";
-import { VoiceoverPanel } from "./components/VoiceoverPanel";
-import { AssemblyPanel } from "./components/AssemblyPanel";
-import { FfmpegSetup } from "./components/FfmpegSetup";
-import { OLLAMA_MODEL } from "./config/ollama";
-import { generateScript, ScriptGenerationError } from "./lib/scriptGeneration";
-import { asOllamaError } from "./lib/ollama";
-import {
-  audioUrl,
-  generateVoiceover,
-  listVoices,
-  previewVoice,
-  type TtsProgress,
-  type VoiceInfo,
-  type VoicedLine,
-} from "./lib/voiceover";
-import {
-  detectFfmpeg,
-  importMedia,
-  consolidateMedia,
-  makePlaceholderClips,
-  renderRoughCut,
-  VIDEO_EXTENSIONS,
-  type AssembleResult,
-  type FfmpegInfo,
-  type ImportedMedia,
-  type RenderProgress,
-} from "./lib/assembly";
+import { useCallback, useEffect, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import type { Clip, ScriptLine } from "./lib/types";
+
+import { ProjectPicker } from "./components/ProjectPicker";
+import { SegmentEditor } from "./components/SegmentEditor";
+import {
+  createProject,
+  describedCount,
+  openProject,
+  saveProject,
+  totalSegments,
+  type ProjectClip,
+  type ProjectFile,
+} from "./lib/project";
+import type { Segment } from "./lib/segments";
+import { importMedia, VIDEO_EXTENSIONS, type ImportedMedia } from "./lib/assembly";
 import "./App.css";
 
-const newClip = (description = ""): Clip => ({
-  id: crypto.randomUUID(),
-  description,
-});
-
-const DEFAULT_VOICE = "af_heart";
-
 function App() {
-  const [clips, setClips] = useState<Clip[]>(() => [newClip(), newClip(), newClip()]);
-  const [script, setScript] = useState<ScriptLine[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [manifest, setManifest] = useState<ProjectFile | null>(null);
+  const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [elapsedMs, setElapsedMs] = useState<number | null>(null);
-
-  // One project id per app session; audio is written under it.
-  const [projectId] = useState(() => crypto.randomUUID());
-  const [voices, setVoices] = useState<VoiceInfo[]>([]);
-  const [voice, setVoice] = useState(DEFAULT_VOICE);
-  const [voiced, setVoiced] = useState<VoicedLine[] | null>(null);
-  const [ttsBusy, setTtsBusy] = useState(false);
-  const [previewing, setPreviewing] = useState(false);
-  const [progress, setProgress] = useState<TtsProgress | null>(null);
-  const [ttsError, setTtsError] = useState<string | null>(null);
-  const [ttsElapsedMs, setTtsElapsedMs] = useState<number | null>(null);
-
-  const [createdAt] = useState(() => new Date().toISOString());
-  const [ffmpeg, setFfmpeg] = useState<FfmpegInfo | null>(null);
-  const [assembly, setAssembly] = useState<AssembleResult | null>(null);
-  const [assemblyBusy, setAssemblyBusy] = useState(false);
-  const [makingPlaceholders, setMakingPlaceholders] = useState(false);
-  const [renderProgress, setRenderProgress] = useState<RenderProgress | null>(null);
-  const [assemblyError, setAssemblyError] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [rejected, setRejected] = useState<ImportedMedia[]>([]);
-  const [consolidating, setConsolidating] = useState(false);
+  const [dirty, setDirty] = useState(false);
+  const [savedAt, setSavedAt] = useState<string | null>(null);
 
-  const filled = clips.filter((c) => c.description.trim().length > 0).length;
+  const projectId = manifest?.project.id ?? null;
 
+  // --- project lifecycle ---------------------------------------------------
+
+  async function onCreate(name: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      const created = await createProject(name);
+      setManifest(created);
+      setSelectedClipId(null);
+      setDirty(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onOpen(id: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      const opened = await openProject(id);
+      setManifest(opened);
+      setSelectedClipId(opened.clips[0]?.id ?? null);
+      setDirty(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const onSave = useCallback(async () => {
+    if (!manifest) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await saveProject(manifest);
+      setDirty(false);
+      setSavedAt(new Date().toLocaleTimeString());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }, [manifest]);
+
+  // ⌘S is muscle memory for anyone who has ever lost work.
   useEffect(() => {
-    listVoices()
-      .then((list) => {
-        setVoices(list);
-        if (!list.some((v) => v.id === DEFAULT_VOICE) && list.length > 0) {
-          setVoice(list[0].id);
-        }
-      })
-      .catch((err) => setTtsError(err.message));
-    void detectFfmpeg().then(setFfmpeg);
-  }, []);
+    function onKey(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        void onSave();
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onSave]);
 
-  /** Turn probe results into clip fields. Rejected files never become clips. */
-  function applyImport(results: ImportedMedia[], targetClipId?: string) {
+  // --- clip import ---------------------------------------------------------
+
+  const applyImport = useCallback((results: ImportedMedia[]) => {
     setRejected(results.filter((r) => r.verdict === "rejected"));
     const usable = results.filter((r) => r.verdict !== "rejected");
     if (usable.length === 0) return;
 
-    const toClip = (r: ImportedMedia, base: Clip): Clip => ({
-      ...base,
-      sourcePath: r.sourcePath,
-      sourceDurationMs: r.info?.durationMs,
-      fileName: r.fileName,
-      thumbnailPath: r.thumbnailPath ?? undefined,
-      isPlaceholder: false,
-      isHdr: r.info?.isHdr ?? false,
-      warnings: r.reasons,
+    setManifest((m) => {
+      if (!m) return m;
+      const existing = new Set(m.clips.map((c) => c.sourcePath));
+      const added: ProjectClip[] = usable
+        // Re-importing the same file should not duplicate the clip.
+        .filter((r) => !existing.has(r.sourcePath))
+        .map((r) => ({
+          id: crypto.randomUUID(),
+          sourcePath: r.sourcePath,
+          sha256: null,
+          sourceDurationMs: r.info?.durationMs ?? null,
+          isPlaceholder: false,
+          fileName: r.fileName,
+          thumbnailPath: r.thumbnailPath,
+          isHdr: r.info?.isHdr ?? false,
+          segments: [],
+        }));
+      if (added.length === 0) return m;
+      return { ...m, clips: [...m.clips, ...added] };
     });
+    setDirty(true);
+  }, []);
 
-    setClips((cs) => {
-      if (targetClipId) {
-        return cs.map((c) => (c.id === targetClipId ? toClip(usable[0], c) : c));
+  const runImport = useCallback(
+    async (paths: string[]) => {
+      if (paths.length === 0 || !projectId) return;
+      setImporting(true);
+      setError(null);
+      try {
+        applyImport(await importMedia(paths, projectId));
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setImporting(false);
       }
-      // Fill empty clips first, then append — so "Add clips…" on a fresh
-      // project uses the three blank rows instead of stacking below them.
-      const next = [...cs];
-      const spare = next
-        .map((c, i) => ({ c, i }))
-        .filter(({ c }) => !c.sourcePath && c.description.trim() === "");
-      usable.forEach((r, n) => {
-        if (n < spare.length) {
-          next[spare[n].i] = toClip(r, spare[n].c);
-        } else {
-          next.push(toClip(r, newClip()));
-        }
-      });
-      return next;
-    });
-  }
+    },
+    [projectId, applyImport],
+  );
 
-  async function runImport(paths: string[], targetClipId?: string) {
-    if (paths.length === 0) return;
-    setImporting(true);
-    setAssemblyError(null);
-    try {
-      applyImport(await importMedia(paths, projectId), targetClipId);
-    } catch (err) {
-      setAssemblyError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setImporting(false);
-    }
-  }
-
-  async function pickFiles(multiple: boolean): Promise<string[]> {
+  async function pickFiles(): Promise<string[]> {
     const picked = await openDialog({
-      title: multiple ? "Add clips" : "Add video",
-      multiple,
+      title: "Add clips",
+      multiple: true,
       filters: [{ name: "Video", extensions: VIDEO_EXTENSIONS }],
     });
     if (!picked) return [];
     return Array.isArray(picked) ? picked : [picked];
   }
 
-  // Dropping a pile of clips onto the window is the natural gesture here.
   useEffect(() => {
     const unlisten = getCurrentWebview().onDragDropEvent((event) => {
-      if (event.payload.type === "drop") {
-        void runImport(event.payload.paths);
-      }
+      if (event.payload.type === "drop") void runImport(event.payload.paths);
     });
     return () => {
       void unlisten.then((f) => f());
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId]);
+  }, [runImport]);
 
-  async function onMakePlaceholders() {
-    if (!voiced) return;
-    setMakingPlaceholders(true);
-    setAssemblyError(null);
-    try {
-      const generated = await makePlaceholderClips(clips, voiced, projectId);
-      const byId = new Map(generated.map((g) => [g.clipId, g]));
-      setClips((cs) =>
-        cs.map((c) => {
-          const g = byId.get(c.id);
-          return g
-            ? { ...c, sourcePath: g.sourcePath, sourceDurationMs: g.sourceDurationMs }
-            : c;
-        }),
-      );
-    } catch (err) {
-      setAssemblyError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setMakingPlaceholders(false);
-    }
+  // --- segment editing -----------------------------------------------------
+
+  const onChangeSegments = useCallback((clipId: string, segments: Segment[]) => {
+    setManifest((m) =>
+      m ? { ...m, clips: m.clips.map((c) => (c.id === clipId ? { ...c, segments } : c)) } : m,
+    );
+    setDirty(true);
+  }, []);
+
+  // --- render --------------------------------------------------------------
+
+  if (!manifest) {
+    return (
+      <main className="app">
+        <header className="masthead">
+          <p className="eyebrow">Build &amp; Launch AI</p>
+          <h1>Raw Footage, Real Story</h1>
+          <p className="lede">
+            Bring in a trip’s worth of footage, describe what’s in it, and cut as
+            many videos from it as you like. Everything runs on this machine.
+          </p>
+        </header>
+        <ProjectPicker onCreate={onCreate} onOpen={onOpen} busy={busy} error={error} />
+      </main>
+    );
   }
 
-  async function onConsolidate() {
-    setConsolidating(true);
-    setAssemblyError(null);
-    try {
-      const moved = await consolidateMedia(clips, projectId);
-      const byId = new Map(moved.map((m) => [m.clipId, m.sourcePath]));
-      setClips((cs) =>
-        cs.map((c) => (byId.has(c.id) ? { ...c, sourcePath: byId.get(c.id) } : c)),
-      );
-    } catch (err) {
-      setAssemblyError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setConsolidating(false);
-    }
-  }
-
-  async function onRender() {
-    if (!voiced) return;
-    setAssemblyBusy(true);
-    setAssemblyError(null);
-    setRenderProgress(null);
-    try {
-      const result = await renderRoughCut(clips, voiced, {
-        projectId,
-        projectName: "Untitled project",
-        model: OLLAMA_MODEL,
-        voice,
-        createdAt,
-        onProgress: setRenderProgress,
-      });
-      setAssembly(result);
-    } catch (err) {
-      setAssemblyError(err instanceof Error ? err.message : String(err));
-      setAssembly(null);
-    } finally {
-      setAssemblyBusy(false);
-      setRenderProgress(null);
-    }
-  }
-
-  async function onGenerate() {
-    setBusy(true);
-    setError(null);
-    const started = performance.now();
-    try {
-      const result = await generateScript(clips);
-      setScript(result);
-      setElapsedMs(performance.now() - started);
-      // The old audio belongs to the old script.
-      setVoiced(null);
-      setTtsElapsedMs(null);
-    } catch (err) {
-      setError(
-        err instanceof ScriptGenerationError
-          ? err.message
-          : asOllamaError(err).message,
-      );
-      setScript(null);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function onGenerateVoiceover() {
-    if (!script) return;
-    setTtsBusy(true);
-    setTtsError(null);
-    setProgress({ done: 0, total: script.length, clipId: "" });
-    const started = performance.now();
-    try {
-      const result = await generateVoiceover(script, {
-        voice,
-        projectId,
-        onProgress: setProgress,
-      });
-      setVoiced(result);
-      setTtsElapsedMs(performance.now() - started);
-      setAssembly(null);
-    } catch (err) {
-      setTtsError(err instanceof Error ? err.message : String(err));
-      setVoiced(null);
-    } finally {
-      setTtsBusy(false);
-      setProgress(null);
-    }
-  }
-
-  async function onPreview() {
-    setPreviewing(true);
-    setTtsError(null);
-    try {
-      const sample = await previewVoice(voice);
-      await new Audio(audioUrl(sample.audioPath)).play();
-    } catch (err) {
-      setTtsError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setPreviewing(false);
-    }
-  }
+  const described = describedCount(manifest.clips);
+  const segments = totalSegments(manifest.clips);
 
   return (
-    <main className="app">
+    <main className="app app-wide">
       <header className="masthead">
-        <p className="eyebrow">Build &amp; Launch AI</p>
-        <h1>Raw Footage, Real Story</h1>
+        <p className="eyebrow">
+          <button
+            type="button"
+            className="link-button"
+            onClick={() => {
+              setManifest(null);
+              setRejected([]);
+            }}
+          >
+            ← Projects
+          </button>
+        </p>
+        <h1>{manifest.project.name}</h1>
         <p className="lede">
-          Describe your clips and a local model writes the narration, then speaks
-          it. Nothing leaves this machine.
+          {manifest.clips.length} clip{manifest.clips.length === 1 ? "" : "s"} · {segments}{" "}
+          segment{segments === 1 ? "" : "s"} · {described} described
         </p>
       </header>
 
-      <ClipEditor
-        clips={clips}
-        disabled={busy || ttsBusy}
-        importing={importing}
-        onAdd={() => setClips((cs) => [...cs, newClip()])}
-        onRemove={(id) => setClips((cs) => cs.filter((c) => c.id !== id))}
-        onChange={(id, description) =>
-          setClips((cs) => cs.map((c) => (c.id === id ? { ...c, description } : c)))
-        }
-        onImportClips={async () => runImport(await pickFiles(true))}
-        onAddMedia={async (id) => runImport(await pickFiles(false), id)}
-        onClearMedia={(id) =>
-          setClips((cs) =>
-            cs.map((c) =>
-              c.id === id
-                ? {
-                    ...c,
-                    sourcePath: undefined,
-                    sourceDurationMs: undefined,
-                    fileName: undefined,
-                    thumbnailPath: undefined,
-                    isPlaceholder: undefined,
-                    isHdr: undefined,
-                    warnings: undefined,
-                  }
-                : c,
-            ),
-          )
-        }
-      />
+      <div className="actions sticky-actions">
+        <button type="button" className="primary-button" onClick={onSave} disabled={busy || !dirty}>
+          {busy ? "Saving…" : dirty ? "Save project" : "Saved"}
+        </button>
+        <span className="hint">
+          {dirty ? "Unsaved changes" : savedAt ? `Saved at ${savedAt}` : "Up to date"} ·{" "}
+          <kbd>⌘S</kbd>
+        </span>
+      </div>
+
+      {error && (
+        <div className="error" role="alert">
+          <strong>Something went wrong.</strong>
+          <span>{error}</span>
+        </div>
+      )}
 
       {rejected.length > 0 && (
         <div className="error" role="alert">
@@ -336,92 +237,18 @@ function App() {
         </div>
       )}
 
-      <div className="actions">
-        <button
-          type="button"
-          className="primary-button"
-          onClick={onGenerate}
-          disabled={busy || ttsBusy || filled === 0}
-        >
-          {busy ? "Writing script…" : "Generate script"}
-        </button>
-        <span className="hint">
-          {filled === 0
-            ? "Describe at least one clip"
-            : `${filled} clip${filled === 1 ? "" : "s"} · ${OLLAMA_MODEL}`}
-        </span>
-      </div>
-
-      {error && (
-        <div className="error" role="alert">
-          <strong>Couldn’t generate the script.</strong>
-          <span>{error}</span>
-        </div>
-      )}
-
-      {busy && (
-        <p className="working" role="status">
-          Running {OLLAMA_MODEL} locally — this takes a few seconds.
-        </p>
-      )}
-
-      {script && !busy && (
-        <ScriptResult
-          clips={clips}
-          script={script}
-          model={OLLAMA_MODEL}
-          elapsedMs={elapsedMs}
-        />
-      )}
-
-      {script && !busy && (
-        <VoiceoverPanel
-          clips={clips}
-          voices={voices}
-          voice={voice}
-          voiced={voiced}
-          busy={ttsBusy}
-          previewing={previewing}
-          progress={progress}
-          error={ttsError}
-          elapsedMs={ttsElapsedMs}
-          onSelectVoice={setVoice}
-          onPreview={onPreview}
-          onGenerate={onGenerateVoiceover}
-        />
-      )}
-
-      {voiced && !ttsBusy && (
-        <FfmpegSetup
-          info={ffmpeg}
-          hasHdrClips={clips.some((c) => c.isHdr)}
-          onFound={setFfmpeg}
-          onRecheck={async () => setFfmpeg(await detectFfmpeg())}
-        />
-      )}
-
-      {voiced && !ttsBusy && ffmpeg && (
-        <AssemblyPanel
-          clips={clips}
-          ffmpeg={ffmpeg}
-          result={assembly}
-          busy={assemblyBusy}
-          progress={renderProgress}
-          error={assemblyError}
-          hasPlaceholders={clips.some((c) => c.sourcePath)}
-          makingPlaceholders={makingPlaceholders}
-          projectId={projectId}
-          onMakePlaceholders={onMakePlaceholders}
-          onRender={onRender}
-          onConsolidate={onConsolidate}
-          consolidating={consolidating}
-          hasExternalMedia={clips.some((c) => c.sourcePath && !c.isPlaceholder)}
-        />
-      )}
+      <SegmentEditor
+        clips={manifest.clips}
+        selectedId={selectedClipId}
+        importing={importing}
+        onSelect={setSelectedClipId}
+        onChangeSegments={onChangeSegments}
+        onImportClips={async () => runImport(await pickFiles())}
+      />
 
       <footer className="footer">
-        <span className="badge">Stage 3 of 4</span>
-        <p>Script, voiceover and rough cut. Real video upload comes next.</p>
+        <span className="badge">Stage A</span>
+        <p>Clip library and segment descriptions. Story ideas and script come next.</p>
       </footer>
     </main>
   );
