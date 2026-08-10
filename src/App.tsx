@@ -391,8 +391,10 @@ function App() {
         />
       )}
 
-      {voiced && !ttsBusy && !ffmpeg && (
+      {voiced && !ttsBusy && (
         <FfmpegSetup
+          info={ffmpeg}
+          hasHdrClips={clips.some((c) => c.isHdr)}
           onFound={setFfmpeg}
           onRecheck={async () => setFfmpeg(await detectFfmpeg())}
         />
