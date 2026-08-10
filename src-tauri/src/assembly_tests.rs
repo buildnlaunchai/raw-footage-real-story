@@ -395,6 +395,83 @@ fn handles_awkward_sources_and_normalises_them() {
     }
 }
 
+/// Automatic discovery should not settle for a build that cannot tone-map HDR
+/// when a capable one is installed.
+///
+/// Skips unless the machine actually has both kinds, since that is the only
+/// state where the preference is observable.
+#[test]
+fn auto_detection_prefers_a_zscale_capable_build() {
+    let Ok(auto) = ffmpeg::detect(&FfmpegSettings::default()) else {
+        eprintln!("no ffmpeg available; skipping");
+        return;
+    };
+
+    // Is there a capable build anywhere? Check the ffmpeg-full locations that
+    // are keg-only and therefore never on PATH.
+    let capable_exists = [
+        "/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg",
+        "/usr/local/opt/ffmpeg-full/bin/ffmpeg",
+    ]
+    .iter()
+    .any(|p| std::path::Path::new(p).is_file());
+
+    println!("\n  auto-detected: {} (zscale={})", auto.ffmpeg, auto.caps.zscale);
+    if !capable_exists {
+        eprintln!("  no zscale-capable build installed; preference not observable, skipping");
+        return;
+    }
+    assert!(
+        auto.caps.zscale,
+        "a zscale-capable ffmpeg is installed but detection chose {} without it",
+        auto.ffmpeg
+    );
+}
+
+/// An explicit choice is used as-is. Substituting a different binary than the
+/// one a user named would be worse than the limitation it works around.
+#[test]
+fn explicit_choice_is_never_overridden_by_a_more_capable_build() {
+    // Find a build WITHOUT zscale to name explicitly.
+    let limited = ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"]
+        .iter()
+        .map(std::path::Path::new)
+        .find(|p| {
+            p.is_file()
+                && std::process::Command::new(p)
+                    .arg("-filters")
+                    .output()
+                    .map(|o| !String::from_utf8_lossy(&o.stdout).contains(" zscale "))
+                    .unwrap_or(false)
+        });
+    let Some(limited) = limited else {
+        eprintln!("no zscale-less ffmpeg to pin; skipping");
+        return;
+    };
+
+    let settings = FfmpegSettings {
+        ffmpeg_path: Some(limited.to_string_lossy().to_string()),
+        ffprobe_path: None,
+    };
+    let info = ffmpeg::detect(&settings).expect("detect with explicit path");
+    println!(
+        "\n  asked for : {}\n  got       : {} (zscale={})",
+        limited.display(), info.ffmpeg, info.caps.zscale
+    );
+
+    assert_eq!(
+        info.ffmpeg,
+        limited.to_string_lossy(),
+        "explicit choice must be honoured verbatim"
+    );
+    // ...and the limitation surfaces through caps rather than being papered over.
+    assert!(!info.caps.zscale, "the limitation should still be reported");
+
+    // ffprobe must come from the same install, not a different one.
+    let same_dir = std::path::Path::new(&info.ffprobe).parent() == limited.parent();
+    assert!(same_dir, "ffprobe {} should sit beside the chosen ffmpeg", info.ffprobe);
+}
+
 #[test]
 fn probe_reads_real_media_properties() {
     let Some(fx) = Fixture::new("probe") else {

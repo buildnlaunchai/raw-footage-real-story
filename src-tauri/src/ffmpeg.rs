@@ -73,8 +73,18 @@ pub struct FfmpegSettings {
 /// from Finder inherits a minimal `PATH` that excludes Homebrew entirely. A
 /// PATH-only lookup therefore works perfectly under `tauri dev` and fails for
 /// every real user — which presents as "the app is broken", not "config missing".
+/// ffmpeg-full is keg-only, so Homebrew never links it into `bin` and it can
+/// never appear on `PATH`. Without its `opt` path listed here a user could
+/// install it on our own advice, hit Re-check, and see nothing change.
 #[cfg(target_os = "macos")]
-const EXTRA_DIRS: &[&str] = &["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/opt/local/bin"];
+const EXTRA_DIRS: &[&str] = &[
+    "/opt/homebrew/opt/ffmpeg-full/bin",
+    "/usr/local/opt/ffmpeg-full/bin",
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/usr/bin",
+    "/opt/local/bin",
+];
 #[cfg(target_os = "windows")]
 const EXTRA_DIRS: &[&str] = &[
     r"C:\ffmpeg\bin",
@@ -97,46 +107,88 @@ fn is_runnable(path: &Path) -> bool {
             .unwrap_or(false)
 }
 
-/// Resolution order: explicit env override, then a path the user chose in the
-/// setup screen, then `PATH`, then well-known install locations.
-fn resolve(stem: &str, env_key: &str, saved: Option<&String>) -> Option<PathBuf> {
+/// A path the user named: `FFMPEG_PATH`, or the binary chosen in the setup
+/// screen. Deliberately separate from automatic discovery, because an explicit
+/// choice is never second-guessed.
+fn resolve_explicit(env_key: &str, saved: Option<&String>) -> Option<PathBuf> {
     if let Ok(p) = std::env::var(env_key) {
         let p = PathBuf::from(p);
         if is_runnable(&p) {
             return Some(p);
         }
     }
-    if let Some(p) = saved.map(PathBuf::from) {
-        if is_runnable(&p) {
-            return Some(p);
+    let p = PathBuf::from(saved?);
+    is_runnable(&p).then_some(p)
+}
+
+/// Every place we look, in order, de-duplicated.
+fn candidates(stem: &str) -> Vec<PathBuf> {
+    let exe = exe_name(stem);
+    let mut out: Vec<PathBuf> = Vec::new();
+    let mut push = |p: PathBuf| {
+        if !out.contains(&p) {
+            out.push(p);
         }
-    }
+    };
     if let Ok(path) = std::env::var("PATH") {
         for dir in std::env::split_paths(&path) {
-            let candidate = dir.join(exe_name(stem));
-            if is_runnable(&candidate) {
-                return Some(candidate);
-            }
+            push(dir.join(&exe));
         }
     }
     for dir in EXTRA_DIRS {
-        let candidate = Path::new(dir).join(exe_name(stem));
-        if is_runnable(&candidate) {
+        push(Path::new(dir).join(&exe));
+    }
+    out
+}
+
+fn resolve_auto(stem: &str) -> Option<PathBuf> {
+    candidates(stem).into_iter().find(|c| is_runnable(c))
+}
+
+/// Find ffmpeg, preferring a build that can actually tone-map HDR.
+///
+/// An explicit choice always wins outright — silently substituting a different
+/// binary than the one a user named would be worse than the problem it solves.
+/// A limited explicit choice is reported through [`FfmpegCaps`] instead.
+///
+/// For automatic discovery only, a zscale-capable build is preferred. On macOS
+/// the common case is Homebrew's `ffmpeg` on PATH (no zscale) alongside
+/// keg-only `ffmpeg-full` (zscale), and picking the former means every HDR clip
+/// silently loses its colour.
+fn resolve_ffmpeg(saved: Option<&String>) -> Option<PathBuf> {
+    if let Some(explicit) = resolve_explicit("FFMPEG_PATH", saved) {
+        return Some(explicit);
+    }
+
+    let mut first_runnable: Option<PathBuf> = None;
+    for candidate in candidates("ffmpeg") {
+        if !is_runnable(&candidate) {
+            continue;
+        }
+        // Short-circuit: the very first thing found is usually already right,
+        // and then this costs one extra probe total.
+        if probe_caps(&candidate).zscale {
             return Some(candidate);
         }
+        if first_runnable.is_none() {
+            first_runnable = Some(candidate);
+        }
     }
-    None
+    first_runnable
 }
 
 pub fn detect(settings: &FfmpegSettings) -> Result<FfmpegInfo, FfmpegError> {
-    let ffmpeg = resolve("ffmpeg", "FFMPEG_PATH", settings.ffmpeg_path.as_ref()).ok_or_else(
-        || FfmpegError::new("FFMPEG_NOT_FOUND", "Could not find a working ffmpeg binary."),
-    )?;
-    // ffprobe usually sits beside ffmpeg; prefer that before searching again.
+    let ffmpeg = resolve_ffmpeg(settings.ffmpeg_path.as_ref()).ok_or_else(|| {
+        FfmpegError::new("FFMPEG_NOT_FOUND", "Could not find a working ffmpeg binary.")
+    })?;
+    // ffprobe must come from the same install as the chosen ffmpeg, so the
+    // sibling is tried first — a mismatched pair can disagree about what a file
+    // even contains.
     let sibling = ffmpeg.parent().map(|d| d.join(exe_name("ffprobe")));
     let ffprobe = sibling
         .filter(|p| is_runnable(p))
-        .or_else(|| resolve("ffprobe", "FFPROBE_PATH", settings.ffprobe_path.as_ref()))
+        .or_else(|| resolve_explicit("FFPROBE_PATH", settings.ffprobe_path.as_ref()))
+        .or_else(|| resolve_auto("ffprobe"))
         .ok_or_else(|| {
             FfmpegError::new(
                 "FFPROBE_NOT_FOUND",
