@@ -2,6 +2,7 @@ mod assembly;
 mod assembly_tests;
 mod ffmpeg;
 mod g2p;
+mod hdr_check;
 mod ollama;
 mod project;
 mod resources;
