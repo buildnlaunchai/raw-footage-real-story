@@ -213,6 +213,188 @@ fn rotation_survives_filter_complex() {
     );
 }
 
+/// Shell out for sources `make_placeholder` can't express — other containers,
+/// other codecs, an audio track.
+fn generate(ffmpeg: &str, out: &std::path::Path, args: &[&str]) {
+    let mut cmd = std::process::Command::new(ffmpeg);
+    cmd.args(["-v", "error", "-y"]).args(args).arg(out);
+    let status = cmd.status().expect("spawn ffmpeg");
+    assert!(status.success(), "could not generate {}", out.display());
+}
+
+/// Heterogeneous real-world-ish footage, validated and then assembled together.
+///
+/// The point is the mixture: different containers, codecs, resolutions, aspect
+/// ratios and frame rates in a single render. Normalisation either holds for
+/// all of them or the rough cut is broken in a way one uniform source would
+/// never reveal.
+#[test]
+fn handles_awkward_sources_and_normalises_them() {
+    let Some(fx) = Fixture::new("awkward") else {
+        eprintln!("ffmpeg not available; skipping");
+        return;
+    };
+    let caps = ffmpeg::FfmpegCaps { zscale: true, tonemap: true };
+
+    struct Case {
+        name: &'static str,
+        file: &'static str,
+        args: Vec<&'static str>,
+        expect_warning: Option<&'static str>,
+    }
+
+    let cases = vec![
+        Case {
+            name: "4K 60fps",
+            file: "4k60.mp4",
+            args: vec!["-f", "lavfi", "-i", "color=0x2244AA:s=3840x2160:r=60:d=2",
+                       "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-t", "2"],
+            expect_warning: Some("large"),
+        },
+        Case {
+            name: "silent 720p",
+            file: "noaudio.mp4",
+            args: vec!["-f", "lavfi", "-i", "color=0x44AA22:s=1280x720:r=30:d=2",
+                       "-c:v", "libx264", "-pix_fmt", "yuv420p", "-t", "2"],
+            expect_warning: Some("No audio"),
+        },
+        Case {
+            name: "720p with audio",
+            file: "withaudio.mp4",
+            args: vec!["-f", "lavfi", "-i", "color=0xAA4422:s=1280x720:r=30:d=2",
+                       "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+                       "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-t", "2"],
+            expect_warning: None,
+        },
+        Case {
+            name: "AVI / mpeg4 / 4:3",
+            file: "old.avi",
+            args: vec!["-f", "lavfi", "-i", "color=0xAA22AA:s=640x480:r=25:d=2",
+                       "-c:v", "mpeg4", "-vtag", "DIVX", "-t", "2"],
+            expect_warning: None,
+        },
+        Case {
+            name: "Matroska",
+            file: "clip.mkv",
+            args: vec!["-f", "lavfi", "-i", "color=0x22AAAA:s=1920x1080:r=30:d=2",
+                       "-c:v", "libx264", "-pix_fmt", "yuv420p", "-t", "2"],
+            expect_warning: None,
+        },
+        Case {
+            name: "native portrait",
+            file: "portrait.mp4",
+            args: vec!["-f", "lavfi", "-i", "color=0xAAAA22:s=1080x1920:r=30:d=2",
+                       "-c:v", "libx264", "-pix_fmt", "yuv420p", "-t", "2"],
+            expect_warning: None,
+        },
+        Case {
+            name: "120fps",
+            file: "highfps.mp4",
+            args: vec!["-f", "lavfi", "-i", "color=0xFF00FF:s=1280x720:r=120:d=2",
+                       "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-t", "2"],
+            expect_warning: Some("fps"),
+        },
+    ];
+
+    println!("\n  validation:");
+    let mut sources = Vec::new();
+    for case in &cases {
+        let path = fx.dir.join(case.file);
+        generate(&fx.ffmpeg, &path, &case.args);
+
+        let check = ffmpeg::check_media(&fx.ffprobe, &path, &caps);
+        let info = check.info.clone().expect("probe should succeed");
+        println!(
+            "    {:<18} {}x{} {} {:.0}fps audio={} -> {:?} {:?}",
+            case.name, info.width, info.height, info.codec, info.fps,
+            info.has_audio, check.verdict, check.reasons
+        );
+
+        assert_ne!(
+            check.verdict, ffmpeg::MediaVerdict::Rejected,
+            "{} should be usable", case.name
+        );
+        if let Some(fragment) = case.expect_warning {
+            assert!(
+                check.reasons.iter().any(|r| r.contains(fragment)),
+                "{} should warn about {fragment:?}, got {:?}", case.name, check.reasons
+            );
+        }
+        sources.push((path, info));
+    }
+
+    // Audio detection must actually discriminate, not just always say false.
+    let with_audio = &sources[2].1;
+    let without_audio = &sources[1].1;
+    assert!(with_audio.has_audio, "sine source should report an audio track");
+    assert!(!without_audio.has_audio, "silent source should report none");
+
+    // --- assemble every one of them into a single cut -----------------------
+    let lines: Vec<LineInput> = sources
+        .iter()
+        .enumerate()
+        .map(|(i, _)| LineInput {
+            clip_id: format!("c{i}"),
+            duration_ms: 1_200 + (i as u64 * 200),
+        })
+        .collect();
+    let clips: Vec<ClipInput> = sources
+        .iter()
+        .enumerate()
+        .map(|(i, (_, info))| ClipInput {
+            clip_id: format!("c{i}"),
+            source_duration_ms: Some(info.duration_ms),
+        })
+        .collect();
+
+    let items = timeline::plan(&clips, &lines);
+    let settings = RenderSettings { width: 1920, height: 1080, fps: 30 };
+
+    let mut render_items = Vec::new();
+    for (i, item) in items.iter().enumerate() {
+        let audio = fx.dir.join(format!("a{i}.wav"));
+        tts::write_wav(&audio, &vec![0f32; (lines[i].duration_ms as usize * 24_000) / 1000])
+            .expect("wav");
+        render_items.push(RenderItem {
+            video: sources[i].0.clone(),
+            audio,
+            item: item.clone(),
+            is_hdr: false,
+        });
+    }
+
+    let out = fx.dir.join("mixed.mp4");
+    ffmpeg::render_rough_cut(&fx.ffmpeg, &render_items, &settings, &caps, &out)
+        .expect("mixed-source render should succeed");
+
+    let expected = timeline::total_duration_ms(&items);
+    let actual = ffmpeg::probe_duration_ms(&fx.ffprobe, &out).expect("probe");
+    let drift = (actual as i64 - expected as i64).abs();
+    println!("\n  assembled {} sources: expected {expected}ms, got {actual}ms (drift {drift}ms)",
+             sources.len());
+    assert!(drift <= 200, "timeline drifted {drift}ms across mixed sources");
+
+    // Everything must land in one normalised format regardless of what went in.
+    let final_info = ffmpeg::probe_media(&fx.ffprobe, &out).expect("probe output");
+    assert_eq!((final_info.width, final_info.height), (1920, 1080));
+    assert_eq!(final_info.codec, "h264");
+    assert!(final_info.has_audio, "narration track must be present");
+    assert!((final_info.fps - 30.0).abs() < 0.5, "fps {}", final_info.fps);
+
+    // The 4:3 and portrait sources must be padded, never cropped: a letterboxed
+    // frame has black at the edge where a cropped one would still show content.
+    for (idx, label) in [(3usize, "4:3 AVI"), (5, "portrait")] {
+        let mid = items[idx].timeline_start_ms + items[idx].timeline_duration_ms / 2;
+        let edge = ffmpeg::frame_rgb_region(&fx.ffmpeg, &out, mid, 0, 0, 60, 1080).expect("edge");
+        let centre = ffmpeg::frame_rgb_region(&fx.ffmpeg, &out, mid, 900, 440, 120, 200)
+            .expect("centre");
+        let bright = |c: (u8, u8, u8)| c.0 as u32 + c.1 as u32 + c.2 as u32;
+        println!("    {label}: edge rgb{edge:?} centre rgb{centre:?}");
+        assert!(bright(edge) < 40, "{label} should be pillarboxed, edge rgb{edge:?}");
+        assert!(bright(centre) > 60, "{label} centre should hold picture, rgb{centre:?}");
+    }
+}
+
 #[test]
 fn probe_reads_real_media_properties() {
     let Some(fx) = Fixture::new("probe") else {
