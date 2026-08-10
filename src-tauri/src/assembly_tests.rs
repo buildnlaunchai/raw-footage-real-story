@@ -102,11 +102,12 @@ fn assembles_a_rough_cut_with_correct_order_and_timing() {
         let samples = vec![0f32; (lines[i].duration_ms as usize * 24_000) / 1000];
         tts::write_wav(&audio, &samples).expect("silence wav");
 
-        render_items.push(RenderItem { video, audio, item: item.clone() });
+        render_items.push(RenderItem { video, audio, item: item.clone(), is_hdr: false });
     }
 
     let out = fx.dir.join("rough-cut.mp4");
-    ffmpeg::render_rough_cut(&fx.ffmpeg, &render_items, &settings, &out).expect("render");
+    ffmpeg::render_rough_cut(&fx.ffmpeg, &render_items, &settings, &ffmpeg::FfmpegCaps::default(), &out)
+        .expect("render");
     assert!(out.is_file(), "output file should exist");
 
     // --- duration -----------------------------------------------------------
@@ -141,6 +142,149 @@ fn assembles_a_rough_cut_with_correct_order_and_timing() {
     println!("  held frame at {after_source}ms: rgb{rgb:?} -> {}", nearest(rgb));
 }
 
+/// Locks in the behaviour the render pipeline depends on: ffmpeg applies the
+/// display matrix on decode, and that survives `filter_complex`.
+///
+/// If a future ffmpeg changes this, every portrait phone clip renders sideways
+/// — silently. The test synthesises a landscape source, stamps a 90° display
+/// matrix on it, and pushes it through the real filter chain. Correct handling
+/// makes the content portrait, which our 16:9 letterbox turns into black
+/// pillarbox bars; ignoring the rotation leaves the frame full-width red.
+#[test]
+fn rotation_survives_filter_complex() {
+    let Some(fx) = Fixture::new("rotation") else {
+        eprintln!("ffmpeg not available; skipping");
+        return;
+    };
+
+    let src = fx.dir.join("landscape.mp4");
+    ffmpeg::make_placeholder(&fx.ffmpeg, &src, "0xFF0000", 2_000, 640, 360, 30).expect("source");
+
+    // Re-mux with a 90 degree display matrix, as a phone would record it.
+    let rotated = fx.dir.join("portrait.mp4");
+    let status = std::process::Command::new(&fx.ffmpeg)
+        .args(["-y", "-v", "error", "-display_rotation", "90", "-i"])
+        .arg(&src)
+        .args(["-c", "copy"])
+        .arg(&rotated)
+        .status()
+        .expect("remux");
+    assert!(status.success(), "could not stamp rotation metadata");
+
+    let info = ffmpeg::probe_media(&fx.ffprobe, &rotated).expect("probe");
+    assert_eq!(info.rotation.abs(), 90, "rotation metadata should be readable");
+    assert_eq!(
+        info.display_size(),
+        (360, 640),
+        "display size should be portrait even though the coded frame is landscape"
+    );
+
+    let lines = [LineInput { clip_id: "r".into(), duration_ms: 1_000 }];
+    let clips = [ClipInput { clip_id: "r".into(), source_duration_ms: Some(2_000) }];
+    let items = timeline::plan(&clips, &lines);
+
+    let audio = fx.dir.join("silence.wav");
+    tts::write_wav(&audio, &vec![0f32; 1_000 * 24]).expect("wav");
+
+    let out = fx.dir.join("rotated-out.mp4");
+    let settings = RenderSettings { width: 1920, height: 1080, fps: 30 };
+    ffmpeg::render_rough_cut(
+        &fx.ffmpeg,
+        &[RenderItem { video: rotated, audio, item: items[0].clone(), is_hdr: false }],
+        &settings,
+        &ffmpeg::FfmpegCaps::default(),
+        &out,
+    )
+    .expect("render");
+
+    // Sample well inside the left edge, where pillarbox bars would be.
+    let edge = ffmpeg::frame_rgb_region(&fx.ffmpeg, &out, 700, 0, 0, 120, 1080).expect("edge");
+    let centre = ffmpeg::frame_rgb_region(&fx.ffmpeg, &out, 700, 860, 0, 200, 1080).expect("mid");
+    println!("\n  left edge rgb{edge:?}  centre rgb{centre:?}");
+
+    let brightness = |c: (u8, u8, u8)| c.0 as u32 + c.1 as u32 + c.2 as u32;
+    assert!(
+        brightness(edge) < 40,
+        "left edge should be pillarbox black (rotation applied), got rgb{edge:?}"
+    );
+    assert!(
+        centre.0 > 150,
+        "centre should hold the red source content, got rgb{centre:?}"
+    );
+}
+
+#[test]
+fn probe_reads_real_media_properties() {
+    let Some(fx) = Fixture::new("probe") else {
+        eprintln!("ffmpeg not available; skipping");
+        return;
+    };
+    let src = fx.dir.join("probe.mp4");
+    ffmpeg::make_placeholder(&fx.ffmpeg, &src, "0x123456", 2_500, 1280, 720, 30).expect("source");
+
+    let info = ffmpeg::probe_media(&fx.ffprobe, &src).expect("probe");
+    println!("\n  {info:?}");
+    assert_eq!((info.width, info.height), (1280, 720));
+    assert_eq!(info.codec, "h264");
+    assert!((info.fps - 30.0).abs() < 0.5, "fps {}", info.fps);
+    assert!(info.duration_ms.abs_diff(2_500) < 150, "duration {}", info.duration_ms);
+    assert!(!info.has_audio, "placeholder has no audio track");
+    assert!(!info.is_hdr);
+    assert_eq!(info.rotation, 0);
+}
+
+#[test]
+fn validation_accepts_reports_and_rejects_explicitly() {
+    let Some(fx) = Fixture::new("validate") else {
+        eprintln!("ffmpeg not available; skipping");
+        return;
+    };
+    let caps = ffmpeg::FfmpegCaps { zscale: true, tonemap: true };
+
+    // A silent clip is usable, but the user should be told it is silent.
+    let ok = fx.dir.join("ok.mp4");
+    ffmpeg::make_placeholder(&fx.ffmpeg, &ok, "0x00AA55", 1_500, 640, 360, 30).expect("source");
+    let check = ffmpeg::check_media(&fx.ffprobe, &ok, &caps);
+    println!("\n  video-only: {:?} {:?}", check.verdict, check.reasons);
+    assert_eq!(check.verdict, ffmpeg::MediaVerdict::Warning);
+    assert!(check.reasons.iter().any(|r| r.contains("No audio")));
+
+    // An audio-only file must be rejected with a reason, never silently ignored.
+    let wav = fx.dir.join("audio-only.wav");
+    tts::write_wav(&wav, &vec![0f32; 24_000]).expect("wav");
+    let check = ffmpeg::check_media(&fx.ffprobe, &wav, &caps);
+    println!("  audio-only: {:?} {:?}", check.verdict, check.reasons);
+    assert_eq!(check.verdict, ffmpeg::MediaVerdict::Rejected);
+    assert!(!check.reasons.is_empty(), "a rejection must always say why");
+
+    // Garbage must fail cleanly rather than panic or hang.
+    let junk = fx.dir.join("junk.mp4");
+    std::fs::write(&junk, b"this is not a video").unwrap();
+    let check = ffmpeg::check_media(&fx.ffprobe, &junk, &caps);
+    println!("  corrupt:    {:?} {:?}", check.verdict, check.reasons);
+    assert_eq!(check.verdict, ffmpeg::MediaVerdict::Rejected);
+    assert!(!check.reasons.is_empty());
+}
+
+#[test]
+fn thumbnails_are_written_from_ten_percent_in() {
+    let Some(fx) = Fixture::new("thumb") else {
+        eprintln!("ffmpeg not available; skipping");
+        return;
+    };
+    let src = fx.dir.join("clip.mp4");
+    ffmpeg::make_placeholder(&fx.ffmpeg, &src, "0xFF8800", 3_000, 1280, 720, 30).expect("source");
+
+    let thumb = fx.dir.join("thumbs/clip.jpg");
+    ffmpeg::make_thumbnail(&fx.ffmpeg, &src, &thumb, 3_000, 320).expect("thumbnail");
+    assert!(thumb.is_file(), "thumbnail should exist");
+
+    let info = ffmpeg::probe_media(&fx.ffprobe, &thumb).expect("probe thumb");
+    println!("\n  thumbnail {}x{}", info.width, info.height);
+    assert_eq!(info.width, 320, "thumbnail should be scaled to the requested width");
+    assert!(std::fs::metadata(&thumb).unwrap().len() > 0);
+}
+
 #[test]
 fn output_has_the_expected_streams_and_format() {
     let Some(fx) = Fixture::new("streams") else {
@@ -165,8 +309,9 @@ fn output_has_the_expected_streams_and_format() {
     let out = fx.dir.join("out.mp4");
     ffmpeg::render_rough_cut(
         &fx.ffmpeg,
-        &[RenderItem { video, audio, item: items[0].clone() }],
+        &[RenderItem { video, audio, item: items[0].clone(), is_hdr: false }],
         &settings,
+        &ffmpeg::FfmpegCaps::default(),
         &out,
     )
     .expect("render");

@@ -9,10 +9,17 @@ import { listen } from "@tauri-apps/api/event";
 import type { Clip } from "./types";
 import type { VoicedLine } from "./voiceover";
 
+export interface FfmpegCaps {
+  /** libzimg. Without it HDR tone mapping is only approximate. */
+  zscale: boolean;
+  tonemap: boolean;
+}
+
 export interface FfmpegInfo {
   ffmpeg: string;
   ffprobe: string;
   version: string;
+  caps: FfmpegCaps;
 }
 
 export type Fit = "exact" | "trimmed" | "held";
@@ -108,6 +115,8 @@ function toClipSpecs(clips: Clip[]) {
     description: c.description,
     sourcePath: c.sourcePath ?? null,
     sourceDurationMs: c.sourceDurationMs ?? null,
+    isPlaceholder: c.isPlaceholder ?? false,
+    isHdr: c.isHdr ?? null,
   }));
 }
 
@@ -187,6 +196,72 @@ export async function exportProjectOnly(
 ): Promise<string> {
   try {
     return await invoke<string>("assembly_export_project_only", { projectId, destination });
+  } catch (err) {
+    throw asError(err);
+  }
+}
+
+// --- media import ---------------------------------------------------------
+
+export type MediaVerdict = "accepted" | "warning" | "rejected";
+
+export interface MediaInfo {
+  durationMs: number;
+  width: number;
+  height: number;
+  codec: string;
+  fps: number;
+  hasAudio: boolean;
+  rotation: number;
+  colorTransfer: string;
+  isHdr: boolean;
+}
+
+export interface ImportedMedia {
+  sourcePath: string;
+  fileName: string;
+  thumbnailPath: string | null;
+  verdict: MediaVerdict;
+  reasons: string[];
+  info: MediaInfo | null;
+}
+
+/** Containers offered in the picker. Validation is still by probe, not by this. */
+export const VIDEO_EXTENSIONS = [
+  "mp4", "mov", "m4v", "avi", "mkv", "webm", "mts", "m2ts", "3gp", "mpg", "mpeg", "wmv", "flv",
+];
+
+export async function importMedia(
+  paths: string[],
+  projectId: string,
+  onProgress?: (p: RenderProgress) => void,
+): Promise<ImportedMedia[]> {
+  const unlisten = onProgress
+    ? await listen<RenderProgress>("import:progress", (e) => onProgress(e.payload))
+    : undefined;
+  try {
+    return await invoke<ImportedMedia[]>("assembly_import_media", { paths, projectId });
+  } catch (err) {
+    throw asError(err);
+  } finally {
+    unlisten?.();
+  }
+}
+
+export interface ConsolidatedClip {
+  clipId: string;
+  sourcePath: string;
+}
+
+export async function consolidateMedia(
+  clips: Clip[],
+  projectId: string,
+): Promise<ConsolidatedClip[]> {
+  try {
+    return await invoke<ConsolidatedClip[]>("assembly_consolidate_media", {
+      clips: toClipSpecs(clips),
+      projectId,
+    });
   } catch (err) {
     throw asError(err);
   }

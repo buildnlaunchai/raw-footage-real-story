@@ -28,8 +28,15 @@ old projects immutable and correct forever, even as the app evolves.
 - UTF-8 JSON, pretty-printed.
 - All keys are `camelCase`.
 - All durations and offsets are **integer milliseconds**.
-- All paths are **relative to the project file**, using forward slashes on every
-  platform, so a bundle written on Windows resolves in a browser.
+- Paths use forward slashes on every platform, so a bundle written on Windows
+  resolves in a browser.
+- **In a bundle, every path is relative** to the project file. Importers may
+  rely on this.
+- A *working* `project.json` inside the app's own project folder may hold
+  **absolute** `clips[].sourcePath` values. Imported video is referenced where
+  it sits rather than copied, so that importing 40GB of footage is instant. The
+  bundle export copies those files in and rewrites the paths, which is what
+  makes the invariant above hold for the interchange format specifically.
 
 ## Versioning
 
@@ -172,8 +179,13 @@ They are *inputs* to the values stored here, not something to recompute from.
 
 | Form | Contents | Use |
 |---|---|---|
-| **Bundle** (`.zip`, default) | `project.json` + `clips/` + `audio/` + `render/` | Portable, self-contained. The only form that round-trips into the web editor. |
-| **Project only** (`.json`) | manifest alone | Small. References media by relative path, so it breaks if files move. |
+| **Bundle** (`.zip`, default) | `project.json` + `clips/` + `audio/` + `render/` + `thumbs/` | Portable, self-contained. The only form that round-trips into the web editor. |
+| **Project only** (`.json`) | manifest alone | Small. Media paths may be absolute and machine-specific, so it does not travel. |
 
-Bundle layout mirrors the on-disk project directory exactly, so relative paths
-in the manifest resolve identically whether read from the zip or the folder.
+Writing a bundle copies any externally-referenced media into `clips/` and
+rewrites `sourcePath` to match, so the "every path is relative" invariant holds
+regardless of what the working project looked like.
+
+If a referenced file has gone missing by export time, its `sourcePath` is set to
+`null` rather than shipped as a path that resolves to nothing — an importer can
+then show that clip as media-offline instead of failing obscurely.

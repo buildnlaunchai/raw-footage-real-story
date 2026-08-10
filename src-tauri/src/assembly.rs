@@ -80,6 +80,14 @@ pub struct ClipSpec {
     pub description: String,
     pub source_path: Option<String>,
     pub source_duration_ms: Option<u64>,
+    /// Set explicitly at import rather than guessed from the filename. Sniffing
+    /// the path for "placeholder-" mislabels a user's own `placeholder-beach.mp4`,
+    /// and the manifest is a contract — it should not contain inferences.
+    #[serde(default)]
+    pub is_placeholder: bool,
+    /// From the import probe; drives tone mapping at render time.
+    #[serde(default)]
+    pub is_hdr: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -149,6 +157,139 @@ pub fn assembly_make_placeholders(
             clip_id: clip.id.clone(),
             source_path: path.to_string_lossy().into(),
             source_duration_ms: duration,
+        });
+    }
+
+    Ok(out)
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportedMedia {
+    pub source_path: String,
+    pub file_name: String,
+    pub thumbnail_path: Option<String>,
+    pub verdict: ffmpeg::MediaVerdict,
+    pub reasons: Vec<String>,
+    pub info: Option<ffmpeg::MediaInfo>,
+}
+
+/// Inspect files the user picked, without copying them.
+///
+/// Media is referenced in place: importing 40GB of 4K footage should be
+/// instant, and the renderer reads originals perfectly well. Copies are made
+/// only at export, when the user has actually asked for something portable.
+/// Only the thumbnail lands in the project folder.
+#[tauri::command]
+pub fn assembly_import_media(
+    app: AppHandle,
+    paths: Vec<String>,
+    project_id: String,
+) -> Result<Vec<ImportedMedia>, FfmpegError> {
+    let info = ffmpeg::detect(&load_settings(&app))?;
+    let thumbs = project_dir(&app, &project_id)?.join("thumbs");
+    std::fs::create_dir_all(&thumbs)
+        .map_err(|e| FfmpegError { code: "MKDIR_FAILED".into(), message: e.to_string() })?;
+
+    let total = paths.len();
+    let mut out = Vec::with_capacity(total);
+
+    for (i, raw) in paths.iter().enumerate() {
+        let path = PathBuf::from(raw);
+        let file_name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| raw.clone());
+
+        let check = ffmpeg::check_media(&info.ffprobe, &path, &info.caps);
+
+        // Only worth a thumbnail if the file is actually usable.
+        let thumbnail_path = match (&check.verdict, &check.info) {
+            (ffmpeg::MediaVerdict::Rejected, _) | (_, None) => None,
+            (_, Some(media)) => {
+                let dest = thumbs.join(format!("{i:03}-{}.jpg", sanitise(&file_name)));
+                match ffmpeg::make_thumbnail(&info.ffmpeg, &path, &dest, media.duration_ms, 480) {
+                    Ok(()) => Some(dest.to_string_lossy().to_string()),
+                    // A missing thumbnail is cosmetic; it must not fail the import.
+                    Err(_) => None,
+                }
+            }
+        };
+
+        let _ = app.emit(
+            "import:progress",
+            RenderProgress { stage: "import".into(), done: i + 1, total },
+        );
+
+        out.push(ImportedMedia {
+            source_path: path.to_string_lossy().to_string(),
+            file_name,
+            thumbnail_path,
+            verdict: check.verdict,
+            reasons: check.reasons,
+            info: check.info,
+        });
+    }
+
+    Ok(out)
+}
+
+fn sanitise(name: &str) -> String {
+    name.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string()
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ConsolidatedClip {
+    pub clip_id: String,
+    pub source_path: String,
+}
+
+/// Power-user action: copy referenced media into the project folder so it
+/// survives the originals being moved or deleted.
+#[tauri::command]
+pub fn assembly_consolidate_media(
+    app: AppHandle,
+    clips: Vec<ClipSpec>,
+    project_id: String,
+) -> Result<Vec<ConsolidatedClip>, FfmpegError> {
+    let dir = project_dir(&app, &project_id)?.join("clips");
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| FfmpegError { code: "MKDIR_FAILED".into(), message: e.to_string() })?;
+
+    let total = clips.len();
+    let mut out = Vec::new();
+
+    for (i, clip) in clips.iter().enumerate() {
+        let Some(src) = clip.source_path.as_ref().map(PathBuf::from) else { continue };
+        if !src.is_file() {
+            continue;
+        }
+        // Already inside the project? Nothing to do.
+        if src.starts_with(&dir) {
+            out.push(ConsolidatedClip {
+                clip_id: clip.id.clone(),
+                source_path: src.to_string_lossy().into(),
+            });
+            continue;
+        }
+        let name = src.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let dest = dir.join(format!("{i:03}-{}", sanitise(&name)));
+        std::fs::copy(&src, &dest).map_err(|e| FfmpegError {
+            code: "COPY_FAILED".into(),
+            message: format!("{}: {e}", src.display()),
+        })?;
+        let _ = app.emit(
+            "import:progress",
+            RenderProgress { stage: "consolidate".into(), done: i + 1, total },
+        );
+        out.push(ConsolidatedClip {
+            clip_id: clip.id.clone(),
+            source_path: dest.to_string_lossy().into(),
         });
     }
 
@@ -235,7 +376,12 @@ pub async fn assembly_render(
                 message: format!("no narration audio for clip {}", item.clip_id),
             })?;
 
-        render_items.push(RenderItem { video, audio, item: item.clone() });
+        render_items.push(RenderItem {
+            video,
+            audio,
+            item: item.clone(),
+            is_hdr: spec.and_then(|c| c.is_hdr).unwrap_or(false),
+        });
     }
 
     let _ = app.emit(
@@ -245,17 +391,16 @@ pub async fn assembly_render(
 
     let settings = RenderSettings::default();
     let out = dir.join("render").join("rough-cut.mp4");
-    ffmpeg::render_rough_cut(&info.ffmpeg, &render_items, &settings, &out)?;
+    ffmpeg::render_rough_cut(&info.ffmpeg, &render_items, &settings, &info.caps, &out)?;
 
     // --- manifest -----------------------------------------------------------
     let project_clips: Vec<ProjectClip> = clips
         .iter()
         .map(|c| {
             let path = c.source_path.as_ref().map(PathBuf::from);
-            let is_placeholder = path
-                .as_ref()
-                .map(|p| p.to_string_lossy().contains("placeholder-") || p.to_string_lossy().contains("auto-"))
-                .unwrap_or(true);
+            // No media at all is still a placeholder slot; otherwise trust the
+            // flag the importer set.
+            let is_placeholder = path.is_none() || c.is_placeholder;
             ProjectClip {
                 id: c.id.clone(),
                 source_path: path.as_ref().map(|p| project::relative_to(&dir, p)),

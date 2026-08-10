@@ -24,6 +24,9 @@ interface Props {
   projectId: string;
   onMakePlaceholders: () => void;
   onRender: () => void;
+  onConsolidate: () => void;
+  consolidating: boolean;
+  hasExternalMedia: boolean;
 }
 
 const FIT_LABEL: Record<TimelineItem["fit"], string> = {
@@ -48,6 +51,9 @@ export function AssemblyPanel({
   projectId,
   onMakePlaceholders,
   onRender,
+  onConsolidate,
+  consolidating,
+  hasExternalMedia,
 }: Props) {
   const byId = new Map(clips.map((c) => [c.id, c]));
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -161,7 +167,26 @@ export function AssemblyPanel({
             <button type="button" className="ghost-button" onClick={() => doExport("project")}>
               Project file only
             </button>
+            {hasExternalMedia && (
+              <button
+                type="button"
+                className="ghost-button"
+                onClick={onConsolidate}
+                disabled={consolidating}
+                title="Copy referenced video files into the project folder so it survives the originals moving"
+              >
+                {consolidating ? "Copying…" : "Consolidate media"}
+              </button>
+            )}
           </div>
+
+          {hasExternalMedia && (
+            <p className="placeholder-note">
+              Video files are referenced where they sit, not copied. The bundle
+              pulls them in at export; consolidate now if you plan to move or
+              delete the originals.
+            </p>
+          )}
 
           {exported && (
             <p className="placeholder-note">Exported to {exported}</p>

@@ -158,6 +158,12 @@ fn add_dir_to_zip<W: Write + std::io::Seek>(
 ///
 /// This is the default export because it is the only form that round-trips —
 /// a manifest referencing media on the author's disk is useless to the editor.
+///
+/// Media is *referenced* while editing, not copied, so a working project.json
+/// can legitimately hold absolute paths to files anywhere on disk. Those files
+/// are copied in here and the manifest is rewritten as it goes, so the bundle
+/// always satisfies the "every path is relative" invariant the format promises,
+/// whatever state the working directory was in.
 pub fn write_bundle(project_dir: &Path, out_zip: &Path) -> std::io::Result<()> {
     if let Some(parent) = out_zip.parent() {
         std::fs::create_dir_all(parent)?;
@@ -168,15 +174,57 @@ pub fn write_bundle(project_dir: &Path, out_zip: &Path) -> std::io::Result<()> {
     let opts = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
 
-    let manifest = project_dir.join("project.json");
-    if manifest.is_file() {
+    let manifest_path = project_dir.join("project.json");
+    let mut external: Vec<(String, PathBuf)> = Vec::new();
+
+    let manifest_json = if manifest_path.is_file() {
+        let raw = std::fs::read(&manifest_path)?;
+        match serde_json::from_slice::<ProjectFile>(&raw) {
+            Ok(mut manifest) => {
+                for (i, clip) in manifest.clips.iter_mut().enumerate() {
+                    let Some(src) = clip.source_path.clone() else { continue };
+                    let p = Path::new(&src);
+                    if !p.is_absolute() {
+                        continue; // already inside the project
+                    }
+                    let name = p
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| format!("clip-{i:03}"));
+                    let entry = format!("clips/{i:03}-{name}");
+                    if p.is_file() {
+                        external.push((entry.clone(), p.to_path_buf()));
+                        clip.source_path = Some(entry);
+                    } else {
+                        // Media went missing; say so in the manifest rather than
+                        // shipping a path that resolves to nothing.
+                        clip.source_path = None;
+                    }
+                }
+                serde_json::to_vec_pretty(&manifest).unwrap_or(raw)
+            }
+            // Unparseable manifest still gets bundled verbatim rather than lost.
+            Err(_) => raw,
+        }
+    } else {
+        Vec::new()
+    };
+
+    if !manifest_json.is_empty() {
         zip.start_file("project.json", opts)?;
-        let mut f = std::fs::File::open(&manifest)?;
-        std::io::copy(&mut f, &mut zip)?;
+        zip.write_all(&manifest_json)?;
     }
-    for sub in ["clips", "audio", "render"] {
+
+    for sub in ["clips", "audio", "render", "thumbs"] {
         add_dir_to_zip(&mut zip, &project_dir.join(sub), &format!("{sub}/"), opts)?;
     }
+
+    for (entry, src) in external {
+        zip.start_file(&entry, opts)?;
+        let mut f = std::fs::File::open(&src)?;
+        std::io::copy(&mut f, &mut zip)?;
+    }
+
     zip.finish()?;
     Ok(())
 }
@@ -305,6 +353,81 @@ mod tests {
         for expected in ["project.json", "audio/line-01.wav", "render/rough-cut.mp4"] {
             assert!(names.contains(&expected.to_string()), "bundle missing {expected}");
         }
+    }
+
+    /// Media is referenced while editing, so a working manifest holds absolute
+    /// paths. A bundle must not: it has to be openable on another machine.
+    #[test]
+    fn bundle_pulls_in_externally_referenced_media_and_rewrites_paths() {
+        let root = std::env::temp_dir().join("rfrs-external-test");
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("project");
+        let elsewhere = root.join("Movies");
+        std::fs::create_dir_all(dir.join("audio")).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+
+        // A real clip living outside the project, as a referenced import would.
+        let external = elsewhere.join("holiday.mp4");
+        std::fs::write(&external, b"pretend this is video").unwrap();
+
+        let mut p = sample_project();
+        p.clips[0].source_path = Some(external.to_string_lossy().to_string());
+        p.clips[0].is_placeholder = false;
+        write_json(&p, &dir.join("project.json")).unwrap();
+        std::fs::write(dir.join("audio/line-01.wav"), b"fake").unwrap();
+
+        let zip_path = root.join("bundle.zip");
+        write_bundle(&dir, &zip_path).unwrap();
+
+        let f = std::fs::File::open(&zip_path).unwrap();
+        let mut archive = zip::ZipArchive::new(f).unwrap();
+        let names: Vec<String> = (0..archive.len())
+            .map(|i| archive.by_index(i).unwrap().name().to_string())
+            .collect();
+        println!("\n  bundle: {names:?}");
+
+        let copied = names.iter().find(|n| n.ends_with("holiday.mp4")).cloned();
+        assert!(copied.is_some(), "external media should be copied in: {names:?}");
+
+        let mut manifest_raw = String::new();
+        {
+            use std::io::Read;
+            archive.by_name("project.json").unwrap().read_to_string(&mut manifest_raw).unwrap();
+        }
+        let bundled: ProjectFile = serde_json::from_str(&manifest_raw).unwrap();
+        let path = bundled.clips[0].source_path.as_ref().expect("path present");
+        println!("  rewritten sourcePath: {path}");
+
+        assert!(!Path::new(path).is_absolute(), "bundle path must be relative, got {path}");
+        assert_eq!(Some(path.clone()), copied, "manifest must point at the copied entry");
+        // The timeline must survive the rewrite untouched.
+        assert_eq!(bundled.timeline, p.timeline);
+    }
+
+    /// Media that vanished before export should be reported as absent, not
+    /// shipped as a path that resolves to nothing.
+    #[test]
+    fn bundle_drops_paths_whose_media_is_missing() {
+        let dir = std::env::temp_dir().join("rfrs-missing-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut p = sample_project();
+        p.clips[0].source_path = Some("/nowhere/gone.mp4".into());
+        write_json(&p, &dir.join("project.json")).unwrap();
+
+        let zip_path = dir.join("bundle.zip");
+        write_bundle(&dir, &zip_path).unwrap();
+
+        let f = std::fs::File::open(&zip_path).unwrap();
+        let mut archive = zip::ZipArchive::new(f).unwrap();
+        let mut raw = String::new();
+        {
+            use std::io::Read;
+            archive.by_name("project.json").unwrap().read_to_string(&mut raw).unwrap();
+        }
+        let bundled: ProjectFile = serde_json::from_str(&raw).unwrap();
+        assert_eq!(bundled.clips[0].source_path, None, "dangling path should be cleared");
     }
 
     #[test]

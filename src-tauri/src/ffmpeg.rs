@@ -32,6 +32,32 @@ pub struct FfmpegInfo {
     pub ffmpeg: String,
     pub ffprobe: String,
     pub version: String,
+    /// What this particular build can do. Capabilities vary widely between
+    /// Homebrew, winget and distro packages, and the gaps are user-visible.
+    pub caps: FfmpegCaps,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FfmpegCaps {
+    /// libzimg. Without it, HDR footage cannot be tone-mapped properly and
+    /// comes out washed out and grey — silently, which is the worst kind.
+    pub zscale: bool,
+    pub tonemap: bool,
+}
+
+fn probe_caps(ffmpeg: &Path) -> FfmpegCaps {
+    let filters = Command::new(ffmpeg)
+        .arg("-filters")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+    let has = |name: &str| {
+        filters
+            .lines()
+            .any(|l| l.split_whitespace().nth(1).is_some_and(|f| f == name))
+    };
+    FfmpegCaps { zscale: has("zscale"), tonemap: has("tonemap") }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -128,10 +154,13 @@ pub fn detect(settings: &FfmpegSettings) -> Result<FfmpegInfo, FfmpegError> {
         .unwrap_or("unknown")
         .to_string();
 
+    let caps = probe_caps(&ffmpeg);
+
     Ok(FfmpegInfo {
         ffmpeg: ffmpeg.to_string_lossy().into(),
         ffprobe: ffprobe.to_string_lossy().into(),
         version,
+        caps,
     })
 }
 
@@ -162,6 +191,212 @@ pub fn probe_duration_ms(ffprobe: &str, media: &Path) -> Result<u64, FfmpegError
         .parse()
         .map_err(|_| FfmpegError::new("PROBE_FAILED", format!("unreadable duration: {stdout:?}")))?;
     Ok((secs * 1000.0).round() as u64)
+}
+
+// ---------------------------------------------------------------------------
+// Inspecting real footage
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaInfo {
+    pub duration_ms: u64,
+    pub width: u32,
+    pub height: u32,
+    pub codec: String,
+    pub fps: f64,
+    pub has_audio: bool,
+    /// Degrees from the display matrix. Phone footage relies on this; ignoring
+    /// it renders portrait video sideways.
+    pub rotation: i32,
+    pub color_transfer: String,
+    pub is_hdr: bool,
+}
+
+impl MediaInfo {
+    /// Dimensions as a viewer sees them, after rotation is applied.
+    pub fn display_size(&self) -> (u32, u32) {
+        if self.rotation.abs() % 180 == 90 {
+            (self.height, self.width)
+        } else {
+            (self.width, self.height)
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MediaVerdict {
+    Accepted,
+    Warning,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaCheck {
+    pub verdict: MediaVerdict,
+    /// Always populated for warnings and rejections. Nothing is ever dropped
+    /// without the user being told exactly why.
+    pub reasons: Vec<String>,
+    pub info: Option<MediaInfo>,
+}
+
+fn frame_rate(spec: &str) -> f64 {
+    match spec.split_once('/') {
+        Some((n, d)) => {
+            let (n, d) = (n.parse::<f64>().unwrap_or(0.0), d.parse::<f64>().unwrap_or(1.0));
+            if d == 0.0 { 0.0 } else { n / d }
+        }
+        None => spec.parse().unwrap_or(0.0),
+    }
+}
+
+/// Inspect a file with ffprobe.
+///
+/// Validation is by probe, never by extension: an extension is a claim, the
+/// probe is the fact.
+pub fn probe_media(ffprobe: &str, media: &Path) -> Result<MediaInfo, FfmpegError> {
+    let stdout = run(
+        Command::new(ffprobe).args([
+            "-v", "error",
+            "-show_streams", "-show_format",
+            "-of", "json",
+        ]).arg(media),
+        "probe media",
+    )?;
+
+    let json: serde_json::Value = serde_json::from_str(&stdout)
+        .map_err(|e| FfmpegError::new("PROBE_FAILED", e.to_string()))?;
+    let empty = vec![];
+    let streams = json["streams"].as_array().unwrap_or(&empty);
+
+    let video = streams
+        .iter()
+        .find(|s| s["codec_type"] == "video")
+        .ok_or_else(|| FfmpegError::new("NO_VIDEO_STREAM", "This file has no video track."))?;
+
+    let has_audio = streams.iter().any(|s| s["codec_type"] == "audio");
+
+    // Rotation lives in side data on modern files; older ones use a tag.
+    let rotation = video["side_data_list"]
+        .as_array()
+        .and_then(|list| list.iter().find_map(|d| d["rotation"].as_i64()))
+        .or_else(|| video["tags"]["rotate"].as_str().and_then(|s| s.parse().ok()))
+        .unwrap_or(0) as i32;
+
+    let color_transfer = video["color_transfer"].as_str().unwrap_or("").to_string();
+    // PQ and HLG are the two HDR transfer functions in practice.
+    let is_hdr = matches!(color_transfer.as_str(), "smpte2084" | "arib-std-b67");
+
+    let duration_ms = json["format"]["duration"]
+        .as_str()
+        .and_then(|d| d.parse::<f64>().ok())
+        .map(|s| (s * 1000.0).round() as u64)
+        .unwrap_or(0);
+
+    Ok(MediaInfo {
+        duration_ms,
+        width: video["width"].as_u64().unwrap_or(0) as u32,
+        height: video["height"].as_u64().unwrap_or(0) as u32,
+        codec: video["codec_name"].as_str().unwrap_or("unknown").to_string(),
+        fps: frame_rate(video["r_frame_rate"].as_str().unwrap_or("0/1")),
+        has_audio,
+        rotation,
+        color_transfer,
+        is_hdr,
+    })
+}
+
+/// Decide whether a file is usable, and say plainly what is wrong if not.
+pub fn check_media(ffprobe: &str, media: &Path, caps: &FfmpegCaps) -> MediaCheck {
+    let info = match probe_media(ffprobe, media) {
+        Ok(i) => i,
+        Err(e) => {
+            let reason = match e.code.as_str() {
+                "NO_VIDEO_STREAM" => "No video track — this looks like an audio file or an image.",
+                _ => "Couldn't read this file. It may be corrupt or in an unsupported format.",
+            };
+            return MediaCheck {
+                verdict: MediaVerdict::Rejected,
+                reasons: vec![reason.to_string()],
+                info: None,
+            };
+        }
+    };
+
+    if info.duration_ms == 0 || info.width == 0 || info.height == 0 {
+        return MediaCheck {
+            verdict: MediaVerdict::Rejected,
+            reasons: vec!["This file has no usable video (zero duration or size).".into()],
+            info: Some(info),
+        };
+    }
+
+    let mut reasons = Vec::new();
+    let (dw, dh) = info.display_size();
+
+    if info.is_hdr {
+        if caps.zscale {
+            reasons.push("HDR footage will be tone-mapped to SDR.".into());
+        } else {
+            reasons.push(
+                "HDR footage, but this ffmpeg build has no zscale (libzimg), so colours may look \
+                 washed out. Reinstalling ffmpeg — `brew install ffmpeg` — usually fixes it."
+                    .into(),
+            );
+        }
+    }
+    if info.codec == "hevc" {
+        reasons.push("HEVC/H.265 decodes fine but encodes more slowly.".into());
+    }
+    if dw > 2560 || dh > 2560 {
+        reasons.push(format!("{dw}×{dh} is large; assembly will take longer."));
+    }
+    if info.fps > 60.0 {
+        reasons.push(format!("{:.0}fps will be resampled to the project frame rate.", info.fps));
+    }
+    if !info.has_audio {
+        reasons.push("No audio track — only the narration will be heard.".into());
+    }
+
+    MediaCheck {
+        verdict: if reasons.is_empty() { MediaVerdict::Accepted } else { MediaVerdict::Warning },
+        reasons,
+        info: Some(info),
+    }
+}
+
+/// Still frame for the clip list.
+///
+/// Seeks 10% in rather than to frame zero: most footage opens on a black or
+/// motion-blurred frame, which makes for a useless thumbnail.
+pub fn make_thumbnail(
+    ffmpeg: &str,
+    media: &Path,
+    out: &Path,
+    duration_ms: u64,
+    width: u32,
+) -> Result<(), FfmpegError> {
+    if let Some(parent) = out.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| FfmpegError::new("MKDIR_FAILED", e.to_string()))?;
+    }
+    let at = (duration_ms as f64 / 1000.0) * 0.10;
+    run(
+        Command::new(ffmpeg)
+            .args(["-y", "-v", "error", "-ss", &format!("{at:.3}")])
+            .arg("-i")
+            .arg(media)
+            .args([
+                "-frames:v", "1",
+                "-vf", &format!("scale={width}:-2"),
+                "-q:v", "3",
+            ])
+            .arg(out),
+        "generate thumbnail",
+    )?;
+    Ok(())
 }
 
 /// A flat colour card standing in for real footage.
@@ -197,6 +432,25 @@ pub struct RenderItem {
     pub video: PathBuf,
     pub audio: PathBuf,
     pub item: TimelineItem,
+    /// Set from the probe at import. HDR sources need tone mapping or they
+    /// come out grey and desaturated.
+    pub is_hdr: bool,
+}
+
+/// Filter fragment converting HDR to SDR, or empty for SDR sources.
+///
+/// With libzimg the transfer function is linearised properly. Without it the
+/// best available approximation is a float conversion straight into `tonemap`
+/// — visibly better than doing nothing, but not correct, which is why import
+/// warns the user rather than quietly accepting the result.
+fn tonemap_chain(caps: &FfmpegCaps) -> &'static str {
+    if caps.zscale {
+        ",zscale=t=linear:npl=100,tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p"
+    } else if caps.tonemap {
+        ",format=gbrpf32le,tonemap=hable:desat=0,format=yuv420p"
+    } else {
+        ""
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -223,6 +477,7 @@ pub fn render_rough_cut(
     ffmpeg: &str,
     items: &[RenderItem],
     settings: &RenderSettings,
+    caps: &FfmpegCaps,
     out: &Path,
 ) -> Result<(), FfmpegError> {
     if items.is_empty() {
@@ -245,14 +500,21 @@ pub fn render_rough_cut(
         let use_ms = it.item.source_out_ms.saturating_sub(it.item.source_in_ms);
         let total_s = it.item.timeline_duration_ms as f64 / 1000.0;
 
-        // trim -> normalise geometry -> lock timebase/rate -> hold last frame.
-        // Order matters: tpad must come last or it pads the pre-scaled stream.
+        // trim -> tone map -> normalise geometry -> lock timebase/rate -> hold.
+        // Order matters twice over: tone mapping must precede the scale so it
+        // works on the original colour data, and tpad must come last or it pads
+        // the pre-scaled stream.
+        //
+        // Rotation needs no filter here: ffmpeg's autorotation applies the
+        // display matrix on decode, and that survives filter_complex — verified
+        // by `rotation_survives_filter_complex` in the tests.
         filter.push_str(&format!(
-            "[{v}:v]trim=start={:.3}:duration={:.3},setpts=PTS-STARTPTS,\
-             scale={width}:{height}:force_original_aspect_ratio=decrease,\
+            "[{v}:v]trim=start={:.3}:duration={:.3},setpts=PTS-STARTPTS{}\
+             ,scale={width}:{height}:force_original_aspect_ratio=decrease,\
              pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={fps}",
             it.item.source_in_ms as f64 / 1000.0,
             use_ms as f64 / 1000.0,
+            if it.is_hdr { tonemap_chain(caps) } else { "" },
         ));
         if it.item.fit == Fit::Held && it.item.hold_ms > 0 {
             filter.push_str(&format!(
@@ -295,13 +557,35 @@ pub fn render_rough_cut(
 /// Average RGB of a single frame, used by tests to assert which clip is on
 /// screen at a given moment.
 pub fn frame_rgb(ffmpeg: &str, media: &Path, at_ms: u64) -> Result<(u8, u8, u8), FfmpegError> {
+    frame_rgb_filter(ffmpeg, media, at_ms, "scale=8:8")
+}
+
+/// Average RGB of a rectangular region — used to tell picture from letterbox.
+pub fn frame_rgb_region(
+    ffmpeg: &str,
+    media: &Path,
+    at_ms: u64,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+) -> Result<(u8, u8, u8), FfmpegError> {
+    frame_rgb_filter(ffmpeg, media, at_ms, &format!("crop={w}:{h}:{x}:{y},scale=1:1"))
+}
+
+fn frame_rgb_filter(
+    ffmpeg: &str,
+    media: &Path,
+    at_ms: u64,
+    vf: &str,
+) -> Result<(u8, u8, u8), FfmpegError> {
     let out = Command::new(ffmpeg)
         .args(["-v", "error", "-ss", &format!("{:.3}", at_ms as f64 / 1000.0)])
         .arg("-i")
         .arg(media)
         .args([
             "-frames:v", "1",
-            "-vf", "scale=8:8",
+            "-vf", vf,
             "-f", "rawvideo", "-pix_fmt", "rgb24", "-",
         ])
         .output()

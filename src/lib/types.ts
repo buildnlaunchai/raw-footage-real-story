@@ -10,6 +10,13 @@ export interface Clip {
   description: string;
   sourcePath?: string;
   sourceDurationMs?: number;
+  /** Display-only metadata from the import probe. */
+  fileName?: string;
+  thumbnailPath?: string;
+  /** Set at import, never inferred from the filename. */
+  isPlaceholder?: boolean;
+  isHdr?: boolean;
+  warnings?: string[];
 }
 
 /** One narration sentence, bound to the clip it was written for. */

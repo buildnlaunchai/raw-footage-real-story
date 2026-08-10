@@ -18,12 +18,18 @@ import {
 } from "./lib/voiceover";
 import {
   detectFfmpeg,
+  importMedia,
+  consolidateMedia,
   makePlaceholderClips,
   renderRoughCut,
+  VIDEO_EXTENSIONS,
   type AssembleResult,
   type FfmpegInfo,
+  type ImportedMedia,
   type RenderProgress,
 } from "./lib/assembly";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import type { Clip, ScriptLine } from "./lib/types";
 import "./App.css";
 
@@ -59,6 +65,9 @@ function App() {
   const [makingPlaceholders, setMakingPlaceholders] = useState(false);
   const [renderProgress, setRenderProgress] = useState<RenderProgress | null>(null);
   const [assemblyError, setAssemblyError] = useState<string | null>(null);
+  const [importing, setImporting] = useState(false);
+  const [rejected, setRejected] = useState<ImportedMedia[]>([]);
+  const [consolidating, setConsolidating] = useState(false);
 
   const filled = clips.filter((c) => c.description.trim().length > 0).length;
 
@@ -73,6 +82,80 @@ function App() {
       .catch((err) => setTtsError(err.message));
     void detectFfmpeg().then(setFfmpeg);
   }, []);
+
+  /** Turn probe results into clip fields. Rejected files never become clips. */
+  function applyImport(results: ImportedMedia[], targetClipId?: string) {
+    setRejected(results.filter((r) => r.verdict === "rejected"));
+    const usable = results.filter((r) => r.verdict !== "rejected");
+    if (usable.length === 0) return;
+
+    const toClip = (r: ImportedMedia, base: Clip): Clip => ({
+      ...base,
+      sourcePath: r.sourcePath,
+      sourceDurationMs: r.info?.durationMs,
+      fileName: r.fileName,
+      thumbnailPath: r.thumbnailPath ?? undefined,
+      isPlaceholder: false,
+      isHdr: r.info?.isHdr ?? false,
+      warnings: r.reasons,
+    });
+
+    setClips((cs) => {
+      if (targetClipId) {
+        return cs.map((c) => (c.id === targetClipId ? toClip(usable[0], c) : c));
+      }
+      // Fill empty clips first, then append — so "Add clips…" on a fresh
+      // project uses the three blank rows instead of stacking below them.
+      const next = [...cs];
+      const spare = next
+        .map((c, i) => ({ c, i }))
+        .filter(({ c }) => !c.sourcePath && c.description.trim() === "");
+      usable.forEach((r, n) => {
+        if (n < spare.length) {
+          next[spare[n].i] = toClip(r, spare[n].c);
+        } else {
+          next.push(toClip(r, newClip()));
+        }
+      });
+      return next;
+    });
+  }
+
+  async function runImport(paths: string[], targetClipId?: string) {
+    if (paths.length === 0) return;
+    setImporting(true);
+    setAssemblyError(null);
+    try {
+      applyImport(await importMedia(paths, projectId), targetClipId);
+    } catch (err) {
+      setAssemblyError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setImporting(false);
+    }
+  }
+
+  async function pickFiles(multiple: boolean): Promise<string[]> {
+    const picked = await openDialog({
+      title: multiple ? "Add clips" : "Add video",
+      multiple,
+      filters: [{ name: "Video", extensions: VIDEO_EXTENSIONS }],
+    });
+    if (!picked) return [];
+    return Array.isArray(picked) ? picked : [picked];
+  }
+
+  // Dropping a pile of clips onto the window is the natural gesture here.
+  useEffect(() => {
+    const unlisten = getCurrentWebview().onDragDropEvent((event) => {
+      if (event.payload.type === "drop") {
+        void runImport(event.payload.paths);
+      }
+    });
+    return () => {
+      void unlisten.then((f) => f());
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId]);
 
   async function onMakePlaceholders() {
     if (!voiced) return;
@@ -93,6 +176,22 @@ function App() {
       setAssemblyError(err instanceof Error ? err.message : String(err));
     } finally {
       setMakingPlaceholders(false);
+    }
+  }
+
+  async function onConsolidate() {
+    setConsolidating(true);
+    setAssemblyError(null);
+    try {
+      const moved = await consolidateMedia(clips, projectId);
+      const byId = new Map(moved.map((m) => [m.clipId, m.sourcePath]));
+      setClips((cs) =>
+        cs.map((c) => (byId.has(c.id) ? { ...c, sourcePath: byId.get(c.id) } : c)),
+      );
+    } catch (err) {
+      setAssemblyError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setConsolidating(false);
     }
   }
 
@@ -194,12 +293,48 @@ function App() {
       <ClipEditor
         clips={clips}
         disabled={busy || ttsBusy}
+        importing={importing}
         onAdd={() => setClips((cs) => [...cs, newClip()])}
         onRemove={(id) => setClips((cs) => cs.filter((c) => c.id !== id))}
         onChange={(id, description) =>
           setClips((cs) => cs.map((c) => (c.id === id ? { ...c, description } : c)))
         }
+        onImportClips={async () => runImport(await pickFiles(true))}
+        onAddMedia={async (id) => runImport(await pickFiles(false), id)}
+        onClearMedia={(id) =>
+          setClips((cs) =>
+            cs.map((c) =>
+              c.id === id
+                ? {
+                    ...c,
+                    sourcePath: undefined,
+                    sourceDurationMs: undefined,
+                    fileName: undefined,
+                    thumbnailPath: undefined,
+                    isPlaceholder: undefined,
+                    isHdr: undefined,
+                    warnings: undefined,
+                  }
+                : c,
+            ),
+          )
+        }
       />
+
+      {rejected.length > 0 && (
+        <div className="error" role="alert">
+          <strong>
+            {rejected.length} file{rejected.length === 1 ? "" : "s"} couldn’t be used.
+          </strong>
+          <ul className="media-warnings">
+            {rejected.map((r) => (
+              <li key={r.sourcePath}>
+                <strong>{r.fileName}</strong> — {r.reasons.join(" ")}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       <div className="actions">
         <button
@@ -276,6 +411,9 @@ function App() {
           projectId={projectId}
           onMakePlaceholders={onMakePlaceholders}
           onRender={onRender}
+          onConsolidate={onConsolidate}
+          consolidating={consolidating}
+          hasExternalMedia={clips.some((c) => c.sourcePath && !c.isPlaceholder)}
         />
       )}
 
