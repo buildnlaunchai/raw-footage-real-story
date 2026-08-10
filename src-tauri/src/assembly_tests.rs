@@ -74,7 +74,7 @@ fn assembles_a_rough_cut_with_correct_order_and_timing() {
     let clips: Vec<ClipInput> = lines
         .iter()
         .zip(sources)
-        .map(|(l, s)| ClipInput { clip_id: l.clip_id.clone(), source_duration_ms: s })
+        .map(|(l, s)| ClipInput::whole(l.clip_id.clone(), s))
         .collect();
 
     let items = timeline::plan(&clips, &lines);
@@ -180,7 +180,7 @@ fn rotation_survives_filter_complex() {
     );
 
     let lines = [LineInput { clip_id: "r".into(), duration_ms: 1_000 }];
-    let clips = [ClipInput { clip_id: "r".into(), source_duration_ms: Some(2_000) }];
+    let clips = [ClipInput::whole("r", Some(2_000))];
     let items = timeline::plan(&clips, &lines);
 
     let audio = fx.dir.join("silence.wav");
@@ -341,10 +341,7 @@ fn handles_awkward_sources_and_normalises_them() {
     let clips: Vec<ClipInput> = sources
         .iter()
         .enumerate()
-        .map(|(i, (_, info))| ClipInput {
-            clip_id: format!("c{i}"),
-            source_duration_ms: Some(info.duration_ms),
-        })
+        .map(|(i, (_, info))| ClipInput::whole(format!("c{i}"), Some(info.duration_ms)))
         .collect();
 
     let items = timeline::plan(&clips, &lines);
@@ -552,7 +549,7 @@ fn output_has_the_expected_streams_and_format() {
     };
 
     let lines = [LineInput { clip_id: "c0".into(), duration_ms: 1_200 }];
-    let clips = [ClipInput { clip_id: "c0".into(), source_duration_ms: None }];
+    let clips = [ClipInput::whole("c0", None)];
     let items = timeline::plan(&clips, &lines);
 
     let settings = RenderSettings { width: 640, height: 360, fps: 30 };

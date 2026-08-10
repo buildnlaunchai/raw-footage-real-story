@@ -778,3 +778,77 @@ kbd {
   flex: 1;
   min-width: 0;
 }
+
+/* --- story + script -------------------------------------------------- */
+
+.field-row {
+  display: grid;
+  gap: 0.4rem;
+  margin-bottom: 0.9rem;
+}
+
+.word-input {
+  flex: 0 0 7rem;
+  text-align: right;
+}
+
+.idea-list {
+  list-style: none;
+  margin: 1.25rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.idea-item {
+  width: 100%;
+  display: grid;
+  gap: 0.25rem;
+  padding: 0.7rem 0.85rem;
+  text-align: left;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 0.6rem;
+  color: var(--ink);
+  font: inherit;
+  cursor: pointer;
+}
+
+.idea-item:hover {
+  border-color: var(--accent);
+}
+
+.idea-item.is-selected {
+  border-color: var(--accent);
+  background: rgba(255, 92, 57, 0.08);
+}
+
+.idea-title {
+  font-weight: 600;
+}
+
+.custom-title {
+  margin-top: 0.9rem;
+}
+
+.skip-chip-button {
+  cursor: pointer;
+  background: transparent;
+  font: inherit;
+  font-size: 0.72rem;
+}
+
+.skip-chip-button:hover {
+  background: rgba(255, 176, 32, 0.15);
+}
+
+.correction {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.correction em {
+  color: var(--ink);
+  font-style: normal;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}

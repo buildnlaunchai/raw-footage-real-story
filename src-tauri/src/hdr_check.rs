@@ -118,10 +118,7 @@ fn tone_maps_real_hdr_footage_with_zscale() {
             "expected the benign tone-map notice, got {:?}", check.reasons
         );
 
-        clip_inputs.push(ClipInput {
-            clip_id: format!("c{i}"),
-            source_duration_ms: Some(media.duration_ms),
-        });
+        clip_inputs.push(ClipInput::whole(format!("c{i}"), Some(media.duration_ms)));
         line_inputs.push(LineInput { clip_id: format!("c{i}"), duration_ms: narration });
     }
 

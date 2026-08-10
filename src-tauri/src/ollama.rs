@@ -45,6 +45,7 @@ pub async fn ollama_generate(
     format: Option<serde_json::Value>,
     temperature: Option<f32>,
     seed: Option<i64>,
+    num_ctx: Option<u32>,
 ) -> Result<String, OllamaError> {
     let client = reqwest::Client::builder()
         .timeout(REQUEST_TIMEOUT)
@@ -57,6 +58,12 @@ pub async fn ollama_generate(
     }
     if let Some(s) = seed {
         options.insert("seed".into(), serde_json::json!(s));
+    }
+    // Ollama defaults num_ctx to 2048 whatever the model supports, so a large
+    // prompt is silently truncated rather than refused. Anything summarising a
+    // whole clip library must set this explicitly.
+    if let Some(c) = num_ctx {
+        options.insert("num_ctx".into(), serde_json::json!(c));
     }
 
     let mut body = serde_json::json!({
@@ -199,6 +206,7 @@ mod tests {
             Some(schema(clips.len())),
             Some(0.7),
             Some(42),
+            None,
         )
         .await
         .expect("generation should succeed against a running Ollama");
@@ -221,6 +229,7 @@ mod tests {
             HOST.into(),
             "definitely-not-a-real-model:1b".into(),
             "hello".into(),
+            None,
             None,
             None,
             None,

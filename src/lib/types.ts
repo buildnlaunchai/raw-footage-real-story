@@ -17,10 +17,14 @@ export interface Clip {
   isPlaceholder?: boolean;
   isHdr?: boolean;
   warnings?: string[];
+  /** Where in the clip a chosen segment starts. */
+  sourceStartMs?: number;
 }
 
 /** One narration sentence, bound to the clip it was written for. */
 export interface ScriptLine {
   clipId: string;
+  /** Which described moment of that clip this line narrates. */
+  segmentIndex?: number;
   text: string;
 }

@@ -161,6 +161,8 @@ impl TtsError {
 #[serde(rename_all = "camelCase")]
 pub struct ScriptLineInput {
     pub clip_id: String,
+    #[serde(default)]
+    pub segment_index: usize,
     pub text: String,
 }
 
@@ -168,6 +170,8 @@ pub struct ScriptLineInput {
 #[serde(rename_all = "camelCase")]
 pub struct VoicedLine {
     pub clip_id: String,
+    #[serde(default)]
+    pub segment_index: usize,
     pub text: String,
     pub audio_path: String,
     pub duration_ms: u64,
@@ -287,14 +291,17 @@ pub async fn tts_synthesize(
     voice: String,
     project_id: String,
     speed: Option<f32>,
+    pronunciations: Option<std::collections::HashMap<String, String>>,
 ) -> Result<Vec<VoicedLine>, TtsError> {
     let dir = audio_dir(&app, &project_id)?;
     let speed = speed.unwrap_or(1.0);
     let total = lines.len();
     let mut out = Vec::with_capacity(total);
 
+    let overrides = normalise_overrides(pronunciations);
+
     for (i, line) in lines.iter().enumerate() {
-        let ph = g2p::text_to_phonemes(&line.text);
+        let ph = g2p::text_to_phonemes_with(&line.text, &overrides);
         if ph.phonemes.is_empty() {
             return Err(TtsError::new(
                 "EMPTY_PHONEMES",
@@ -309,6 +316,7 @@ pub async fn tts_synthesize(
 
         out.push(VoicedLine {
             clip_id: line.clip_id.clone(),
+            segment_index: line.segment_index,
             text: line.text.clone(),
             audio_path: path.to_string_lossy().to_string(),
             duration_ms: (samples.len() as u64 * 1000) / SAMPLE_RATE as u64,
@@ -350,7 +358,64 @@ pub async fn tts_preview(
 
     Ok(VoicedLine {
         clip_id: "preview".into(),
+        segment_index: 0,
         text,
+        audio_path: path.to_string_lossy().to_string(),
+        duration_ms: (samples.len() as u64 * 1000) / SAMPLE_RATE as u64,
+        skipped: ph.skipped,
+    })
+}
+
+/// Lowercased keys, blank corrections dropped.
+fn normalise_overrides(
+    map: Option<std::collections::HashMap<String, String>>,
+) -> std::collections::HashMap<String, String> {
+    map.unwrap_or_default()
+        .into_iter()
+        .filter(|(_, v)| !v.trim().is_empty())
+        .map(|(k, v)| (k.to_lowercase(), v))
+        .collect()
+}
+
+/// Re-synthesise a single line, overwriting just that file.
+///
+/// Correcting one mispronounced word should not cost a whole voiceover: a
+/// twenty-line script is well over a minute of synthesis, and the other
+/// nineteen lines were already right.
+#[tauri::command]
+pub async fn tts_synthesize_line(
+    app: AppHandle,
+    state: tauri::State<'_, TtsState>,
+    line: ScriptLineInput,
+    line_number: usize,
+    voice: String,
+    project_id: String,
+    speed: Option<f32>,
+    pronunciations: Option<std::collections::HashMap<String, String>>,
+) -> Result<VoicedLine, TtsError> {
+    let dir = audio_dir(&app, &project_id)?;
+    let overrides = normalise_overrides(pronunciations);
+
+    let ph = g2p::text_to_phonemes_with(&line.text, &overrides);
+    if ph.phonemes.is_empty() {
+        return Err(TtsError::new(
+            "EMPTY_PHONEMES",
+            format!("Nothing pronounceable in: {:?}", line.text),
+        ));
+    }
+
+    let samples = with_session(&state, |s| {
+        synthesize_with(s, &ph.phonemes, &voice, speed.unwrap_or(1.0))
+    })?;
+
+    // Same naming as the batch path, so the rendered timeline picks it up.
+    let path = dir.join(format!("line-{:02}.wav", line_number));
+    write_wav(&path, &samples).map_err(|e| TtsError::new("WAV_WRITE_FAILED", e))?;
+
+    Ok(VoicedLine {
+        clip_id: line.clip_id.clone(),
+        segment_index: line.segment_index,
+        text: line.text.clone(),
         audio_path: path.to_string_lossy().to_string(),
         duration_ms: (samples.len() as u64 * 1000) / SAMPLE_RATE as u64,
         skipped: ph.skipped,

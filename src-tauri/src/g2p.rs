@@ -252,6 +252,18 @@ fn punctuation(c: char) -> Option<char> {
 
 /// Convert English text to a Kokoro IPA phoneme string.
 pub fn text_to_phonemes(text: &str) -> Phonemization {
+    text_to_phonemes_with(text, &HashMap::new())
+}
+
+/// As above, with user corrections for words nothing could pronounce.
+///
+/// A correction is ordinary spelling, not IPA: the user writes "rake-ya-vik"
+/// and it is phonemised by the same three-tier chain as everything else.
+/// Requiring IPA would make the feature unusable for the people who need it.
+pub fn text_to_phonemes_with(
+    text: &str,
+    overrides: &HashMap<String, String>,
+) -> Phonemization {
     let mut phonemes = String::new();
     let mut skipped = Vec::new();
 
@@ -309,6 +321,32 @@ pub fn text_to_phonemes(text: &str) -> Phonemization {
                 for (i, w) in words.iter().enumerate() {
                     if i > 0 {
                         phonemes.push(' ');
+                    }
+                    // A correction replaces the word with respelled text, which
+                    // may itself be several words ("rake ya vik").
+                    if let Some(replacement) = overrides.get(w.as_str()) {
+                        let sub: Vec<String> = replacement
+                            .to_lowercase()
+                            .split(|c: char| !c.is_alphanumeric() && c != '\'')
+                            .filter(|t| !t.is_empty())
+                            .map(str::to_string)
+                            .collect();
+                        let mut any = false;
+                        for (j, part) in sub.iter().enumerate() {
+                            if let Some(p) = lookup(part) {
+                                if j > 0 && any {
+                                    phonemes.push(' ');
+                                }
+                                phonemes.push_str(&p);
+                                any = true;
+                            }
+                        }
+                        // A correction that still cannot be pronounced is
+                        // reported, so the user is not left wondering.
+                        if !any && !skipped.contains(&word) {
+                            skipped.push(word.clone());
+                        }
+                        continue;
                     }
                     match lookup(w) {
                         Some(p) => phonemes.push_str(&p),
@@ -390,6 +428,53 @@ mod tests {
         let r = text_to_phonemes("We visited Zzyzxqqq today.");
         assert_eq!(r.skipped, vec!["Zzyzxqqq"], "should report the nonsense word");
         assert!(!r.phonemes.is_empty(), "rest of sentence still phonemised");
+    }
+
+    #[test]
+    fn a_pronunciation_override_rescues_an_unpronounceable_word() {
+        let text = "We landed in Zzyzxqqq at dawn.";
+        let before = text_to_phonemes(text);
+        assert_eq!(before.skipped, vec!["Zzyzxqqq"], "baseline: the word is unpronounceable");
+
+        let mut overrides = HashMap::new();
+        // A respelling only helps if its parts are themselves pronounceable,
+        // which is what a user typing plausible syllables would produce.
+        overrides.insert("zzyzxqqq".to_string(), "see six".to_string());
+        let after = text_to_phonemes_with(text, &overrides);
+
+        println!("\n  before: {} (skipped {:?})", before.phonemes, before.skipped);
+        println!("  after : {} (skipped {:?})", after.phonemes, after.skipped);
+        assert!(after.skipped.is_empty(), "override should resolve it: {:?}", after.skipped);
+        assert!(
+            after.phonemes.len() > before.phonemes.len(),
+            "the corrected word should add phonemes"
+        );
+    }
+
+    #[test]
+    fn a_multi_word_override_is_phonemised_whole() {
+        let mut overrides = HashMap::new();
+        overrides.insert("reykjavik".to_string(), "rake see vik".to_string());
+        let r = text_to_phonemes_with("Reykjavik is cold.", &overrides);
+        assert!(r.skipped.is_empty(), "{:?}", r.skipped);
+        assert!(r.phonemes.split_whitespace().count() >= 3, "got {}", r.phonemes);
+    }
+
+    #[test]
+    fn an_override_that_is_itself_unpronounceable_is_still_reported() {
+        let mut overrides = HashMap::new();
+        overrides.insert("zzyzxqqq".to_string(), "qqqzzz".to_string());
+        let r = text_to_phonemes_with("We saw Zzyzxqqq.", &overrides);
+        assert_eq!(r.skipped, vec!["Zzyzxqqq"], "a useless correction must not look successful");
+    }
+
+    #[test]
+    fn overrides_do_not_disturb_words_that_already_work() {
+        let mut overrides = HashMap::new();
+        overrides.insert("zzyzxqqq".to_string(), "see six".to_string());
+        let plain = text_to_phonemes("The harbour was frozen.");
+        let with = text_to_phonemes_with("The harbour was frozen.", &overrides);
+        assert_eq!(plain.phonemes, with.phonemes);
     }
 
     #[test]

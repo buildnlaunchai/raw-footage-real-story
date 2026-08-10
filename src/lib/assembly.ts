@@ -117,6 +117,7 @@ function toClipSpecs(clips: Clip[]) {
     sourceDurationMs: c.sourceDurationMs ?? null,
     isPlaceholder: c.isPlaceholder ?? false,
     isHdr: c.isHdr ?? null,
+    sourceStartMs: c.sourceStartMs ?? 0,
   }));
 }
 
@@ -153,6 +154,9 @@ export interface RenderOptions {
   model: string;
   voice: string;
   createdAt: string;
+  /** Which video within the project this render belongs to. */
+  videoId?: string;
+  videoTitle?: string;
   onProgress?: (p: RenderProgress) => void;
 }
 
@@ -174,6 +178,8 @@ export async function renderRoughCut(
       voice: opts.voice,
       createdAt: opts.createdAt,
       updatedAt: new Date().toISOString(),
+      videoId: opts.videoId ?? null,
+      videoTitle: opts.videoTitle ?? null,
     });
   } catch (err) {
     throw asError(err);

@@ -34,6 +34,7 @@ pub fn run() {
             tts::tts_list_voices,
             tts::tts_synthesize,
             tts::tts_preview,
+            tts::tts_synthesize_line,
             assembly::ffmpeg_detect,
             assembly::ffmpeg_set_path,
             assembly::assembly_make_placeholders,

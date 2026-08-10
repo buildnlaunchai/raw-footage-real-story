@@ -40,9 +40,26 @@ old projects immutable and correct forever, even as the app evolves.
 
 ## Versioning
 
-`schemaVersion` is an integer, currently `1`. It increments only on breaking
+`schemaVersion` is an integer, currently **`2`**. It increments only on breaking
 changes. An importer should refuse a version it does not understand rather than
 guess.
+
+### What changed in v2
+
+Two breaking changes, both driven by the product becoming "one project, many
+videos cut from one library":
+
+1. **A clip's description became an ordered list of timestamped segments.**
+   Selecting story material needs the eight seconds of a plane landing without
+   the ninety seconds of taxiing after it, which a single flat description
+   cannot express.
+2. **A project holds many videos.** `script`, `audio`, `timeline` and `render`
+   moved off the project and onto entries in a `videos[]` array.
+
+v1 files are migrated on load rather than rejected: a flat `description` becomes
+one segment spanning the whole clip, which preserves its meaning exactly, and
+the single v1 video becomes `videos[0]` with its selection reconstructed from
+its timeline.
 
 ---
 
@@ -61,53 +78,77 @@ guess.
     "updatedAt": "2026-08-10T00:00:00Z"
   },
 
+  // The clip library. Described once, reused by every video.
   "clips": [
     {
       "id": "uuid",
       "sourcePath": "clips/placeholder-00.mp4",  // null if no media yet
       "sha256": "…",                             // null if no media
-      "sourceDurationMs": 4700,                  // null if unknown
-      "description": "Empty harbour, boats frozen in",
-      "isPlaceholder": true
+      "sourceDurationMs": 47000,                 // null if unknown
+      "isPlaceholder": false,
+      "fileName": "IMG_4021.MOV",
+      "thumbnailPath": "thumbs/000.jpg",
+      "isHdr": true,
+      // Contiguous and gapless, ordered by startSec.
+      "segments": [
+        { "startSec": 0,  "endSec": 8,  "text": "plane landing at sunrise" },
+        { "startSec": 8,  "endSec": 47, "text": "frost forming on the window" }
+      ]
     }
   ],
 
-  "script": {
-    "model": "qwen2.5:7b",
-    "generatedAt": "…",
-    "lines": [{ "clipId": "uuid", "text": "The harbour lies still." }]
-  },
-
-  "audio": {
-    "voice": "af_heart",
-    "sampleRate": 24000,
-    "lines": [
-      {
-        "clipId": "uuid",
-        "path": "audio/line-01.wav",
-        "durationMs": 4400,
-        "skippedWords": ["Aqsa"]
-      }
-    ]
-  },
-
-  "timeline": [
+  // Each video cut from the library above.
+  "videos": [
     {
-      "clipId": "uuid",
-      "sourceInMs": 0,
-      "sourceOutMs": 4700,
-      "timelineStartMs": 0,
-      "timelineDurationMs": 4700,
-      "holdMs": 0,
-      "fit": "trimmed"
-    }
-  ],
+      "id": "video-1",
+      "title": "Frozen Harbour",
+      "createdAt": "…", "updatedAt": "…",
 
-  "render": {
-    "width": 1920, "height": 1080, "fps": 30,
-    "vcodec": "h264", "acodec": "aac",
-    "outputPath": "render/rough-cut.mp4"
-  }
+      // The chosen moments, in story order — not clip order.
+      "selection": [{ "clipId": "uuid", "segmentIndex": 1 }],
+
+      "script": {
+        "model": "qwen2.5:7b",
+        "generatedAt": "…",
+        "wordCountTarget": 150,
+        "lines": [
+          { "clipId": "uuid", "segmentIndex": 1,
+            "text": "The harbour lies still.", "edited": false }
+        ]
+      },
+
+      "audio": {
+        "voice": "af_heart",
+        "sampleRate": 24000,
+        "lines": [
+          { "clipId": "uuid", "segmentIndex": 1,
+            "path": "audio/line-01.wav", "durationMs": 4400,
+            "skippedWords": ["Aqsa"] }
+        ]
+      },
+
+      "timeline": [
+        {
+          "clipId": "uuid",
+          "sourceInMs": 8000,      // where the chosen segment starts
+          "sourceOutMs": 12700,
+          "timelineStartMs": 0,
+          "timelineDurationMs": 4700,
+          "holdMs": 0,
+          "fit": "trimmed"
+        }
+      ],
+
+      "render": {
+        "width": 1920, "height": 1080, "fps": 30,
+        "vcodec": "h264", "acodec": "aac",
+        "outputPath": "render/rough-cut.mp4"
+      },
+
+      // word -> respelling, for words the phonemiser could not pronounce.
+      "pronunciations": { "reykjavik": "rake see vik" }
+    }
+  ]
 }
 ```
 
@@ -122,6 +163,25 @@ project, and say so, instead of failing obscurely on a missing or altered file.
 
 `isPlaceholder` marks generated stand-in footage rather than real video. An
 importer should treat placeholders as slots awaiting media, not as content.
+
+`segments[]` are **contiguous and gapless**, ordered by `startSec`, together
+covering the whole clip. The editor that produces them only lets users mark
+boundaries, never ranges, so a gap or an overlap is not representable. An
+importer may rely on that, and a clip with no segments is simply undescribed.
+
+### `videos[]`
+
+A project is a library; each entry here is one video cut from it. They share the
+clips and nothing else — separate selection, script, audio, timeline, render and
+pronunciation corrections.
+
+`selection[]` is the chosen moments **in story order**, which is generally not
+clip order. It is what `timeline[]` is built from.
+
+`pronunciations` maps a lowercased word to an ordinary-spelling respelling
+("rake see vik"), not to IPA. Corrections live per video because how a word
+should sound in this narration is a creative choice about this video, not a fact
+about the footage.
 
 ### `audio.skippedWords`
 
@@ -151,7 +211,9 @@ An importer may rely on all of these:
 - `timelineDurationMs == (sourceOutMs - sourceInMs) + holdMs`.
 - `holdMs > 0` if and only if `fit == "held"`.
 - Every `clipId` in `timeline[]` has a matching entry in both `clips[]` and
-  `audio.lines[]`.
+  `audio.lines[]`, and its `segmentIndex` is valid for that clip.
+- `sourceInMs` is where the chosen *segment* begins, which is non-zero whenever
+  a story uses a moment from partway into a clip.
 - A clip with no narration line does not appear in `timeline[]` at all — there
   would be nothing to say over it.
 

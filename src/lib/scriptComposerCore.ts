@@ -1,0 +1,365 @@
+/**
+ * Pipeline stage C — turn a chosen title into a selected, ordered script.
+ *
+ * This supersedes the original stage 1, which assumed "every clip, in upload
+ * order, exactly one sentence each". That assumption cannot survive a 300-clip
+ * library: a story is a *subset* in *story order*, and some moments deserve two
+ * sentences while others deserve none.
+ *
+ * The old flow is not kept as a parallel mode. Its behaviour is a special case
+ * of this one — select everything, keep upload order, one line each — and
+ * maintaining two code paths to preserve a shape nothing needs would be
+ * carrying cost for its own sake.
+ *
+ * Selection is map-reduce for the same reason story ideas are: the whole
+ * library does not fit in a 7B model's context, and Ollama truncates silently
+ * rather than complaining.
+ *
+ * Dependency-free and transport-injected, so the whole flow is testable
+ * against a real Ollama without a webview.
+ */
+
+export interface DescribedClip {
+  id: string;
+  segments: { startSec: number; endSec: number; text: string }[];
+}
+
+export type GenerateFn = (args: {
+  system?: string;
+  prompt: string;
+  format?: unknown;
+  temperature?: number;
+  seed?: number;
+  numCtx?: number;
+}) => Promise<string>;
+
+export const NUM_CTX = 8192;
+export const BATCH_SIZE = 120;
+
+/** Roughly how many words of narration one segment tends to carry. */
+export const WORDS_PER_SEGMENT = 18;
+
+export interface Candidate {
+  ref: number;
+  clipId: string;
+  segmentIndex: number;
+  text: string;
+}
+
+export interface ScriptLineDraft {
+  clipId: string;
+  segmentIndex: number;
+  text: string;
+}
+
+export interface ScriptDraft {
+  title: string;
+  lines: ScriptLineDraft[];
+  words: number;
+  /** How many segments were considered before narrowing. */
+  consideredSegments: number;
+}
+
+export interface ComposeProgress {
+  stage: "selecting" | "writing" | "adjusting";
+  done: number;
+  total: number;
+}
+
+export class ScriptComposeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ScriptComposeError";
+  }
+}
+
+export function flattenCandidates(clips: DescribedClip[]): Candidate[] {
+  const out: Candidate[] = [];
+  for (const clip of clips) {
+    clip.segments.forEach((s, i) => {
+      const text = s.text.trim();
+      if (text) {
+        out.push({ ref: out.length, clipId: clip.id, segmentIndex: i, text });
+      }
+    });
+  }
+  return out;
+}
+
+export function chunk<T>(items: T[], size: number): T[][] {
+  if (size <= 0) return [items];
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}
+
+export function countWords(text: string): number {
+  return text.trim().split(/\s+/).filter(Boolean).length;
+}
+
+/** How many segments a script of this length wants. */
+export function targetSegmentCount(wordCount: number): number {
+  return Math.max(3, Math.min(40, Math.round(wordCount / WORDS_PER_SEGMENT)));
+}
+
+const SELECT_SYSTEM =
+  "You choose which moments of raw footage belong in a specific video. " +
+  "You only ever choose from the numbered moments you are given. " +
+  "You never invent moments, and you never choose one that does not fit the title.";
+
+const WRITE_SYSTEM =
+  "You write documentary voiceover narration for travel footage. " +
+  "You write only about what the given moments actually show. " +
+  "You never invent places, people or events. " +
+  "The narration reads aloud naturally and carries the viewer from one moment to the next.";
+
+const REFS_SCHEMA = {
+  type: "object",
+  properties: { refs: { type: "array", items: { type: "integer" } } },
+  required: ["refs"],
+};
+
+const SCRIPT_SCHEMA = {
+  type: "object",
+  properties: {
+    lines: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: { ref: { type: "integer" }, text: { type: "string" } },
+        required: ["ref", "text"],
+      },
+    },
+  },
+  required: ["lines"],
+};
+
+function parseRefs(raw: string, valid: Set<number>): number[] {
+  let refs: number[] = [];
+  try {
+    const parsed = JSON.parse(raw) as { refs?: unknown };
+    if (Array.isArray(parsed.refs)) {
+      refs = parsed.refs.filter((r): r is number => Number.isInteger(r));
+    }
+  } catch {
+    refs = [...raw.matchAll(/\b\d+\b/g)].map((m) => Number(m[0]));
+  }
+  // A hallucinated ref is silently dropped rather than allowed to index into
+  // the wrong footage.
+  const seen = new Set<number>();
+  return refs.filter((r) => valid.has(r) && !seen.has(r) && (seen.add(r), true));
+}
+
+function listFor(candidates: Candidate[]): string {
+  return candidates.map((c) => `${c.ref}. ${c.text}`).join("\n");
+}
+
+export interface ComposeOptions {
+  title: string;
+  wordCount: number;
+  seed?: number;
+  onProgress?: (p: ComposeProgress) => void;
+}
+
+/**
+ * Choose the moments this story needs, in the order it needs them.
+ *
+ * Large libraries are shortlisted batch by batch first, so no single prompt has
+ * to hold the whole trip.
+ */
+export async function selectSegments(
+  generate: GenerateFn,
+  candidates: Candidate[],
+  options: ComposeOptions,
+): Promise<Candidate[]> {
+  const want = targetSegmentCount(options.wordCount);
+  const base = { temperature: 0.4, seed: options.seed, numCtx: NUM_CTX };
+  const byRef = new Map(candidates.map((c) => [c.ref, c]));
+
+  let pool = candidates;
+  if (candidates.length > want * 4) {
+    const batches = chunk(candidates, BATCH_SIZE);
+    // Keep enough per batch that the final pass has real choice, without
+    // letting the shortlist grow back to the size of the library.
+    const perBatch = Math.max(2, Math.ceil((want * 3) / batches.length));
+    const shortlist: Candidate[] = [];
+
+    for (let i = 0; i < batches.length; i++) {
+      options.onProgress?.({ stage: "selecting", done: i, total: batches.length });
+      const batch = batches[i];
+      const raw = await generate({
+        ...base,
+        system: SELECT_SYSTEM,
+        format: REFS_SCHEMA,
+        prompt:
+          `Video title: "${options.title}"\n\nMoments:\n${listFor(batch)}\n\n` +
+          `Choose up to ${perBatch} moments above that best serve this video. ` +
+          `If none fit, return an empty list. Return JSON with a "refs" array of ` +
+          `the numbers you chose.`,
+      });
+      const picked = parseRefs(raw, new Set(batch.map((c) => c.ref)));
+      shortlist.push(...picked.map((r) => byRef.get(r)!).filter(Boolean));
+    }
+    options.onProgress?.({ stage: "selecting", done: batches.length, total: batches.length });
+
+    // If shortlisting found nothing usable, fall back to the whole library
+    // rather than producing an empty video.
+    pool = shortlist.length >= Math.min(want, 3) ? shortlist : candidates;
+  }
+
+  // Final pass: pick and order.
+  const raw = await generate({
+    ...base,
+    system: SELECT_SYSTEM,
+    format: REFS_SCHEMA,
+    prompt:
+      `Video title: "${options.title}"\n\nMoments:\n${listFor(pool)}\n\n` +
+      `Choose about ${want} moments for this video and put them in the order ` +
+      `the story should tell them — which is not necessarily the order above. ` +
+      `Return JSON with a "refs" array of the numbers, in your chosen order.`,
+  });
+
+  const ordered = parseRefs(raw, new Set(pool.map((c) => c.ref)))
+    .map((r) => byRef.get(r)!)
+    .filter(Boolean);
+
+  if (ordered.length === 0) {
+    // Better a sensible default than an empty script.
+    return pool.slice(0, want);
+  }
+  return ordered;
+}
+
+/** Write narration over the chosen moments, aiming at the word target. */
+export async function writeScript(
+  generate: GenerateFn,
+  selected: Candidate[],
+  options: ComposeOptions,
+): Promise<ScriptLineDraft[]> {
+  const base = { temperature: 0.7, seed: options.seed, numCtx: NUM_CTX };
+  const raw = await generate({
+    ...base,
+    system: WRITE_SYSTEM,
+    format: SCRIPT_SCHEMA,
+    prompt:
+      `Video title: "${options.title}"\n\n` +
+      `Moments, in order:\n${listFor(selected)}\n\n` +
+      `Write the narration for this video. The whole script should be about ` +
+      `${options.wordCount} words. Give every moment at least one line; a moment ` +
+      `that carries more of the story may have a longer line. Return JSON with a ` +
+      `"lines" array, each item having "ref" (the moment number) and "text".`,
+  });
+
+  const byRef = new Map(selected.map((c) => [c.ref, c]));
+  let lines: ScriptLineDraft[] = [];
+  try {
+    const parsed = JSON.parse(raw) as { lines?: { ref: number; text: string }[] };
+    if (Array.isArray(parsed.lines)) {
+      lines = parsed.lines
+        .filter((l) => byRef.has(l.ref) && typeof l.text === "string" && l.text.trim())
+        .map((l) => ({
+          clipId: byRef.get(l.ref)!.clipId,
+          segmentIndex: byRef.get(l.ref)!.segmentIndex,
+          text: l.text.trim(),
+        }));
+    }
+  } catch {
+    lines = [];
+  }
+  return lines;
+}
+
+/**
+ * Full stage C: select, order, write, and correct the length if it lands wide.
+ *
+ * A single length-correction pass is worth it because word count is a stated
+ * user requirement; more than one is not, because the model tends to oscillate
+ * rather than converge.
+ */
+export async function composeScript(
+  generate: GenerateFn,
+  clips: DescribedClip[],
+  options: ComposeOptions,
+): Promise<ScriptDraft> {
+  if (!options.title.trim()) {
+    throw new ScriptComposeError("Choose or write a title first.");
+  }
+  const candidates = flattenCandidates(clips);
+  if (candidates.length === 0) {
+    throw new ScriptComposeError("Describe at least one clip before generating a script.");
+  }
+
+  const selected = await selectSegments(generate, candidates, options);
+
+  options.onProgress?.({ stage: "writing", done: 0, total: 1 });
+  let lines = await writeScript(generate, selected, options);
+  options.onProgress?.({ stage: "writing", done: 1, total: 1 });
+
+  if (lines.length === 0) {
+    throw new ScriptComposeError(
+      "The model didn't return a usable script. Try again, or pick a different title.",
+    );
+  }
+
+  let words = lines.reduce((n, l) => n + countWords(l.text), 0);
+  const low = options.wordCount * 0.7;
+  const high = options.wordCount * 1.3;
+
+  if (words < low || words > high) {
+    options.onProgress?.({ stage: "adjusting", done: 0, total: 1 });
+    const direction = words < low ? "longer" : "shorter";
+    const current = lines
+      .map((l, i) => `${i + 1}. ${l.text}`)
+      .join("\n");
+    const raw = await generate({
+      system: WRITE_SYSTEM,
+      temperature: 0.5,
+      seed: options.seed,
+      numCtx: NUM_CTX,
+      format: {
+        type: "object",
+        properties: {
+          lines: {
+            type: "array",
+            minItems: lines.length,
+            maxItems: lines.length,
+            items: { type: "string" },
+          },
+        },
+        required: ["lines"],
+      },
+      prompt:
+        `This narration is ${words} words; it needs to be about ${options.wordCount}.\n\n` +
+        `${current}\n\n` +
+        `Rewrite it ${direction}, keeping exactly ${lines.length} lines in the same ` +
+        `order and each line about the same moment. Return JSON with a "lines" ` +
+        `array of ${lines.length} strings.`,
+    });
+    try {
+      const parsed = JSON.parse(raw) as { lines?: unknown };
+      if (Array.isArray(parsed.lines) && parsed.lines.length === lines.length) {
+        const revised = parsed.lines.filter((t): t is string => typeof t === "string");
+        if (revised.length === lines.length) {
+          // Only accept the rewrite if it actually moved toward the target.
+          const revisedWords = revised.reduce((n, t) => n + countWords(t), 0);
+          if (
+            Math.abs(revisedWords - options.wordCount) < Math.abs(words - options.wordCount)
+          ) {
+            lines = lines.map((l, i) => ({ ...l, text: revised[i].trim() }));
+            words = revisedWords;
+          }
+        }
+      }
+    } catch {
+      // Keep the original script; a failed correction is not a failed script.
+    }
+    options.onProgress?.({ stage: "adjusting", done: 1, total: 1 });
+  }
+
+  return {
+    title: options.title,
+    lines,
+    words,
+    consideredSegments: candidates.length,
+  };
+}

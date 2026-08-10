@@ -41,6 +41,16 @@ pub struct ClipInput {
     pub clip_id: String,
     /// None until video upload exists, or for generated placeholders.
     pub source_duration_ms: Option<u64>,
+    /// Where in the source this item starts. Non-zero when a story uses one
+    /// described segment out of a longer clip rather than the whole thing.
+    pub source_start_ms: u64,
+}
+
+impl ClipInput {
+    /// A whole clip, as the pre-segment flow always used.
+    pub fn whole(clip_id: impl Into<String>, source_duration_ms: Option<u64>) -> Self {
+        Self { clip_id: clip_id.into(), source_duration_ms, source_start_ms: 0 }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -80,18 +90,21 @@ pub fn plan(clips: &[ClipInput], lines: &[LineInput]) -> Vec<TimelineItem> {
 
     for line in lines {
         let target = on_screen_ms(line.duration_ms);
-        let source = clips
-            .iter()
-            .find(|c| c.clip_id == line.clip_id)
-            .and_then(|c| c.source_duration_ms);
+        let matched = clips.iter().find(|c| c.clip_id == line.clip_id);
+        let start = matched.map_or(0, |c| c.source_start_ms);
+        // How much material is available from the start point onward. A segment
+        // late in a clip has less runway than the clip's full length suggests.
+        let available = matched
+            .and_then(|c| c.source_duration_ms)
+            .map(|len| len.saturating_sub(start));
 
-        let (source_in_ms, source_out_ms, hold_ms, fit) = match source {
+        let (source_in_ms, source_out_ms, hold_ms, fit) = match available {
             // No media yet: a placeholder is generated at exactly the length
             // required, so nothing needs trimming or holding.
-            None => (0, target, 0, Fit::Exact),
-            Some(len) if len > target => (0, target, 0, Fit::Trimmed),
-            Some(len) if len < target => (0, len, target - len, Fit::Held),
-            Some(len) => (0, len, 0, Fit::Exact),
+            None => (start, start + target, 0, Fit::Exact),
+            Some(len) if len > target => (start, start + target, 0, Fit::Trimmed),
+            Some(len) if len < target => (start, start + len, target - len, Fit::Held),
+            Some(len) => (start, start + len, 0, Fit::Exact),
         };
 
         out.push(TimelineItem {
@@ -119,7 +132,10 @@ mod tests {
     use super::*;
 
     fn clip(id: &str, dur: Option<u64>) -> ClipInput {
-        ClipInput { clip_id: id.into(), source_duration_ms: dur }
+        ClipInput::whole(id, dur)
+    }
+    fn segment_of(id: &str, dur: Option<u64>, start_ms: u64) -> ClipInput {
+        ClipInput { clip_id: id.into(), source_duration_ms: dur, source_start_ms: start_ms }
     }
     fn line(id: &str, dur: u64) -> LineInput {
         LineInput { clip_id: id.into(), duration_ms: dur }
@@ -193,6 +209,39 @@ mod tests {
         let clips = [clip("a", Some(9_000)), clip("b", Some(9_000))];
         let items = plan(&clips, &[line("b", 2_000), line("a", 2_000)]);
         assert_eq!(items.iter().map(|i| i.clip_id.as_str()).collect::<Vec<_>>(), ["b", "a"]);
+    }
+
+    #[test]
+    fn a_segment_starts_where_the_segment_starts() {
+        // 60s clip, the story wants the moment beginning at 40s.
+        let items = plan(&[segment_of("a", Some(60_000), 40_000)], &[line("a", 4_400)]);
+        assert_eq!(items[0].source_in_ms, 40_000, "must start at the segment, not the clip");
+        assert_eq!(items[0].source_out_ms, 44_700);
+        assert_eq!(items[0].fit, Fit::Trimmed, "20s remain, only 4.7s needed");
+        assert_eq!(items[0].timeline_start_ms, 0, "timeline position is unrelated to source position");
+    }
+
+    #[test]
+    fn a_segment_near_the_end_holds_rather_than_running_past_the_clip() {
+        // Only 2s of footage left after the start point, but 4.7s is needed.
+        let items = plan(&[segment_of("a", Some(60_000), 58_000)], &[line("a", 4_400)]);
+        assert_eq!(items[0].fit, Fit::Held);
+        assert_eq!(items[0].source_in_ms, 58_000);
+        assert_eq!(items[0].source_out_ms, 60_000, "never reads past the end of the clip");
+        assert_eq!(items[0].hold_ms, 2_700);
+        assert_eq!(items[0].timeline_duration_ms, 4_700);
+    }
+
+    #[test]
+    fn the_same_clip_can_appear_twice_at_different_moments() {
+        // A story may return to a clip for a different described moment.
+        let clips = [segment_of("a", Some(60_000), 0), segment_of("a", Some(60_000), 30_000)];
+        // Both lines reference clip "a"; the first match wins per line, so this
+        // documents the current limitation rather than pretending otherwise.
+        let items = plan(&clips[..1], &[line("a", 2_000)]);
+        assert_eq!(items[0].source_in_ms, 0);
+        let items = plan(&clips[1..], &[line("a", 2_000)]);
+        assert_eq!(items[0].source_in_ms, 30_000);
     }
 
     #[test]

@@ -266,7 +266,7 @@ fn project_with_video() -> ProjectFile {
         }],
     });
     v.timeline = timeline::plan(
-        &[ClipInput { clip_id: "c0".into(), source_duration_ms: Some(9_000) }],
+        &[ClipInput::whole("c0", Some(9_000))],
         &[LineInput { clip_id: "c0".into(), duration_ms: 2_000 }],
     );
     v.render = Some(RenderSection {

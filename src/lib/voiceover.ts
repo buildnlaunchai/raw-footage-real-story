@@ -19,6 +19,7 @@ export interface VoiceInfo {
 }
 
 export interface VoicedLine extends ScriptLine {
+  segmentIndex: number;
   audioPath: string;
   durationMs: number;
   /** Words no lexicon could pronounce; surfaced rather than silently dropped. */
@@ -87,12 +88,14 @@ export interface GenerateVoiceoverOptions {
   voice: string;
   projectId: string;
   speed?: number;
+  /** Word -> respelling, for words the phonemiser cannot pronounce. */
+  pronunciations?: Record<string, string>;
   onProgress?: (p: TtsProgress) => void;
 }
 
 export async function generateVoiceover(
   script: ScriptLine[],
-  { voice, projectId, speed, onProgress }: GenerateVoiceoverOptions,
+  { voice, projectId, speed, pronunciations, onProgress }: GenerateVoiceoverOptions,
 ): Promise<VoicedLine[]> {
   if (script.length === 0) {
     throw new VoiceoverError("EMPTY_SCRIPT", "Generate a script first.");
@@ -105,10 +108,15 @@ export async function generateVoiceover(
 
   try {
     return await invoke<VoicedLine[]>("tts_synthesize", {
-      lines: script.map((l) => ({ clipId: l.clipId, text: l.text })),
+      lines: script.map((l) => ({
+        clipId: l.clipId,
+        segmentIndex: (l as { segmentIndex?: number }).segmentIndex ?? 0,
+        text: l.text,
+      })),
       voice,
       projectId,
       speed: speed ?? null,
+      pronunciations: pronunciations ?? null,
     });
   } catch (err) {
     throw asError(err);
@@ -139,4 +147,35 @@ export function groupVoices(voices: VoiceInfo[]): Map<string, VoiceInfo[]> {
     else groups.set(key, [v]);
   }
   return groups;
+}
+
+/**
+ * Re-synthesise a single line.
+ *
+ * Correcting one mispronounced word should not cost a whole voiceover — a
+ * twenty-line script is well over a minute of synthesis, and the other lines
+ * were already right.
+ */
+export async function resynthesizeLine(
+  line: { clipId: string; segmentIndex: number; text: string },
+  lineNumber: number,
+  opts: {
+    voice: string;
+    projectId: string;
+    speed?: number;
+    pronunciations?: Record<string, string>;
+  },
+): Promise<VoicedLine> {
+  try {
+    return await invoke<VoicedLine>("tts_synthesize_line", {
+      line,
+      lineNumber,
+      voice: opts.voice,
+      projectId: opts.projectId,
+      speed: opts.speed ?? null,
+      pronunciations: opts.pronunciations ?? null,
+    });
+  } catch (err) {
+    throw asError(err);
+  }
 }

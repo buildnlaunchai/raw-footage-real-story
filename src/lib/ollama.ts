@@ -59,6 +59,8 @@ export interface GenerateArgs {
   format?: unknown;
   temperature?: number;
   seed?: number;
+  /** Ollama defaults to 2048 and truncates silently; set it for big prompts. */
+  numCtx?: number;
 }
 
 export async function generate(args: GenerateArgs): Promise<string> {
@@ -71,6 +73,7 @@ export async function generate(args: GenerateArgs): Promise<string> {
       format: args.format ?? null,
       temperature: args.temperature ?? null,
       seed: args.seed ?? null,
+      numCtx: args.numCtx ?? null,
     });
   } catch (err) {
     throw asOllamaError(err);

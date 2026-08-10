@@ -89,6 +89,10 @@ pub struct ClipSpec {
     /// From the import probe; drives tone mapping at render time.
     #[serde(default)]
     pub is_hdr: Option<bool>,
+    /// Where in the clip this item starts, when a story uses one described
+    /// segment rather than the whole clip.
+    #[serde(default)]
+    pub source_start_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -334,6 +338,7 @@ pub async fn assembly_render(
         .map(|c| ClipInput {
             clip_id: c.id.clone(),
             source_duration_ms: c.source_duration_ms,
+            source_start_ms: c.source_start_ms.unwrap_or(0),
         })
         .collect();
     let line_inputs: Vec<LineInput> = voiced
