@@ -31,6 +31,12 @@ export type GenerateFn = (args: {
   temperature?: number;
   seed?: number;
   numCtx?: number;
+  /**
+   * Which model tier to use. Selection is a mechanical filtering job that a 7B
+   * does well and is run many times over; the final write happens once and is
+   * the thing the viewer actually hears, so it earns the slower model.
+   */
+  tier?: "fast" | "quality";
 }) => Promise<string>;
 
 export const NUM_CTX = 8192;
@@ -38,6 +44,64 @@ export const BATCH_SIZE = 120;
 
 /** Roughly how many words of narration one segment tends to carry. */
 export const WORDS_PER_SEGMENT = 18;
+
+/** Narration styles the user can pick before generating. */
+export type ScriptStyle = "cinematic" | "casual" | "emotional" | "fast";
+
+export const SCRIPT_STYLES: { id: ScriptStyle; label: string; hint: string }[] = [
+  { id: "cinematic", label: "Cinematic", hint: "measured, observational, documentary" },
+  { id: "casual", label: "Casual / vlog", hint: "spoken, warm, first person" },
+  { id: "emotional", label: "Emotional", hint: "reflective, personal, unhurried" },
+  { id: "fast", label: "Fast-paced / reel", hint: "short punchy lines, present tense" },
+];
+
+const STYLE_DIRECTION: Record<ScriptStyle, string> = {
+  cinematic:
+    "Style: cinematic documentary. Measured and observational. Let the images carry the " +
+    "weight; state what is there and trust it. Third person, present or past tense, " +
+    "sentences of varying length.",
+  casual:
+    "Style: casual vlog. Spoken, warm, first person plural (\"we\"). Contractions are fine. " +
+    "It should sound like someone talking over their own footage, not reading an essay.",
+  emotional:
+    "Style: reflective and personal. Unhurried. Allow one moment to land before moving to " +
+    "the next. Feeling is conveyed through what is noticed, never by naming the emotion.",
+  fast: "Style: fast-paced reel. Short punchy lines, present tense, minimal connective " +
+    "tissue. Every line earns its place. No line longer than about twelve words.",
+};
+
+/**
+ * Few-shot examples of narration that works.
+ *
+ * These exist because the default failure mode of a small model asked for
+ * "vivid" writing is a pile of interchangeable adjectives — stunning, breathtaking,
+ * beautiful — that would fit any footage anywhere. Showing what specificity
+ * looks like moves the output far more reliably than adjectives in an
+ * instruction ever does.
+ */
+const FEW_SHOT = `Examples of the standard expected.
+
+Moments: harbour at dawn, boats iced in / fisherman scraping a deck / gulls on a piling
+Narration:
+1. The harbour did not so much freeze as stop, boats caught mid-turn where the water took them.
+2. One man was out early, scraping his deck clear with the back of a shovel.
+3. The gulls had the pilings to themselves and seemed to know it.
+
+Moments: mountain road empty / rain crossing the valley / sheep on the tarmac
+Narration:
+1. The road ran forty miles without meeting another car.
+2. Rain moved across the valley in a single sheet, arriving long after we watched it start.
+3. The sheep had no opinion about the road being ours.
+
+Moments: plane descending at sunrise / frost on the cabin window / first light on the wing
+Narration:
+1. We came down through cloud into a morning that had already been going for hours.
+2. Frost had drawn itself across the inside of the window overnight.
+3. The light caught the wing first, then everything else at once.
+
+Note what these do: name specific things, prefer a concrete verb to an adjective,
+and never describe a scene as beautiful, stunning or breathtaking. Those words
+describe the writer's reaction, not the footage, and would fit any clip anywhere.`;
 
 export interface Candidate {
   ref: number;
@@ -111,6 +175,9 @@ const WRITE_SYSTEM =
   "You write documentary voiceover narration for travel footage. " +
   "You write only about what the given moments actually show. " +
   "You never invent places, people or events. " +
+  "You never use the words beautiful, stunning, breathtaking, amazing or incredible; " +
+  "they describe a reaction rather than the footage. " +
+  "You prefer a specific noun or a concrete verb to any adjective. " +
   "The narration reads aloud naturally and carries the viewer from one moment to the next.";
 
 const REFS_SCHEMA = {
@@ -157,6 +224,7 @@ function listFor(candidates: Candidate[]): string {
 export interface ComposeOptions {
   title: string;
   wordCount: number;
+  style?: ScriptStyle;
   seed?: number;
   onProgress?: (p: ComposeProgress) => void;
 }
@@ -173,7 +241,13 @@ export async function selectSegments(
   options: ComposeOptions,
 ): Promise<Candidate[]> {
   const want = targetSegmentCount(options.wordCount);
-  const base = { temperature: 0.4, seed: options.seed, numCtx: NUM_CTX };
+  // Selection is mechanical filtering run many times over: the fast model.
+  const base = {
+    temperature: 0.4,
+    seed: options.seed,
+    numCtx: NUM_CTX,
+    tier: "fast" as const,
+  };
   const byRef = new Map(candidates.map((c) => [c.ref, c]));
 
   let pool = candidates;
@@ -236,13 +310,21 @@ export async function writeScript(
   selected: Candidate[],
   options: ComposeOptions,
 ): Promise<ScriptLineDraft[]> {
-  const base = { temperature: 0.7, seed: options.seed, numCtx: NUM_CTX };
+  // The final write happens once and is what the viewer hears: the better model.
+  const base = {
+    temperature: 0.7,
+    seed: options.seed,
+    numCtx: NUM_CTX,
+    tier: "quality" as const,
+  };
+  const style = STYLE_DIRECTION[options.style ?? "cinematic"];
   const raw = await generate({
     ...base,
     system: WRITE_SYSTEM,
     format: SCRIPT_SCHEMA,
     prompt:
-      `Video title: "${options.title}"\n\n` +
+      `${FEW_SHOT}\n\n---\n\n` +
+      `Video title: "${options.title}"\n\n${style}\n\n` +
       `Moments, in order:\n${listFor(selected)}\n\n` +
       `Write the narration for this video. The whole script should be about ` +
       `${options.wordCount} words. Give every moment at least one line; a moment ` +
@@ -316,6 +398,7 @@ export async function composeScript(
       temperature: 0.5,
       seed: options.seed,
       numCtx: NUM_CTX,
+      tier: "quality",
       format: {
         type: "object",
         properties: {

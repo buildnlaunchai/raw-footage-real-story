@@ -7,6 +7,7 @@
  */
 import { useState } from "react";
 import type { IdeaProgress, StoryIdea } from "../lib/storyIdeas";
+import { SCRIPT_STYLES, type ScriptStyle } from "../lib/scriptComposer";
 
 interface Props {
   ideas: StoryIdea[] | null;
@@ -17,6 +18,8 @@ interface Props {
   totalSegments: number;
   chosenTitle: string;
   wordCount: number;
+  style: ScriptStyle;
+  onStyle: (s: ScriptStyle) => void;
   onSuggest: () => void;
   onChooseTitle: (title: string) => void;
   onWordCount: (n: number) => void;
@@ -34,6 +37,8 @@ export function StoryPanel({
   totalSegments,
   chosenTitle,
   wordCount,
+  style,
+  onStyle,
   onSuggest,
   onChooseTitle,
   onWordCount,
@@ -71,6 +76,23 @@ export function StoryPanel({
           <span className="hint">
             words · roughly {Math.round((wordCount / 150) * 60)}s of narration
           </span>
+        </div>
+      </div>
+
+      <div className="field-row">
+        <span className="field-label">Tone</span>
+        <div className="style-row">
+          {SCRIPT_STYLES.map((s) => (
+            <button
+              key={s.id}
+              type="button"
+              className={`style-chip${style === s.id ? " is-selected" : ""}`}
+              onClick={() => onStyle(s.id)}
+              title={s.hint}
+            >
+              {s.label}
+            </button>
+          ))}
         </div>
       </div>
 

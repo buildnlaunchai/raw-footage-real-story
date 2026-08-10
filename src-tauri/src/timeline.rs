@@ -19,6 +19,34 @@ use serde::{Deserialize, Serialize};
 /// syllable.
 pub const TAIL_MS: u64 = 300;
 
+/// Extra beat when a line finishes a thought.
+///
+/// A cut lands better when it respects how the sentence ended. A full stop is a
+/// place to breathe; a comma or dash is mid-thought, and pausing there as long
+/// makes the narration sound like it lost its place. This is why cuts felt
+/// mechanical before: every line got the same 300ms regardless of whether
+/// anything had actually concluded.
+pub const SENTENCE_TAIL_MS: u64 = 520;
+
+/// Mid-thought endings get less than a full stop, not more.
+pub const CLAUSE_TAIL_MS: u64 = 180;
+
+/// How long the narration audio may trail off in near-silence before we stop
+/// counting it as speech. Kokoro often leaves a little room at the end, and
+/// cutting on the file length rather than on the last word adds a pause nobody
+/// asked for on top of the one we chose deliberately.
+pub const TRAILING_SILENCE_GRACE_MS: u64 = 60;
+
+/// The beat owed to a line, from how it ends.
+pub fn tail_for(text: &str) -> u64 {
+    match text.trim_end().chars().last() {
+        Some('.') | Some('!') | Some('?') | Some('…') => SENTENCE_TAIL_MS,
+        Some(',') | Some(';') | Some(':') | Some('—') | Some('-') => CLAUSE_TAIL_MS,
+        // No terminal punctuation at all: treat as a soft ending.
+        _ => TAIL_MS,
+    }
+}
+
 /// A very short sentence should still leave its clip on screen long enough to
 /// register as a shot rather than a flash.
 pub const MIN_ON_SCREEN_MS: u64 = 1500;
@@ -68,12 +96,39 @@ impl ClipInput {
 pub struct LineInput {
     pub clip_id: String,
     pub segment_index: usize,
+    /// Length of the narration audio file.
     pub duration_ms: u64,
+    /// Where the last word actually ends, if measured. Falls back to
+    /// `duration_ms`, which is the old behaviour.
+    pub speech_end_ms: Option<u64>,
+    /// The line's text, so the cut can respect how the sentence ended.
+    pub text: Option<String>,
 }
 
 impl LineInput {
     pub fn whole(clip_id: impl Into<String>, duration_ms: u64) -> Self {
-        Self { clip_id: clip_id.into(), segment_index: 0, duration_ms }
+        Self {
+            clip_id: clip_id.into(),
+            segment_index: 0,
+            duration_ms,
+            speech_end_ms: None,
+            text: None,
+        }
+    }
+
+    /// Where narration effectively ends: the last word, not the end of a file
+    /// that may trail off into room tone.
+    fn effective_end_ms(&self) -> u64 {
+        match self.speech_end_ms {
+            Some(end) if end + TRAILING_SILENCE_GRACE_MS < self.duration_ms => {
+                end + TRAILING_SILENCE_GRACE_MS
+            }
+            _ => self.duration_ms,
+        }
+    }
+
+    fn tail_ms(&self) -> u64 {
+        self.text.as_deref().map_or(TAIL_MS, tail_for)
     }
 }
 
@@ -101,6 +156,11 @@ pub fn on_screen_ms(narration_ms: u64) -> u64 {
     (narration_ms + TAIL_MS).max(MIN_ON_SCREEN_MS)
 }
 
+/// As above, but respecting where speech actually ended and how it ended.
+fn on_screen_for(line: &LineInput) -> u64 {
+    (line.effective_end_ms() + line.tail_ms()).max(MIN_ON_SCREEN_MS)
+}
+
 /// Lay narration lines out in order, sizing each clip to its line.
 ///
 /// Lines drive the result: a clip with no narration line is not shown, since
@@ -110,7 +170,7 @@ pub fn plan(clips: &[ClipInput], lines: &[LineInput]) -> Vec<TimelineItem> {
     let mut out = Vec::with_capacity(lines.len());
 
     for line in lines {
-        let target = on_screen_ms(line.duration_ms);
+        let target = on_screen_for(line);
         // Match on the pair, not the clip alone: the same clip can appear
         // twice in one story at different moments.
         let matched = clips
@@ -175,7 +235,22 @@ mod tests {
         LineInput::whole(id, dur)
     }
     fn line_at(id: &str, idx: usize, dur: u64) -> LineInput {
-        LineInput { clip_id: id.into(), segment_index: idx, duration_ms: dur }
+        LineInput {
+            clip_id: id.into(),
+            segment_index: idx,
+            duration_ms: dur,
+            speech_end_ms: None,
+            text: None,
+        }
+    }
+    fn spoken(id: &str, dur: u64, speech_end: u64, text: &str) -> LineInput {
+        LineInput {
+            clip_id: id.into(),
+            segment_index: 0,
+            duration_ms: dur,
+            speech_end_ms: Some(speech_end),
+            text: Some(text.into()),
+        }
     }
 
     #[test]
@@ -311,6 +386,52 @@ mod tests {
         let items = plan(&clips, &[line_at("a", 7, 2_000)]);
         assert_eq!(items[0].source_in_ms, 0, "no match means no offset, not the wrong one");
         assert_eq!(items[0].segment_index, 7, "the line's own identity is preserved");
+    }
+
+    #[test]
+    fn a_finished_sentence_gets_a_longer_beat_than_a_clause() {
+        let full = plan(&[clip("a", Some(60_000))], &[spoken("a", 4_000, 4_000, "We landed at dawn.")]);
+        let mid = plan(&[clip("a", Some(60_000))], &[spoken("a", 4_000, 4_000, "We landed at dawn,")]);
+        assert_eq!(full[0].timeline_duration_ms, 4_000 + SENTENCE_TAIL_MS);
+        assert_eq!(mid[0].timeline_duration_ms, 4_000 + CLAUSE_TAIL_MS);
+        assert!(
+            full[0].timeline_duration_ms > mid[0].timeline_duration_ms,
+            "a completed thought should get more room than a mid-sentence pause"
+        );
+    }
+
+    #[test]
+    fn trailing_silence_in_the_audio_does_not_become_an_extra_pause() {
+        // 5s file, but the last word lands at 3.6s.
+        let items = plan(
+            &[clip("a", Some(60_000))],
+            &[spoken("a", 5_000, 3_600, "The harbour was still.")],
+        );
+        // Cut from the last word plus grace, not from the end of the file.
+        assert_eq!(
+            items[0].timeline_duration_ms,
+            3_600 + TRAILING_SILENCE_GRACE_MS + SENTENCE_TAIL_MS
+        );
+        assert!(
+            items[0].timeline_duration_ms < 5_000 + SENTENCE_TAIL_MS,
+            "measured speech end should shorten the slot, not lengthen it"
+        );
+    }
+
+    #[test]
+    fn a_file_with_no_trailing_silence_is_unchanged() {
+        let items = plan(
+            &[clip("a", Some(60_000))],
+            &[spoken("a", 4_000, 3_990, "Done.")],
+        );
+        // Within the grace window, so the file length still governs.
+        assert_eq!(items[0].timeline_duration_ms, 4_000 + SENTENCE_TAIL_MS);
+    }
+
+    #[test]
+    fn lines_without_measurements_behave_exactly_as_before() {
+        let items = plan(&[clip("a", Some(60_000))], &[line("a", 4_400)]);
+        assert_eq!(items[0].timeline_duration_ms, 4_400 + TAIL_MS);
     }
 
     #[test]

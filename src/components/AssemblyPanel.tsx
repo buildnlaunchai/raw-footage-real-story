@@ -27,6 +27,7 @@ interface Props {
   onConsolidate: () => void;
   consolidating: boolean;
   hasExternalMedia: boolean;
+  children?: React.ReactNode;
 }
 
 const FIT_LABEL: Record<TimelineItem["fit"], string> = {
@@ -54,6 +55,7 @@ export function AssemblyPanel({
   onConsolidate,
   consolidating,
   hasExternalMedia,
+  children,
 }: Props) {
   const byId = new Map(clips.map((c) => [c.id, c]));
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -109,6 +111,8 @@ export function AssemblyPanel({
           </button>
         </div>
       )}
+
+      {children}
 
       <div className="actions">
         <button type="button" className="primary-button" onClick={onRender} disabled={busy}>

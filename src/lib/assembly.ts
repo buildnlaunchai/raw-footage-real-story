@@ -166,6 +166,10 @@ export interface RenderOptions {
   videoTitle?: string;
   /** `clipId#segmentIndex` -> where that segment starts in the clip. */
   segmentStarts?: Map<string, number>;
+  /** Milliseconds of dissolve between clips. 0 keeps hard cuts. */
+  crossfadeMs?: number;
+  /** Bundled bed id, or null for silence under the narration. */
+  musicId?: string | null;
   onProgress?: (p: RenderProgress) => void;
 }
 
@@ -189,6 +193,8 @@ export async function renderRoughCut(
       updatedAt: new Date().toISOString(),
       videoId: opts.videoId ?? null,
       videoTitle: opts.videoTitle ?? null,
+      crossfadeMs: opts.crossfadeMs ?? 0,
+      musicId: opts.musicId ?? null,
     });
   } catch (err) {
     throw asError(err);
@@ -281,3 +287,10 @@ export async function consolidateMedia(
     throw asError(err);
   }
 }
+
+/** Bundled, procedurally generated music beds. See resources/music/LICENSE.md. */
+export const MUSIC_BEDS: { id: string; label: string; hint: string }[] = [
+  { id: "still-water", label: "Still water", hint: "low, slow, unobtrusive" },
+  { id: "open-road", label: "Open road", hint: "brighter, a little movement" },
+  { id: "cold-air", label: "Cold air", hint: "airy, textural" },
+];

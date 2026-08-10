@@ -106,6 +106,8 @@ pub struct VoicedSpec {
     pub duration_ms: u64,
     pub skipped: Vec<String>,
     #[serde(default)]
+    pub speech_end_ms: Option<u64>,
+    #[serde(default)]
     pub edited: bool,
     /// Where in the clip this line's segment begins.
     #[serde(default)]
@@ -331,6 +333,8 @@ pub async fn assembly_render(
     updated_at: String,
     video_id: Option<String>,
     video_title: Option<String>,
+    crossfade_ms: Option<u32>,
+    music_id: Option<String>,
 ) -> Result<AssembleResult, FfmpegError> {
     let info = ffmpeg::detect(&load_settings(&app))?;
     let dir = project_dir(&app, &project_id)?;
@@ -357,6 +361,8 @@ pub async fn assembly_render(
             clip_id: v.clip_id.clone(),
             segment_index: v.segment_index,
             duration_ms: v.duration_ms,
+            speech_end_ms: v.speech_end_ms,
+            text: Some(v.text.clone()),
         })
         .collect();
 
@@ -420,7 +426,18 @@ pub async fn assembly_render(
         RenderProgress { stage: "encoding".into(), done: 0, total: items.len() },
     );
 
-    let settings = RenderSettings::default();
+    // Music ids map to bundled files; an unknown id is silence rather than an
+    // error, since a missing bed should not fail a render.
+    let music_path = music_id.as_deref().and_then(|id| {
+        let safe: String = id.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
+        let p = crate::resources::root().join("music").join(format!("{safe}.m4a"));
+        p.is_file().then(|| p.to_string_lossy().to_string())
+    });
+    let settings = RenderSettings {
+        crossfade_ms: crossfade_ms.unwrap_or(0),
+        music_path,
+        ..RenderSettings::default()
+    };
     let out = dir.join("render").join("rough-cut.mp4");
     ffmpeg::render_rough_cut(&info.ffmpeg, &render_items, &settings, &info.caps, &out)?;
 

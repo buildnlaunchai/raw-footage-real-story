@@ -852,3 +852,31 @@ kbd {
   font-style: normal;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
+
+.style-row {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.style-chip {
+  padding: 0.35rem 0.7rem;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--ink-dim);
+  font: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.style-chip:hover {
+  border-color: var(--accent);
+  color: var(--ink);
+}
+
+.style-chip.is-selected {
+  border-color: var(--accent);
+  background: rgba(255, 92, 57, 0.12);
+  color: var(--ink);
+}

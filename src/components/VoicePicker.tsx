@@ -18,6 +18,7 @@ export function VoicePicker({
   onSelect,
   onPreview,
 }: Props) {
+  const recommended = voices.filter((v) => v.recommended);
   const groups = groupVoices(voices);
 
   return (
@@ -33,6 +34,17 @@ export function VoicePicker({
           disabled={disabled || voices.length === 0}
           onChange={(e) => onSelect(e.currentTarget.value)}
         >
+          {/* The shortlist first: 55 flat options is a survey, not a choice.
+              Chosen by measurement — see voice_audition.rs. */}
+          {recommended.length > 0 && (
+            <optgroup label="Recommended for narration">
+              {recommended.map((v) => (
+                <option key={v.id} value={v.id}>
+                  {v.label} · {v.accent} {v.gender}
+                </option>
+              ))}
+            </optgroup>
+          )}
           {[...groups.entries()].map(([group, list]) => (
             <optgroup key={group} label={group}>
               {list.map((v) => (

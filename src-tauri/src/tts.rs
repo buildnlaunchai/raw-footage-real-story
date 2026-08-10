@@ -175,7 +175,33 @@ pub struct VoicedLine {
     pub text: String,
     pub audio_path: String,
     pub duration_ms: u64,
+    /// Where the last word ends. Kokoro often leaves room after it, and cutting
+    /// on file length rather than on speech adds a pause nobody chose.
+    #[serde(default)]
+    pub speech_end_ms: u64,
     pub skipped: Vec<String>,
+}
+
+/// Last moment above a level relative to the clip's own loudness.
+///
+/// Relative rather than absolute so a quiet voice is not mistaken for silence:
+/// the auditioned voices differ by more than 3x in RMS.
+pub fn speech_end_ms(samples: &[f32]) -> u64 {
+    if samples.is_empty() {
+        return 0;
+    }
+    let n = samples.len() as f32;
+    let rms = (samples.iter().map(|s| s * s).sum::<f32>() / n).sqrt();
+    let threshold = (rms * 0.12).max(0.0015);
+    let frame = (SAMPLE_RATE as usize) / 100; // 10ms
+    let mut last_voiced = 0usize;
+    for (i, chunk) in samples.chunks(frame).enumerate() {
+        let f = (chunk.iter().map(|s| s * s).sum::<f32>() / chunk.len().max(1) as f32).sqrt();
+        if f >= threshold {
+            last_voiced = i + 1;
+        }
+    }
+    ((last_voiced * frame) as u64 * 1000) / SAMPLE_RATE as u64
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -194,7 +220,18 @@ pub struct VoiceInfo {
     pub accent: String,
     pub gender: String,
     pub label: String,
+    /// Surfaced first in the picker. See `voice_audition.rs` for how this was
+    /// chosen: every voice measured on one fixed line, scored on pace, flow,
+    /// level and dynamics, then restricted to English accents because the app
+    /// narrates in English.
+    pub recommended: bool,
 }
+
+/// Chosen by `voice_audition::audition_every_voice_and_rank_for_narration`.
+/// Regenerate that list rather than editing this by hand.
+const RECOMMENDED: &[&str] = &[
+    "af_kore", "am_fenrir", "bm_george", "bf_isabella", "af_aoede", "am_adam", "bf_alice",
+];
 
 /// Kokoro voice ids encode accent and gender in their first two letters:
 /// a=American, b=British; f=female, m=male.
@@ -225,7 +262,13 @@ fn describe_voice(id: &str) -> VoiceInfo {
             None => name.to_string(),
         }
     };
-    VoiceInfo { id: id.to_string(), accent: accent.into(), gender: gender.into(), label }
+    VoiceInfo {
+        id: id.to_string(),
+        accent: accent.into(),
+        gender: gender.into(),
+        label,
+        recommended: RECOMMENDED.contains(&id),
+    }
 }
 
 #[tauri::command]
@@ -320,6 +363,7 @@ pub async fn tts_synthesize(
             text: line.text.clone(),
             audio_path: path.to_string_lossy().to_string(),
             duration_ms: (samples.len() as u64 * 1000) / SAMPLE_RATE as u64,
+            speech_end_ms: speech_end_ms(&samples),
             skipped: ph.skipped,
         });
 
@@ -362,6 +406,7 @@ pub async fn tts_preview(
         text,
         audio_path: path.to_string_lossy().to_string(),
         duration_ms: (samples.len() as u64 * 1000) / SAMPLE_RATE as u64,
+        speech_end_ms: speech_end_ms(&samples),
         skipped: ph.skipped,
     })
 }
@@ -418,6 +463,7 @@ pub async fn tts_synthesize_line(
         text: line.text.clone(),
         audio_path: path.to_string_lossy().to_string(),
         duration_ms: (samples.len() as u64 * 1000) / SAMPLE_RATE as u64,
+        speech_end_ms: speech_end_ms(&samples),
         skipped: ph.skipped,
     })
 }
@@ -482,6 +528,17 @@ mod tests {
         let heart = voices.iter().find(|v| v.id == "af_heart").unwrap();
         assert_eq!((heart.accent.as_str(), heart.gender.as_str()), ("American", "Female"));
         assert_eq!(heart.label, "Heart");
+
+        // The curated shortlist must exist, be English-accented, and not be
+        // so long that it stops being a shortlist.
+        let rec: Vec<&VoiceInfo> = voices.iter().filter(|v| v.recommended).collect();
+        assert!((5..=8).contains(&rec.len()), "shortlist is {} voices", rec.len());
+        assert!(
+            rec.iter().all(|v| v.accent == "American" || v.accent == "British"),
+            "recommendations must be English-accented"
+        );
+        assert!(rec.iter().any(|v| v.gender == "Male") && rec.iter().any(|v| v.gender == "Female"));
+        println!("  recommended: {:?}", rec.iter().map(|v| &v.id).collect::<Vec<_>>());
 
         let mut groups: std::collections::BTreeMap<String, usize> = Default::default();
         for v in &voices {

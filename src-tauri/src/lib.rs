@@ -10,6 +10,7 @@ mod store_tests;
 mod resources;
 mod timeline;
 mod tts;
+mod voice_audition;
 
 use tauri::Manager;
 

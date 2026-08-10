@@ -519,12 +519,53 @@ pub struct RenderSettings {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
+    /// Crossfade between clips, in milliseconds. Zero means hard cuts, which
+    /// stays the default: the original scope called for cuts only, and a
+    /// dissolve is a stylistic choice rather than an improvement.
+    #[serde(default)]
+    pub crossfade_ms: u32,
+    /// Optional music bed mixed under the narration.
+    #[serde(default)]
+    pub music_path: Option<String>,
+    /// Music level relative to full scale. Low by default: a bed that competes
+    /// with the voice defeats the point of the voice.
+    #[serde(default = "default_music_gain")]
+    pub music_gain: f32,
+}
+
+fn default_music_gain() -> f32 {
+    0.10
 }
 
 impl Default for RenderSettings {
     fn default() -> Self {
-        Self { width: 1920, height: 1080, fps: 30 }
+        Self {
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            crossfade_ms: 0,
+            music_path: None,
+            music_gain: default_music_gain(),
+        }
     }
+}
+
+/// Longest crossfade that still leaves a slot with picture of its own.
+///
+/// A dissolve consumes time from both neighbours, so on a short slot two
+/// overlapping fades can leave no un-faded frames at all — the shot never
+/// resolves. Capping at a third of the shortest slot keeps every clip visible
+/// as itself.
+pub fn clamp_crossfade(requested_ms: u32, items: &[RenderItem]) -> u32 {
+    if requested_ms == 0 || items.len() < 2 {
+        return 0;
+    }
+    let shortest = items
+        .iter()
+        .map(|i| i.item.timeline_duration_ms)
+        .min()
+        .unwrap_or(0);
+    requested_ms.min((shortest / 3) as u32).min(1_500)
 }
 
 /// Assemble the rough cut in a single pass.
@@ -544,7 +585,7 @@ pub fn render_rough_cut(
         return Err(FfmpegError::new("NOTHING_TO_RENDER", "There are no lines to assemble."));
     }
 
-    let RenderSettings { width, height, fps } = *settings;
+    let RenderSettings { width, height, fps, .. } = *settings;
     let mut cmd = Command::new(ffmpeg);
     cmd.args(["-y", "-v", "error"]);
 
@@ -592,14 +633,59 @@ pub fn render_rough_cut(
         ));
     }
 
-    for i in 0..items.len() {
-        filter.push_str(&format!("[v{i}][a{i}]"));
-    }
-    filter.push_str(&format!("concat=n={}:v=1:a=1[outv][outa]", items.len()));
+    let fade_ms = clamp_crossfade(settings.crossfade_ms, items);
+    let (vout, aout) = if fade_ms == 0 {
+        // Hard cuts: one concat handles both streams and keeps them locked.
+        for i in 0..items.len() {
+            filter.push_str(&format!("[v{i}][a{i}]"));
+        }
+        filter.push_str(&format!("concat=n={}:v=1:a=1[outv][outa];", items.len()));
+        ("[outv]".to_string(), "[outa]".to_string())
+    } else {
+        // Crossfade: chain xfade/acrossfade pairwise. Both streams get the same
+        // fade so audio and video stay locked; the overlap lands in the tail
+        // after the last word, which is why the tail exists.
+        let d = fade_ms as f64 / 1000.0;
+        let mut offset = 0f64;
+        let mut vprev = "v0".to_string();
+        let mut aprev = "a0".to_string();
+        for i in 1..items.len() {
+            // Each fade overlaps the streams, so every subsequent offset is
+            // reduced by all the overlap consumed so far.
+            offset += items[i - 1].item.timeline_duration_ms as f64 / 1000.0 - d;
+            let (vn, an) = (format!("xv{i}"), format!("xa{i}"));
+            filter.push_str(&format!(
+                "[{vprev}][v{i}]xfade=transition=fade:duration={d:.3}:offset={offset:.3}[{vn}];"
+            ));
+            filter.push_str(&format!("[{aprev}][a{i}]acrossfade=d={d:.3}[{an}];"));
+            vprev = vn;
+            aprev = an;
+        }
+        (format!("[{vprev}]"), format!("[{aprev}]"))
+    };
 
+    // Optional music bed under the narration.
+    let aout = match settings.music_path.as_deref().filter(|p| Path::new(p).is_file()) {
+        None => aout,
+        Some(music) => {
+            cmd.arg("-stream_loop").arg("-1").arg("-i").arg(music);
+            let music_idx = items.len() * 2;
+            let gain = settings.music_gain.clamp(0.0, 1.0);
+            filter.push_str(&format!(
+                "[{music_idx}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,\
+                 volume={gain:.3},afade=t=in:d=1.5[mus];"
+            ));
+            // duration=first keeps the mix as long as the narration; the looped
+            // music is trimmed to it rather than extending the film.
+            filter.push_str(&format!("{aout}[mus]amix=inputs=2:duration=first:dropout_transition=0[mixa];"));
+            "[mixa]".to_string()
+        }
+    };
+
+    let filter = filter.trim_end_matches(';').to_string();
     cmd.args(["-filter_complex", &filter]);
     cmd.args([
-        "-map", "[outv]", "-map", "[outa]",
+        "-map", &vout, "-map", &aout,
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
         // yuv420p is not optional: without it QuickTime and browsers refuse
         // otherwise-valid H.264 files.

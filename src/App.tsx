@@ -25,6 +25,7 @@ import {
   generateScriptForTitle,
   type ComposeProgress,
   type ScriptLineDraft,
+  type ScriptStyle,
 } from "./lib/scriptComposer";
 import {
   audioUrl,
@@ -39,6 +40,7 @@ import {
 import {
   detectFfmpeg,
   importMedia,
+  MUSIC_BEDS,
   renderRoughCut,
   VIDEO_EXTENSIONS,
   type AssembleResult,
@@ -68,6 +70,7 @@ function App() {
   const [ideaError, setIdeaError] = useState<string | null>(null);
   const [title, setTitle] = useState("");
   const [wordCount, setWordCount] = useState(150);
+  const [style, setStyle] = useState<ScriptStyle>("cinematic");
 
   // --- script (C/D) --------------------------------------------------------
   const [lines, setLines] = useState<ScriptLineDraft[] | null>(null);
@@ -92,6 +95,8 @@ function App() {
   const [assemblyBusy, setAssemblyBusy] = useState(false);
   const [renderProgress, setRenderProgress] = useState<RenderProgress | null>(null);
   const [assemblyError, setAssemblyError] = useState<string | null>(null);
+  const [crossfadeMs, setCrossfadeMs] = useState(0);
+  const [musicId, setMusicId] = useState<string | null>(null);
 
   const projectId = manifest?.project.id ?? null;
 
@@ -334,6 +339,7 @@ function App() {
       const draft = await generateScriptForTitle(manifest.clips, {
         title,
         wordCount,
+        style,
         onProgress: setComposeProgress,
       });
       setLines(draft.lines);
@@ -463,6 +469,8 @@ function App() {
         videoId: "video-1",
         videoTitle: title,
         segmentStarts,
+        crossfadeMs,
+        musicId,
         onProgress: setRenderProgress,
       });
       setAssembly(result);
@@ -570,6 +578,8 @@ function App() {
           totalSegments={segments}
           chosenTitle={title}
           wordCount={wordCount}
+          style={style}
+          onStyle={setStyle}
           onSuggest={onSuggestIdeas}
           onChooseTitle={setTitle}
           onWordCount={setWordCount}
@@ -667,7 +677,53 @@ function App() {
           onConsolidate={() => {}}
           consolidating={false}
           hasExternalMedia={manifest.clips.some((c) => c.sourcePath && !c.isPlaceholder)}
-        />
+        >
+          <div className="field-row">
+            <span className="field-label">Transitions</span>
+            <div className="style-row">
+              <button
+                type="button"
+                className={`style-chip${crossfadeMs === 0 ? " is-selected" : ""}`}
+                onClick={() => setCrossfadeMs(0)}
+                title="The default: an instant cut between clips"
+              >
+                Hard cuts
+              </button>
+              <button
+                type="button"
+                className={`style-chip${crossfadeMs === 400 ? " is-selected" : ""}`}
+                onClick={() => setCrossfadeMs(400)}
+                title="A 400ms dissolve; shortens the film slightly"
+              >
+                Crossfade
+              </button>
+            </div>
+          </div>
+
+          <div className="field-row">
+            <span className="field-label">Music</span>
+            <div className="style-row">
+              <button
+                type="button"
+                className={`style-chip${musicId === null ? " is-selected" : ""}`}
+                onClick={() => setMusicId(null)}
+              >
+                None
+              </button>
+              {MUSIC_BEDS.map((m) => (
+                <button
+                  key={m.id}
+                  type="button"
+                  className={`style-chip${musicId === m.id ? " is-selected" : ""}`}
+                  onClick={() => setMusicId(m.id)}
+                  title={m.hint}
+                >
+                  {m.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </AssemblyPanel>
       )}
 
       <footer className="footer">

@@ -16,6 +16,8 @@ export interface VoiceInfo {
   accent: string;
   gender: string;
   label: string;
+  /** Surfaced first in the picker; chosen by measurement, not taste. */
+  recommended: boolean;
 }
 
 export interface VoicedLine extends ScriptLine {

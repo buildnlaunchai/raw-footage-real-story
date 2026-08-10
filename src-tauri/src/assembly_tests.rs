@@ -85,7 +85,7 @@ fn assembles_a_rough_cut_with_correct_order_and_timing() {
     );
 
     // Build media: a coloured card per clip, and narration-length silence.
-    let settings = RenderSettings { width: 640, height: 360, fps: 30 };
+    let settings = RenderSettings { width: 640, height: 360, fps: 30, ..Default::default() };
     let mut render_items = Vec::new();
     for (i, item) in items.iter().enumerate() {
         let (_, hex, _) = PALETTE[i];
@@ -187,7 +187,7 @@ fn rotation_survives_filter_complex() {
     tts::write_wav(&audio, &vec![0f32; 1_000 * 24]).expect("wav");
 
     let out = fx.dir.join("rotated-out.mp4");
-    let settings = RenderSettings { width: 1920, height: 1080, fps: 30 };
+    let settings = RenderSettings { width: 1920, height: 1080, fps: 30, ..Default::default() };
     ffmpeg::render_rough_cut(
         &fx.ffmpeg,
         &[RenderItem { video: rotated, audio, item: items[0].clone(), is_hdr: false }],
@@ -342,7 +342,7 @@ fn handles_awkward_sources_and_normalises_them() {
         .collect();
 
     let items = timeline::plan(&clips, &lines);
-    let settings = RenderSettings { width: 1920, height: 1080, fps: 30 };
+    let settings = RenderSettings { width: 1920, height: 1080, fps: 30, ..Default::default() };
 
     let mut render_items = Vec::new();
     for (i, item) in items.iter().enumerate() {
@@ -506,14 +506,16 @@ fn one_clip_used_twice_shows_two_different_moments() {
         ClipInput { clip_id: "a".into(), segment_index: 0, source_duration_ms: Some(6_000), source_start_ms: 0 },
     ];
     let lines = [
-        LineInput { clip_id: "a".into(), segment_index: 1, duration_ms: 1_200 },
-        LineInput { clip_id: "a".into(), segment_index: 0, duration_ms: 1_200 },
+        LineInput { clip_id: "a".into(), segment_index: 1, duration_ms: 1_200,
+                    speech_end_ms: None, text: None },
+        LineInput { clip_id: "a".into(), segment_index: 0, duration_ms: 1_200,
+                    speech_end_ms: None, text: None },
     ];
     let items = timeline::plan(&clips, &lines);
     assert_eq!(items[0].source_in_ms, 3_200, "blue moment keeps its own offset");
     assert_eq!(items[1].source_in_ms, 0, "red moment is unaffected");
 
-    let settings = RenderSettings { width: 640, height: 360, fps: 30 };
+    let settings = RenderSettings { width: 640, height: 360, fps: 30, ..Default::default() };
     let mut render_items = Vec::new();
     for (i, item) in items.iter().enumerate() {
         let audio = fx.dir.join(format!("a{i}.wav"));
@@ -627,7 +629,7 @@ fn output_has_the_expected_streams_and_format() {
     let clips = [ClipInput::whole("c0", None)];
     let items = timeline::plan(&clips, &lines);
 
-    let settings = RenderSettings { width: 640, height: 360, fps: 30 };
+    let settings = RenderSettings { width: 640, height: 360, fps: 30, ..Default::default() };
     let video = fx.dir.join("c0.mp4");
     ffmpeg::make_placeholder(
         &fx.ffmpeg, &video, "0xFF0000", items[0].timeline_duration_ms,
@@ -664,4 +666,170 @@ fn output_has_the_expected_streams_and_format() {
     for expected in ["codec_name=h264", "pix_fmt=yuv420p", "codec_name=aac", "sample_rate=48000", "channels=2"] {
         assert!(text.contains(expected), "missing {expected} in:\n{text}");
     }
+}
+
+/// Crossfade must dissolve between clips without losing time or picture.
+#[test]
+fn crossfade_shortens_the_cut_and_still_shows_every_clip() {
+    let Some(fx) = Fixture::new("xfade") else {
+        eprintln!("ffmpeg not available; skipping");
+        return;
+    };
+
+    let lines: Vec<LineInput> = (0..3)
+        .map(|i| LineInput::whole(format!("c{i}"), 1_800))
+        .collect();
+    let clips: Vec<ClipInput> = (0..3)
+        .map(|i| ClipInput::whole(format!("c{i}"), Some(4_000)))
+        .collect();
+    let items = timeline::plan(&clips, &lines);
+
+    let mut render_items = Vec::new();
+    for (i, item) in items.iter().enumerate() {
+        let video = fx.dir.join(format!("c{i}.mp4"));
+        ffmpeg::make_placeholder(&fx.ffmpeg, &video, PALETTE[i].1, 4_000, 640, 360, 30)
+            .expect("placeholder");
+        let audio = fx.dir.join(format!("a{i}.wav"));
+        tts::write_wav(&audio, &vec![0f32; 1_800 * 24]).expect("wav");
+        render_items.push(RenderItem { video, audio, item: item.clone(), is_hdr: false });
+    }
+
+    let plain = timeline::total_duration_ms(&items);
+    let fade_ms = 400u32;
+
+    let hard = fx.dir.join("hard.mp4");
+    ffmpeg::render_rough_cut(
+        &fx.ffmpeg, &render_items,
+        &RenderSettings { width: 640, height: 360, fps: 30, ..Default::default() },
+        &ffmpeg::FfmpegCaps::default(), &hard,
+    ).expect("hard cuts");
+
+    let faded = fx.dir.join("faded.mp4");
+    ffmpeg::render_rough_cut(
+        &fx.ffmpeg, &render_items,
+        &RenderSettings {
+            width: 640, height: 360, fps: 30, crossfade_ms: fade_ms, ..Default::default()
+        },
+        &ffmpeg::FfmpegCaps::default(), &faded,
+    ).expect("crossfade");
+
+    let hard_ms = ffmpeg::probe_duration_ms(&fx.ffprobe, &hard).expect("probe hard");
+    let fade_dur = ffmpeg::probe_duration_ms(&fx.ffprobe, &faded).expect("probe faded");
+    // Each dissolve overlaps two clips, so the film loses one fade per join.
+    let expected = plain - (items.len() as u64 - 1) * fade_ms as u64;
+    println!("\n  hard cuts {hard_ms}ms · crossfaded {fade_dur}ms · expected ~{expected}ms");
+    assert!(
+        (fade_dur as i64 - expected as i64).abs() <= 200,
+        "crossfaded film should be shorter by one fade per join"
+    );
+    assert!(fade_dur < hard_ms, "crossfade must shorten, not lengthen");
+
+    // Every clip must still resolve to itself somewhere, not be permanently
+    // half-dissolved into its neighbour.
+    for (i, _) in items.iter().enumerate() {
+        let centre = expected * (2 * i as u64 + 1) / (2 * items.len() as u64);
+        let rgb = ffmpeg::frame_rgb(&fx.ffmpeg, &faded, centre).expect("frame");
+        println!("    {centre:>5}ms rgb{rgb:?} -> {}", nearest(rgb));
+        assert_eq!(nearest(rgb), PALETTE[i].0, "clip {i} should be itself mid-slot");
+    }
+}
+
+/// A dissolve longer than the shot would leave nothing un-faded.
+#[test]
+fn crossfade_is_capped_so_short_clips_still_resolve() {
+    let items: Vec<RenderItem> = (0..3)
+        .map(|i| RenderItem {
+            video: PathBuf::from("/dev/null"),
+            audio: PathBuf::from("/dev/null"),
+            item: crate::timeline::TimelineItem {
+                clip_id: format!("c{i}"),
+                segment_index: 0,
+                source_in_ms: 0,
+                source_out_ms: 1_500,
+                timeline_start_ms: i as u64 * 1_500,
+                timeline_duration_ms: 1_500,
+                hold_ms: 0,
+                fit: Fit::Exact,
+            },
+            is_hdr: false,
+        })
+        .collect();
+
+    // Asking for 3s of dissolve on 1.5s shots is clamped to a third of a shot.
+    assert_eq!(ffmpeg::clamp_crossfade(3_000, &items), 500);
+    assert_eq!(ffmpeg::clamp_crossfade(400, &items), 400, "a sane request passes through");
+    assert_eq!(ffmpeg::clamp_crossfade(0, &items), 0, "zero stays hard cuts");
+    assert_eq!(ffmpeg::clamp_crossfade(500, &items[..1]), 0, "one clip has no joins");
+}
+
+/// Music must sit under the narration, not replace or outlast it.
+#[test]
+fn music_bed_is_mixed_under_the_narration() {
+    let Some(fx) = Fixture::new("music") else {
+        eprintln!("ffmpeg not available; skipping");
+        return;
+    };
+
+    // A short bed, deliberately shorter than the film so looping is exercised.
+    let music = fx.dir.join("bed.wav");
+    let status = std::process::Command::new(&fx.ffmpeg)
+        .args(["-y", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=220:duration=1.5",
+               "-c:a", "pcm_s16le"])
+        .arg(&music)
+        .status()
+        .expect("bed");
+    assert!(status.success());
+
+    let lines = [LineInput::whole("c0", 2_000), LineInput::whole("c1", 2_000)];
+    let clips = [ClipInput::whole("c0", Some(4_000)), ClipInput::whole("c1", Some(4_000))];
+    let items = timeline::plan(&clips, &lines);
+
+    let mut render_items = Vec::new();
+    for (i, item) in items.iter().enumerate() {
+        let video = fx.dir.join(format!("c{i}.mp4"));
+        ffmpeg::make_placeholder(&fx.ffmpeg, &video, PALETTE[i].1, 4_000, 640, 360, 30)
+            .expect("placeholder");
+        // Silent narration: anything audible in the output must be the bed.
+        let audio = fx.dir.join(format!("a{i}.wav"));
+        tts::write_wav(&audio, &vec![0f32; 2_000 * 24]).expect("wav");
+        render_items.push(RenderItem { video, audio, item: item.clone(), is_hdr: false });
+    }
+
+    let out = fx.dir.join("with-music.mp4");
+    ffmpeg::render_rough_cut(
+        &fx.ffmpeg, &render_items,
+        &RenderSettings {
+            width: 640, height: 360, fps: 30,
+            music_path: Some(music.to_string_lossy().into()),
+            music_gain: 0.10,
+            ..Default::default()
+        },
+        &ffmpeg::FfmpegCaps::default(), &out,
+    ).expect("render with music");
+
+    let expected = timeline::total_duration_ms(&items);
+    let actual = ffmpeg::probe_duration_ms(&fx.ffprobe, &out).expect("probe");
+    println!("\n  film {actual}ms (expected {expected}ms), bed was only 1500ms");
+    assert!(
+        (actual as i64 - expected as i64).abs() <= 250,
+        "a looping bed must not extend the film past the narration"
+    );
+
+    // The bed should be audible but quiet.
+    let probe = std::process::Command::new(&fx.ffmpeg)
+        .args(["-v", "info", "-i"])
+        .arg(&out)
+        .args(["-af", "volumedetect", "-f", "null", "-"])
+        .output()
+        .expect("volumedetect");
+    let text = String::from_utf8_lossy(&probe.stderr);
+    let mean = text
+        .lines()
+        .find(|l| l.contains("mean_volume"))
+        .and_then(|l| l.split(':').nth(1))
+        .and_then(|v| v.trim().trim_end_matches(" dB").parse::<f32>().ok())
+        .expect("mean volume");
+    println!("  mean volume {mean:.1} dB");
+    assert!(mean > -70.0, "the bed should be audible, got {mean} dB");
+    assert!(mean < -20.0, "the bed should sit low under the voice, got {mean} dB");
 }
