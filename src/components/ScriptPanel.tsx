@@ -24,6 +24,8 @@ interface Props {
   wordTarget: number;
   voiced: VoicedLine[] | null;
   pronunciations: Record<string, string>;
+  /** Cloud providers have no lexicon, so nothing can be flagged. */
+  showPronunciationFixes: boolean;
   busy: boolean;
   resynthesizing: string | null;
   onEditLine: (index: number, text: string) => void;
@@ -43,6 +45,7 @@ export function ScriptPanel({
   wordTarget,
   voiced,
   pronunciations,
+  showPronunciationFixes,
   busy,
   resynthesizing,
   onEditLine,
@@ -121,7 +124,8 @@ export function ScriptPanel({
                       {isBusy ? "Re-recording…" : playing === key ? "▶ Playing" : "▶ Play"}
                     </button>
                     <span className="hint">{(audio.durationMs / 1000).toFixed(1)}s</span>
-                    {audio.skipped.map((w) => (
+                    {showPronunciationFixes &&
+                      audio.skipped.map((w) => (
                       <button
                         key={w}
                         type="button"
@@ -130,8 +134,8 @@ export function ScriptPanel({
                         onClick={() => setCorrecting(w)}
                       >
                         {w} ⚠
-                      </button>
-                    ))}
+                        </button>
+                      ))}
                   </div>
                 )}
               </div>
@@ -179,7 +183,14 @@ export function ScriptPanel({
         </div>
       )}
 
-      {Object.keys(pronunciations).length > 0 && (
+      {!showPronunciationFixes && voiced && (
+        <p className="placeholder-note">
+          This voice does its own pronunciation. If a word sounds wrong, edit the
+          line above and re-record just that line.
+        </p>
+      )}
+
+      {showPronunciationFixes && Object.keys(pronunciations).length > 0 && (
         <p className="placeholder-note">
           Corrections in this video:{" "}
           {Object.entries(pronunciations)

@@ -405,3 +405,59 @@ fn loads_the_real_scale_demo_project_if_present() {
     assert_eq!(p.clips.len(), 300);
     assert!(p.clips.iter().all(|c| c.thumbnail_path.is_some()), "every clip should have a thumbnail");
 }
+
+// --- credential isolation ---------------------------------------------------
+
+/// The API key must have nowhere to live in a project, by construction.
+///
+/// A schema is a promise; this is the check that keeps it. Serialising a fully
+/// populated project and grepping the result catches a field added later
+/// without anyone thinking about where it ends up.
+#[test]
+fn a_serialised_project_contains_no_credential_fields() {
+    let json = serde_json::to_string(&project_with_video()).unwrap().to_lowercase();
+    for forbidden in ["apikey", "api_key", "xi-api-key", "secret", "token", "password"] {
+        assert!(
+            !json.contains(forbidden),
+            "project JSON must never contain {forbidden:?}"
+        );
+    }
+}
+
+/// An exported bundle must carry no credentials either — not the manifest, not
+/// a stray settings file swept in by a future change to what gets zipped.
+#[test]
+fn an_exported_bundle_contains_no_credentials_or_settings() {
+    let dir = tmp("nocreds");
+    std::fs::create_dir_all(dir.join("audio")).unwrap();
+    project::write_json(&project_with_video(), &dir.join("project.json")).unwrap();
+    std::fs::write(dir.join("audio/line-01.wav"), b"fake").unwrap();
+    // A settings file sitting in the project directory must not be picked up.
+    std::fs::write(dir.join("settings.json"), br#"{"apiKey":"sk_should_never_ship"}"#).unwrap();
+
+    let zip_path = dir.join("bundle.zip");
+    project::write_bundle(&dir, &zip_path).unwrap();
+
+    let f = std::fs::File::open(&zip_path).unwrap();
+    let mut archive = zip::ZipArchive::new(f).unwrap();
+    let names: Vec<String> = (0..archive.len())
+        .map(|i| archive.by_index(i).unwrap().name().to_string())
+        .collect();
+    println!("\n  bundle contains: {names:?}");
+    assert!(
+        !names.iter().any(|n| n.contains("settings")),
+        "settings must never be bundled: {names:?}"
+    );
+
+    // And nothing inside the archive carries key material.
+    for i in 0..archive.len() {
+        use std::io::Read;
+        let mut entry = archive.by_index(i).unwrap();
+        let name = entry.name().to_string();
+        let mut buf = Vec::new();
+        let _ = entry.read_to_end(&mut buf);
+        let text = String::from_utf8_lossy(&buf).to_lowercase();
+        assert!(!text.contains("sk_should_never_ship"), "key material found in {name}");
+        assert!(!text.contains("apikey"), "an apiKey field appeared in {name}");
+    }
+}

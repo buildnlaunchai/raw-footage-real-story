@@ -6,7 +6,7 @@ import { ProjectPicker } from "./components/ProjectPicker";
 import { SegmentEditor } from "./components/SegmentEditor";
 import { StoryPanel } from "./components/StoryPanel";
 import { ScriptPanel } from "./components/ScriptPanel";
-import { VoicePicker } from "./components/VoicePicker";
+import { ProviderPicker } from "./components/ProviderPicker";
 import { AssemblyPanel } from "./components/AssemblyPanel";
 import { FfmpegSetup } from "./components/FfmpegSetup";
 import { OLLAMA_MODEL } from "./config/ollama";
@@ -27,16 +27,15 @@ import {
   type ScriptLineDraft,
   type ScriptStyle,
 } from "./lib/scriptComposer";
+import { audioUrl } from "./lib/voiceover";
 import {
-  audioUrl,
-  generateVoiceover,
-  listVoices,
-  previewVoice,
-  resynthesizeLine,
-  type TtsProgress,
-  type VoiceInfo,
+  providerFor,
+  type LineFailure,
+  type ProviderId,
+  type SynthProgress,
   type VoicedLine,
-} from "./lib/voiceover";
+  type VoiceOption,
+} from "./lib/ttsProviders";
 import {
   detectFfmpeg,
   importMedia,
@@ -86,12 +85,15 @@ function App() {
   const [pronunciations, setPronunciations] = useState<Record<string, string>>({});
 
   // --- voiceover -----------------------------------------------------------
-  const [voices, setVoices] = useState<VoiceInfo[]>([]);
+  const [providerId, setProviderId] = useState<ProviderId>("local");
+  const [voices, setVoices] = useState<VoiceOption[]>([]);
+  const [voicesError, setVoicesError] = useState<string | null>(null);
   const [voice, setVoice] = useState(DEFAULT_VOICE);
+  const [failures, setFailures] = useState<LineFailure[]>([]);
   const [voiced, setVoiced] = useState<VoicedLine[] | null>(null);
   const [ttsBusy, setTtsBusy] = useState(false);
   const [previewing, setPreviewing] = useState(false);
-  const [ttsProgress, setTtsProgress] = useState<TtsProgress | null>(null);
+  const [ttsProgress, setTtsProgress] = useState<SynthProgress | null>(null);
   const [ttsError, setTtsError] = useState<string | null>(null);
   const [resynthesizing, setResynthesizing] = useState<string | null>(null);
 
@@ -106,13 +108,32 @@ function App() {
 
   const projectId = manifest?.project.id ?? null;
 
-  useEffect(() => {
-    listVoices()
+  const provider = providerFor(providerId);
+
+  const loadVoices = useCallback(() => {
+    setVoicesError(null);
+    providerFor(providerId)
+      .listVoices()
       .then((list) => {
         setVoices(list);
-        if (!list.some((v) => v.id === DEFAULT_VOICE) && list.length > 0) setVoice(list[0].id);
+        // Keep the current voice if this provider offers it; otherwise fall to
+        // the first recommended one, then to whatever exists.
+        setVoice((cur) => {
+          if (list.some((v) => v.id === cur)) return cur;
+          return list.find((v) => v.recommended)?.id ?? list[0]?.id ?? "";
+        });
       })
-      .catch((err) => setTtsError(err.message));
+      .catch((err) => {
+        setVoices([]);
+        setVoicesError(err instanceof Error ? err.message : String(err));
+      });
+  }, [providerId]);
+
+  useEffect(() => {
+    loadVoices();
+  }, [loadVoices]);
+
+  useEffect(() => {
     void detectFfmpeg().then(setFfmpeg);
   }, []);
 
@@ -379,15 +400,19 @@ function App() {
     if (!lines || !projectId) return;
     setTtsBusy(true);
     setTtsError(null);
+    setFailures([]);
     setTtsProgress({ done: 0, total: lines.length, clipId: "" });
     try {
-      const result = await generateVoiceover(lines, {
-        voice,
+      const result = await provider.synthesize(lines, {
+        voiceId: voice,
         projectId,
         pronunciations,
         onProgress: setTtsProgress,
       });
-      setVoiced(result);
+      // Keep whatever succeeded. With a cloud provider those lines are already
+      // billed, and discarding them would charge for them twice.
+      setVoiced(result.lines.length > 0 ? result.lines : null);
+      setFailures(result.failures);
       setAssembly(null);
       setDirty(true);
     } catch (err) {
@@ -399,11 +424,51 @@ function App() {
     }
   }
 
+  /** Retry only the lines that failed, rather than re-billing the whole script. */
+  async function onRetryFailed() {
+    if (!lines || !projectId || failures.length === 0) return;
+    setTtsBusy(true);
+    setTtsError(null);
+    const stillFailing: LineFailure[] = [];
+    const recovered: VoicedLine[] = [];
+    for (const f of failures) {
+      const line = lines[f.lineNumber - 1];
+      if (!line) continue;
+      try {
+        recovered.push(
+          await provider.synthesizeLine(
+            { clipId: line.clipId, segmentIndex: line.segmentIndex, text: line.text },
+            f.lineNumber,
+            { voiceId: voice, projectId, pronunciations },
+          ),
+        );
+      } catch (err) {
+        stillFailing.push({
+          ...f,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    setVoiced((cur) => {
+      const merged = [...(cur ?? []), ...recovered];
+      // Keep script order rather than completion order.
+      const rank = new Map(lines.map((l, i) => [`${l.clipId}#${l.segmentIndex}`, i]));
+      return merged.sort(
+        (a, b) =>
+          (rank.get(`${a.clipId}#${a.segmentIndex}`) ?? 0) -
+          (rank.get(`${b.clipId}#${b.segmentIndex}`) ?? 0),
+      );
+    });
+    setFailures(stillFailing);
+    setTtsBusy(false);
+    setDirty(true);
+  }
+
   async function onPreview() {
     setPreviewing(true);
     setTtsError(null);
     try {
-      const sample = await previewVoice(voice);
+      const sample = await provider.preview(voice);
       await new Audio(audioUrl(sample.audioPath)).play();
     } catch (err) {
       setTtsError(err instanceof Error ? err.message : String(err));
@@ -427,10 +492,10 @@ function App() {
       const key = `${v.clipId}#${v.segmentIndex}`;
       setResynthesizing(key);
       try {
-        const redone = await resynthesizeLine(
+        const redone = await provider.synthesizeLine(
           { clipId: v.clipId, segmentIndex: v.segmentIndex, text: v.text },
           i + 1,
-          { voice, projectId, pronunciations: next },
+          { voiceId: voice, projectId, pronunciations: next },
         );
         setVoiced((cur) => (cur ? cur.map((x, j) => (j === i ? redone : x)) : cur));
         // Audio changed, so any existing cut is stale.
@@ -619,17 +684,23 @@ function App() {
           wordTarget={wordCount}
           voiced={voiced}
           pronunciations={pronunciations}
+          showPronunciationFixes={provider.capabilities.reportsUnpronounceableWords}
           busy={ttsBusy}
           resynthesizing={resynthesizing}
           onEditLine={onEditLine}
           onCorrectWord={onCorrectWord}
         >
-          <VoicePicker
+          <ProviderPicker
+            providerId={providerId}
+            onProvider={setProviderId}
             voices={voices}
-            selected={voice}
+            voiceId={voice}
+            onVoice={setVoice}
+            voicesError={voicesError}
+            onReloadVoices={loadVoices}
+            scriptLines={lines}
             disabled={ttsBusy}
             previewing={previewing}
-            onSelect={setVoice}
             onPreview={onPreview}
           />
           <div className="actions">
@@ -651,6 +722,26 @@ function App() {
             <div className="error" role="alert">
               <strong>Couldn’t generate the voiceover.</strong>
               <span>{ttsError}</span>
+            </div>
+          )}
+          {failures.length > 0 && (
+            <div className="warning" role="status">
+              <strong>
+                {failures.length} line{failures.length === 1 ? "" : "s"} didn’t record.
+              </strong>
+              <span>
+                The rest were kept. {failures[0].message}
+              </span>
+              <div className="actions">
+                <button
+                  type="button"
+                  className="ghost-button small"
+                  onClick={onRetryFailed}
+                  disabled={ttsBusy}
+                >
+                  Retry just those lines
+                </button>
+              </div>
             </div>
           )}
         </ScriptPanel>
@@ -739,7 +830,11 @@ function App() {
 
       <footer className="footer">
         <span className="badge">Library → story → script → voice → cut</span>
-        <p>Everything runs locally. Nothing is uploaded.</p>
+        <p>
+          {provider.capabilities.isCloud
+            ? "Your footage stays on this machine. Narration text is sent to ElevenLabs."
+            : "Everything runs locally. Nothing is uploaded."}
+        </p>
       </footer>
     </main>
   );

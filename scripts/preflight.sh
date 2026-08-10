@@ -29,6 +29,8 @@ SECRET_PATTERNS=(
   'AKIA[0-9A-Z]{16}'                      # AWS access key ids
   '-----BEGIN [A-Z ]*PRIVATE KEY-----'    # private keys
   '(service_role|SERVICE_ROLE)[[:space:]]*[:=][[:space:]]*['"'"'"][^'"'"'"]{20,}'
+  'xi-api-key[[:space:]]*[:=][[:space:]]*['"'"'"][^'"'"'"]{8,}'   # ElevenLabs, inline
+  'sk_[a-f0-9]{32,}'                                              # ElevenLabs key shape
 )
 for pattern in "${SECRET_PATTERNS[@]}"; do
   if hits=$(grep -rInE "${EXCLUDES[@]}" "$pattern" "${SCAN_DIRS[@]}" 2>/dev/null); then
@@ -108,6 +110,26 @@ if grep -rInE '^[[:space:]]*espeak' src-tauri/Cargo.toml 2>/dev/null; then
   espeak_hits=1
 fi
 [ "$espeak_hits" -eq 0 ] && ok "  clean — no GPL phonemiser"
+
+# --- 5. no API key ever reaches a project file -----------------------------
+# The ElevenLabs key is a live billing credential. It lives in the OS keychain,
+# never in a project, and never in an exported bundle. The schema has nowhere to
+# put one, but a schema is a promise and this is the check.
+say "→ checking no API key has leaked into a project file"
+key_leak=0
+PROJECT_DIR="$HOME/Library/Application Support/com.buildnlaunchai.raw-footage-real-story/projects"
+if [ -d "$PROJECT_DIR" ]; then
+  if grep -rlE 'xi-api-key|sk_[a-f0-9]{32,}|apiKey' "$PROJECT_DIR" --include='project.json' 2>/dev/null; then
+    bad "  a project file contains something key-shaped (listed above)"
+    key_leak=1
+  fi
+fi
+# And the schema itself must have no field for one.
+if grep -rInE 'api_key|apiKey' src-tauri/src/project.rs 2>/dev/null; then
+  bad "  the project schema has an api key field; it must not"
+  key_leak=1
+fi
+[ "$key_leak" -eq 0 ] && ok "  clean — no key material in projects"
 
 say ""
 if [ "$fail" -ne 0 ]; then

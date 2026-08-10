@@ -39,6 +39,7 @@ hound = "3"
 zip = "2"
 sha2 = "0.10"
 tauri-plugin-dialog = "2.7.2"
+keyring = "3"
 
 [dev-dependencies]
 # Integration tests drive the async Ollama commands directly.

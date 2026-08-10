@@ -1,4 +1,5 @@
 mod assembly;
+mod elevenlabs;
 mod assembly_tests;
 mod ffmpeg;
 mod g2p;
@@ -8,6 +9,7 @@ mod project;
 mod store;
 mod store_tests;
 mod resources;
+mod secrets;
 mod timeline;
 mod tts;
 mod voice_audition;
@@ -36,6 +38,14 @@ pub fn run() {
             tts::tts_synthesize,
             tts::tts_preview,
             tts::tts_synthesize_line,
+            secrets::secret_present,
+            secrets::secret_set,
+            secrets::secret_clear,
+            elevenlabs::elevenlabs_voices,
+            elevenlabs::elevenlabs_usage,
+            elevenlabs::elevenlabs_test_key,
+            elevenlabs::elevenlabs_synthesize,
+            elevenlabs::elevenlabs_synthesize_line,
             assembly::ffmpeg_detect,
             assembly::ffmpeg_set_path,
             assembly::assembly_make_placeholders,
