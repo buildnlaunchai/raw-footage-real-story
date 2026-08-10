@@ -338,9 +338,16 @@ export async function hasApiKey(account = "elevenlabs"): Promise<boolean> {
   }
 }
 
-export async function setApiKey(secret: string, account = "elevenlabs"): Promise<void> {
+/**
+ * Store a key and return whether it is now actually readable.
+ *
+ * The boolean is the point: the previous version returned void and callers
+ * optimistically set their own "key saved" state, which is how the UI came to
+ * claim a key existed while generation insisted it did not.
+ */
+export async function setApiKey(secret: string, account = "elevenlabs"): Promise<boolean> {
   try {
-    await invoke("secret_set", { account, secret });
+    return await invoke<boolean>("secret_set", { account, secret });
   } catch (err) {
     throw asTtsError(err);
   }

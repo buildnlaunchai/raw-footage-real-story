@@ -50,8 +50,17 @@ export function ScriptProviderSetup({
       // Validated with a one-word call before storing, so a typo never becomes
       // a saved credential that fails mid-generation.
       await testOpenAiKey(keyInput.trim());
-      await setApiKey(keyInput.trim(), "openai");
-      setKeyPresent(true);
+      const stored = await setApiKey(keyInput.trim(), "openai");
+      // Confirm against the store rather than assuming the write took. A save
+      // that silently fails must not leave the UI claiming otherwise.
+      const present = stored && (await hasApiKey("openai"));
+      setKeyPresent(present);
+      if (!present) {
+        setKeyError(
+          "The key couldn't be saved to your system keychain. Set the matching environment variable instead.",
+        );
+        return;
+      }
       setKeyInput("");
     } catch (err) {
       setKeyError(err instanceof Error ? err.message : String(err));

@@ -87,9 +87,17 @@ export function ProviderPicker({
       // Validate before storing, so a typo never becomes a saved credential
       // that fails later with a confusing message.
       const u = await testApiKey(keyInput.trim());
-      await setApiKey(keyInput.trim());
+      const stored = await setApiKey(keyInput.trim());
+      // Confirm against the store rather than assuming the write took.
+      const present = stored && (await hasApiKey());
+      setKeyPresent(present);
+      if (!present) {
+        setKeyError(
+          "The key couldn't be saved to your system keychain. Set ELEVENLABS_API_KEY instead.",
+        );
+        return;
+      }
       setUsage(u);
-      setKeyPresent(true);
       setKeyInput("");
       onReloadVoices();
     } catch (err) {

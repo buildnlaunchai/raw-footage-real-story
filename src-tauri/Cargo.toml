@@ -39,10 +39,22 @@ hound = "3"
 zip = "2"
 sha2 = "0.10"
 tauri-plugin-dialog = "2.7.2"
-keyring = "3"
 
 [dev-dependencies]
 # Integration tests drive the async Ollama commands directly.
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
+# keyring's platform backends are opt-in features. Without one it compiles
+# against its **mock** store (`pub use mock as default`), which accepts a write,
+# returns Ok, and stores nothing — so the API looks like it works and silently
+# discards every credential. Each target gets a real backend explicitly.
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+
+# The D-Bus Secret Service (GNOME Keyring / KWallet) rather than linux-native,
+# which uses kernel keyutils and does not survive a reboot.
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["sync-secret-service"] }
