@@ -11,9 +11,12 @@ import {
 } from "../lib/assembly";
 import { audioUrl } from "../lib/voiceover";
 import type { Clip } from "../lib/types";
+import type { VoicedLine } from "../lib/ttsProviders";
 
 interface Props {
   clips: Clip[];
+  /** The narration behind the timeline, so each row can show what is said. */
+  voiced: VoicedLine[] | null;
   ffmpeg: FfmpegInfo;
   result: AssembleResult | null;
   busy: boolean;
@@ -42,6 +45,7 @@ function secs(ms: number): string {
 
 export function AssemblyPanel({
   clips,
+  voiced,
   ffmpeg,
   result,
   busy,
@@ -58,6 +62,11 @@ export function AssemblyPanel({
   children,
 }: Props) {
   const byId = new Map(clips.map((c) => [c.id, c]));
+  // Keyed by the line's identity, not its clip: one clip can carry several
+  // moments, and each has its own narration.
+  const narrationFor = new Map(
+    (voiced ?? []).map((v) => [`${v.clipId}#${v.segmentIndex ?? 0}`, v.text]),
+  );
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [exported, setExported] = useState<string | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
@@ -146,12 +155,15 @@ export function AssemblyPanel({
 
           <ol className="script-list timeline-list">
             {result.timeline.map((item, i) => (
-              <li key={item.clipId} className="script-row">
+              <li key={`${item.clipId}#${item.segmentIndex}`} className="script-row">
                 <span className="clip-index" aria-hidden="true">
                   {String(i + 1).padStart(2, "0")}
                 </span>
                 <div className="voiced-body">
                   <p className="script-clip">{byId.get(item.clipId)?.description}</p>
+                  <p className="script-text">
+                    {narrationFor.get(`${item.clipId}#${item.segmentIndex}`)}
+                  </p>
                   <div className="voiced-controls">
                     <span className="hint">
                       {secs(item.timelineStartMs)} → {secs(item.timelineStartMs + item.timelineDurationMs)}

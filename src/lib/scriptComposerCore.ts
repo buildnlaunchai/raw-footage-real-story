@@ -173,6 +173,19 @@ export function targetSegmentCount(wordCount: number): number {
   return Math.max(3, Math.min(40, Math.round(wordCount / WORDS_PER_SEGMENT)));
 }
 
+/**
+ * How many moments to ask for, given how many actually exist.
+ *
+ * The word target implies a segment count, but footage is the hard limit: a
+ * library of three clips cannot supply six distinct moments. Asking anyway is
+ * what produced scripts that returned to the same clip twice in a row, because
+ * the only way to satisfy the request was to reuse footage. Fewer, longer lines
+ * over real moments is the honest reading of "110 words".
+ */
+export function momentsToRequest(wordCount: number, available: number): number {
+  return Math.max(1, Math.min(targetSegmentCount(wordCount), available));
+}
+
 const SELECT_SYSTEM =
   "You choose which moments of raw footage belong in a specific video. " +
   "You only ever choose from the numbered moments you are given. " +
@@ -336,7 +349,7 @@ export async function selectSegments(
   candidates: Candidate[],
   options: ComposeOptions,
 ): Promise<Candidate[]> {
-  const want = targetSegmentCount(options.wordCount);
+  const want = momentsToRequest(options.wordCount, candidates.length);
   // Selection is mechanical filtering run many times over: the fast model.
   const base = {
     temperature: 0.4,
@@ -434,8 +447,9 @@ export async function writeScript(
       `Video title: "${options.title}"\n\n${style}\n\n${inLanguage}` +
       `Moments, in order:\n${listFor(selected)}\n\n` +
       `Write the narration for this video. The whole script should be ` +
-      `${lengthInstruction(options.wordCount, lang)}. Give every moment at least ` +
-      `one line; a moment that carries more of the story may have a longer line. ` +
+      `${lengthInstruction(options.wordCount, lang)}. Write exactly one line per ` +
+      `moment, using each moment number once; a moment that carries more of the ` +
+      `story may have a longer line. ` +
       `Return JSON with a "lines" array, each item having "ref" (the moment ` +
       `number) and "text".`,
   });
@@ -445,18 +459,51 @@ export async function writeScript(
   try {
     const parsed = JSON.parse(raw) as { lines?: { ref: number; text: string }[] };
     if (Array.isArray(parsed.lines)) {
-      lines = parsed.lines
-        .filter((l) => byRef.has(l.ref) && typeof l.text === "string" && l.text.trim())
-        .map((l) => ({
-          clipId: byRef.get(l.ref)!.clipId,
-          segmentIndex: byRef.get(l.ref)!.segmentIndex,
-          text: l.text.trim(),
-        }));
+      lines = collapseByMoment(
+        parsed.lines.filter(
+          (l) => byRef.has(l.ref) && typeof l.text === "string" && l.text.trim(),
+        ),
+        byRef,
+      );
     }
   } catch {
     lines = [];
   }
   return lines;
+}
+
+/**
+ * Fold every line about one moment into a single line.
+ *
+ * A moment is a piece of footage, and the timeline shows it once, for as long
+ * as its narration takes. Asked for 110 words over three clips the model
+ * reasonably writes two sentences per clip — but emitted as separate lines they
+ * become separate timeline items, so the same footage plays twice in a row, and
+ * both claim the identity `clipId#segmentIndex` that the timeline addresses
+ * lines by. Joining them keeps every word and restores the invariant: one line
+ * per moment, each with an identity of its own.
+ *
+ * Order follows each moment's first mention, so the story keeps the sequence
+ * the model chose.
+ */
+function collapseByMoment(
+  written: { ref: number; text: string }[],
+  byRef: Map<number, Candidate>,
+): ScriptLineDraft[] {
+  const order: number[] = [];
+  const textsByRef = new Map<number, string[]>();
+  for (const l of written) {
+    if (!textsByRef.has(l.ref)) {
+      textsByRef.set(l.ref, []);
+      order.push(l.ref);
+    }
+    textsByRef.get(l.ref)!.push(l.text.trim());
+  }
+  return order.map((ref) => ({
+    clipId: byRef.get(ref)!.clipId,
+    segmentIndex: byRef.get(ref)!.segmentIndex,
+    text: textsByRef.get(ref)!.join(" "),
+  }));
 }
 
 /**

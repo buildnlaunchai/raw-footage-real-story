@@ -26,6 +26,14 @@ export type Fit = "exact" | "trimmed" | "held";
 
 export interface TimelineItem {
   clipId: string;
+  /**
+   * Which described moment of the clip this item shows.
+   *
+   * Rust has always sent this; the interface omitted it, so every consumer had
+   * only `clipId` to identify a row by — which is not unique when a story
+   * returns to the same clip.
+   */
+  segmentIndex: number;
   sourceInMs: number;
   sourceOutMs: number;
   timelineStartMs: number;

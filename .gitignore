@@ -59,3 +59,4 @@ src-tauri/WixTools/
 
 # --- Tooling ---------------------------------------------------------------
 .claude/settings.local.json
+.test-build/

@@ -45,13 +45,20 @@ export function VoiceoverPanel({
 }: Props) {
   const byId = new Map(clips.map((c) => [c.id, c]));
   const [playing, setPlaying] = useState<string | null>(null);
+
+  /**
+   * A line's identity. Play state was tracked by clip id, so when one clip
+   * carried two moments, pressing play on either drove both rows.
+   */
+  const lineKey = (l: { clipId: string; segmentIndex?: number }) =>
+    `${l.clipId}#${l.segmentIndex ?? 0}`;
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
   function play(line: VoicedLine) {
     audioRef.current?.pause();
     const el = new Audio(audioUrl(line.audioPath));
     audioRef.current = el;
-    setPlaying(line.clipId);
+    setPlaying(lineKey(line));
     el.onended = () => setPlaying(null);
     el.onerror = () => setPlaying(null);
     void el.play();
@@ -139,7 +146,7 @@ export function VoiceoverPanel({
       {voiced && !busy && (
         <ol className="script-list voiced-list">
           {voiced.map((line, i) => (
-            <li key={line.clipId} className="script-row">
+            <li key={`${line.clipId}#${line.segmentIndex}`} className="script-row">
               <span className="clip-index" aria-hidden="true">
                 {String(i + 1).padStart(2, "0")}
               </span>
@@ -150,9 +157,9 @@ export function VoiceoverPanel({
                   <button
                     type="button"
                     className="ghost-button small"
-                    onClick={() => (playing === line.clipId ? stop() : play(line))}
+                    onClick={() => (playing === lineKey(line) ? stop() : play(line))}
                   >
-                    {playing === line.clipId ? "■ Stop" : "▶ Play"}
+                    {playing === lineKey(line) ? "■ Stop" : "▶ Play"}
                   </button>
                   <span className="hint">{formatDuration(line.durationMs)}</span>
                   {line.skipped.length > 0 && (

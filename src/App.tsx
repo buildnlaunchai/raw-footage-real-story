@@ -814,6 +814,7 @@ function App() {
 
       {voiced && !ttsBusy && ffmpeg && (
         <AssemblyPanel
+          voiced={voiced}
           clips={manifest.clips.map((c) => ({
             id: c.id,
             description: c.segments[0]?.text ?? "",

@@ -23,7 +23,7 @@ export function ScriptResult({ clips, script, model, elapsedMs }: Props) {
 
       <ol className="script-list">
         {script.map((line, i) => (
-          <li key={line.clipId} className="script-row">
+          <li key={`${line.clipId}#${line.segmentIndex}`} className="script-row">
             <span className="clip-index" aria-hidden="true">
               {String(i + 1).padStart(2, "0")}
             </span>
