@@ -579,8 +579,10 @@ mod comparison {
         let scratch = std::path::Path::new(
             "/private/tmp/claude-501/-Users-zahidrobeen-Documents-Work-BuildnLaunchAI---Apps-Raw-Footage-Real-Story/063e7b93-ca42-4ab7-9c7f-21152a8c2f57/scratchpad",
         );
+        // Which harness to run; the comparison is the default.
+        let script = std::env::var("HARNESS").unwrap_or_else(|_| "openai_compare.mjs".into());
         let out = std::process::Command::new("node")
-            .arg(scratch.join("openai_compare.mjs"))
+            .arg(scratch.join(script))
             .current_dir(scratch)
             .env("OPENAI_API_KEY", key)
             .output()
