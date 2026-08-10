@@ -34,6 +34,7 @@ impl SecretError {
 fn env_key(account: &str) -> Option<String> {
     let var = match account {
         "elevenlabs" => "ELEVENLABS_API_KEY",
+        "openai" => "OPENAI_API_KEY",
         _ => return None,
     };
     std::env::var(var).ok().filter(|v| !v.trim().is_empty())
@@ -94,22 +95,31 @@ pub fn secret_clear(account: String) -> Result<(), SecretError> {
 mod tests {
     use super::*;
 
-    /// The environment override must win, so CI can exercise the cloud path
-    /// without a keychain.
+    /// Environment variables are process-global, so these assertions live in
+    /// one test rather than three. Split across parallel tests they raced each
+    /// other and failed intermittently — which is a property of the test
+    /// design, not of the code under test.
     #[test]
-    fn env_override_is_used_when_set() {
-        // Safety: single-threaded within this test, and the value is removed
-        // before it can affect others.
+    fn env_overrides_take_precedence_and_are_per_account() {
+        // Safety: this is the only test touching these variables, and each is
+        // removed before the next assertion depends on its absence.
         unsafe { std::env::set_var("ELEVENLABS_API_KEY", "test-key-from-env") };
         assert_eq!(get("elevenlabs").as_deref(), Some("test-key-from-env"));
-        unsafe { std::env::remove_var("ELEVENLABS_API_KEY") };
-    }
 
-    #[test]
-    fn blank_env_values_are_ignored() {
+        // Whitespace is not a key.
         unsafe { std::env::set_var("ELEVENLABS_API_KEY", "   ") };
-        assert!(env_key("elevenlabs").is_none(), "whitespace is not a key");
+        assert!(env_key("elevenlabs").is_none());
         unsafe { std::env::remove_var("ELEVENLABS_API_KEY") };
+
+        // OPENAI_API_KEY is a near-universal variable, so a key exported for
+        // something else is picked up ahead of the keychain. That is the
+        // documented precedence and is what makes CI work, but the mapping
+        // should be deliberate rather than accidental.
+        unsafe { std::env::set_var("OPENAI_API_KEY", "sk-test-openai") };
+        assert_eq!(get("openai").as_deref(), Some("sk-test-openai"));
+        // ...and it must not bleed into the other account.
+        assert_ne!(get("elevenlabs").as_deref(), Some("sk-test-openai"));
+        unsafe { std::env::remove_var("OPENAI_API_KEY") };
     }
 
     #[test]

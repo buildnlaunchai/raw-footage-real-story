@@ -23,6 +23,7 @@ ok()   { printf '%s%s%s\n' "$GREEN" "$*" "$OFF"; }
 say "→ scanning for hardcoded secrets"
 SECRET_PATTERNS=(
   'sk-[A-Za-z0-9_-]{16,}'                 # OpenAI-style keys
+  'sk-proj-[A-Za-z0-9_-]{16,}'            # OpenAI project keys
   'sk-ant-[A-Za-z0-9_-]{16,}'             # Anthropic keys
   'ghp_[A-Za-z0-9]{20,}'                  # GitHub tokens
   'eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}'  # JWTs

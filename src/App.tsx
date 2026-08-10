@@ -21,6 +21,7 @@ import {
 } from "./lib/project";
 import type { Segment } from "./lib/segments";
 import { DEFAULT_LANGUAGE, languageFor } from "./lib/languages";
+import type { QualityTier, ScriptProviderId } from "./lib/scriptProviders";
 import { suggestStoryIdeas, type IdeaProgress, type StoryIdea } from "./lib/storyIdeas";
 import {
   generateScriptForTitle,
@@ -78,6 +79,13 @@ function App() {
   const [style, setStyle] = useState<ScriptStyle>("cinematic");
   const [language, setLanguage] = useState(DEFAULT_LANGUAGE);
   const [critique, setCritique] = useState(true);
+  const [scriptProvider, setScriptProvider] = useState<ScriptProviderId>("local");
+  const [qualityTier, setQualityTier] = useState<QualityTier>("balanced");
+  const [scriptUsage, setScriptUsage] = useState<{
+    inputTokens: number;
+    outputTokens: number;
+    calls: number;
+  } | null>(null);
 
   // --- script (C/D) --------------------------------------------------------
   const [lines, setLines] = useState<ScriptLineDraft[] | null>(null);
@@ -381,10 +389,13 @@ function App() {
         style,
         language,
         critique,
+        provider: scriptProvider,
+        qualityTier,
         onProgress: setComposeProgress,
       });
       setLines(draft.lines);
       setWords(draft.words);
+      setScriptUsage(draft.usage ?? null);
       // A new script invalidates the audio and the cut made from the old one.
       setVoiced(null);
       setAssembly(null);
@@ -667,6 +678,11 @@ function App() {
           onStyle={setStyle}
           language={language}
           onLanguage={setLanguage}
+          scriptProvider={scriptProvider}
+          onScriptProvider={setScriptProvider}
+          qualityTier={qualityTier}
+          onQualityTier={setQualityTier}
+          usage={scriptUsage}
           critique={critique}
           onCritique={setCritique}
           onSuggest={onSuggestIdeas}

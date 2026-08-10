@@ -9,6 +9,8 @@ import { useState } from "react";
 import type { IdeaProgress, StoryIdea } from "../lib/storyIdeas";
 import { SCRIPT_STYLES, type ScriptStyle } from "../lib/scriptComposer";
 import { LANGUAGES, languageFor } from "../lib/languages";
+import { ScriptProviderSetup } from "./ScriptProviderSetup";
+import type { QualityTier, ScriptProviderId } from "../lib/scriptProviders";
 
 interface Props {
   ideas: StoryIdea[] | null;
@@ -23,6 +25,11 @@ interface Props {
   onStyle: (s: ScriptStyle) => void;
   language: string;
   onLanguage: (code: string) => void;
+  scriptProvider: ScriptProviderId;
+  onScriptProvider: (id: ScriptProviderId) => void;
+  qualityTier: QualityTier;
+  onQualityTier: (t: QualityTier) => void;
+  usage: { inputTokens: number; outputTokens: number; calls: number } | null;
   critique: boolean;
   onCritique: (v: boolean) => void;
   onSuggest: () => void;
@@ -46,6 +53,11 @@ export function StoryPanel({
   onStyle,
   language,
   onLanguage,
+  scriptProvider,
+  onScriptProvider,
+  qualityTier,
+  onQualityTier,
+  usage,
   critique,
   onCritique,
   onSuggest,
@@ -135,6 +147,15 @@ export function StoryPanel({
           ))}
         </div>
       </div>
+
+      <ScriptProviderSetup
+        providerId={scriptProvider}
+        onProvider={onScriptProvider}
+        qualityTier={qualityTier}
+        onQualityTier={onQualityTier}
+        language={languageFor(language)}
+        usage={usage}
+      />
 
       <div className="field-row">
         <label className="checkbox-row">

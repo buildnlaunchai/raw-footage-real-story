@@ -5,6 +5,7 @@ mod ffmpeg;
 mod g2p;
 mod hdr_check;
 mod ollama;
+mod openai;
 mod project;
 mod store;
 mod store_tests;
@@ -46,6 +47,9 @@ pub fn run() {
             elevenlabs::elevenlabs_test_key,
             elevenlabs::elevenlabs_synthesize,
             elevenlabs::elevenlabs_synthesize_line,
+            openai::openai_generate,
+            openai::openai_test_key,
+            openai::openai_probe_sampling,
             assembly::ffmpeg_detect,
             assembly::ffmpeg_set_path,
             assembly::assembly_make_placeholders,
