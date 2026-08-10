@@ -36,6 +36,7 @@ const FRIENDLY: Record<string, string> = {
   NETWORK: "Couldn't reach OpenAI. Check your connection.",
   TIMEOUT: "OpenAI took too long to respond.",
   EMPTY_RESPONSE: "OpenAI returned no text for that request.",
+  INVALID_REQUEST: "OpenAI rejected the request. This is a bug in the app, not your account.",
   OLLAMA_UNREACHABLE:
     "Can't reach Ollama. Start it with `brew services start ollama`, then try again.",
   MODEL_NOT_FOUND_LOCAL: "That local model isn't installed. Pull it with `ollama pull`.",

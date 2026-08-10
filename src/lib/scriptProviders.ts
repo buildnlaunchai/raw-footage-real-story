@@ -41,9 +41,19 @@ export interface ScriptProviderCapabilities {
   /** Only OpenAI can decline a request as a distinct outcome. */
   refusalsDetectable: boolean;
   /**
-   * Whether non-English output has been checked. Deliberately not set to
-   * "strong" for OpenAI until the Bengali comparison actually passes — the
-   * point of running it is that we don't know yet.
+   * Whether temperature and seed can be sent at all.
+   *
+   * The GPT-5.6 family rejects both outright with a 400 — temperature as
+   * "unsupported", seed as "unknown" — so this is not a quality knob but a
+   * hard constraint. Measured, not assumed.
+   */
+  supportsSampling: boolean;
+  /**
+   * Whether non-English output has been checked, and how it did.
+   *
+   * Each value is a claim someone ran a comparison to earn, on Bengali, which
+   * is the language this app was actually asked about. "unverified" is the
+   * honest default for a provider nobody has tested — it is not a soft "poor".
    */
   nonEnglishQuality: "unverified" | "poor" | "strong";
 }
@@ -76,6 +86,7 @@ export const SCRIPT_PROVIDERS: Record<ScriptProviderId, ScriptProvider> = {
       billing: "free-local",
       structuredOutput: "constrained",
       refusalsDetectable: false,
+      supportsSampling: true,
       // Measured: qwen2.5's Bengali was not usable.
       nonEnglishQuality: "poor",
     },
@@ -90,7 +101,10 @@ export const SCRIPT_PROVIDERS: Record<ScriptProviderId, ScriptProvider> = {
       billing: "per-token",
       structuredOutput: "strict-schema",
       refusalsDetectable: true,
-      nonEnglishQuality: "unverified",
+      supportsSampling: false,
+      // Measured on Hajj/Umrah descriptions against the qwen2.5 baseline:
+      // none of the failures that made the local model unusable recurred.
+      nonEnglishQuality: "strong",
     },
   },
 };
@@ -156,8 +170,10 @@ export function makeGenerateFn(
         prompt: args.prompt,
         system: args.system ?? null,
         format: args.format ?? null,
-        temperature: args.temperature ?? null,
-        seed: args.seed ?? null,
+        // Deliberately dropped: this model family rejects both with a 400
+        // rather than ignoring them. See supportsSampling.
+        temperature: null,
+        seed: null,
       });
       meter?.add(result.usage);
       return result.text;

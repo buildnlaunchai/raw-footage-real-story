@@ -7,7 +7,7 @@
 //! Like the ElevenLabs client, the call lives in Rust so the key never crosses
 //! into JavaScript.
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::time::Duration;
 
 const API: &str = "https://api.openai.com/v1/responses";
@@ -66,6 +66,15 @@ fn classify(status: u16, body: &str) -> OpenAiError {
             "RATE_LIMITED",
             "OpenAI is rate-limiting requests. Try again shortly.",
         ),
+        // A rejected request is a bug on our side, not something the user can
+        // act on, so it says what OpenAI objected to rather than "try again".
+        (400, _, _) => OpenAiError::new(
+            "INVALID_REQUEST",
+            format!(
+                "OpenAI rejected the request: {}",
+                if msg.is_empty() { "no detail given".into() } else { msg.to_string() }
+            ),
+        ),
         (500..=599, _, _) => {
             OpenAiError::new("SERVICE_ERROR", "OpenAI had a server error. Try again shortly.")
         }
@@ -79,10 +88,12 @@ fn classify(status: u16, body: &str) -> OpenAiError {
     }
 }
 
+fn key_error() -> OpenAiError {
+    OpenAiError::new("MISSING_API_KEY", "Add your OpenAI API key to use cloud script generation.")
+}
+
 fn key() -> Result<String, OpenAiError> {
-    crate::secrets::get("openai").ok_or_else(|| {
-        OpenAiError::new("MISSING_API_KEY", "Add your OpenAI API key to use cloud script generation.")
-    })
+    crate::secrets::get("openai").ok_or_else(key_error)
 }
 
 /// Adapt one of our JSON schemas to OpenAI's strict mode.
@@ -149,6 +160,29 @@ pub async fn openai_generate(
     temperature: Option<f32>,
     seed: Option<i64>,
 ) -> Result<OpenAiResult, OpenAiError> {
+    generate_with_key(key()?, model, prompt, system, format, temperature, seed).await
+}
+
+/// The request itself, with the credential handed in rather than looked up.
+///
+/// Because this takes `String` and not `Option<String>`, a missing key cannot
+/// reach the network: the only caller is `openai_generate`, which resolves the
+/// credential with `key()?` first. The guard is enforced by the signature.
+///
+/// Splitting the lookup out is what makes the missing-key guard testable. The
+/// previous shape resolved the key internally, so the only way to test "no key"
+/// was to arrange for the machine to have none — and once a real key existed,
+/// that test made a live billed call and failed *because it succeeded*.
+#[allow(clippy::too_many_arguments)]
+async fn generate_with_key(
+    api_key: String,
+    model: String,
+    prompt: String,
+    system: Option<String>,
+    format: Option<serde_json::Value>,
+    temperature: Option<f32>,
+    seed: Option<i64>,
+) -> Result<OpenAiResult, OpenAiError> {
     let client = reqwest::Client::builder()
         .timeout(REQUEST_TIMEOUT)
         .build()
@@ -172,8 +206,19 @@ pub async fn openai_generate(
             }
         });
     }
-    // Sent when asked for, but not assumed to take effect — see
-    // `openai_probe_sampling`, which reports whether this model honours them.
+    // Measured against gpt-5.6-terra, one parameter at a time:
+    //
+    //   neither          -> accepted
+    //   temperature only -> 400 "Unsupported parameter: 'temperature'"
+    //   seed only        -> 400 "Unknown parameter: 'seed'"
+    //
+    // Note the two messages differ. `temperature` exists but this model family
+    // rejects it; `seed` is not a Responses API parameter at all. Neither is
+    // silently ignored, so sending either fails the whole request.
+    //
+    // They stay in the signature so `openai_probe_sampling` can keep asking —
+    // if a future model accepts them, the probe will say so — but callers pass
+    // None and the capability is declared on the provider rather than assumed.
     if let Some(t) = temperature {
         body["temperature"] = serde_json::json!(t);
     }
@@ -183,7 +228,7 @@ pub async fn openai_generate(
 
     let resp = client
         .post(API)
-        .bearer_auth(key()?)
+        .bearer_auth(&api_key)
         .json(&body)
         .send()
         .await
@@ -364,23 +409,16 @@ mod tests {
         assert_eq!(code_for(429, r#"{"error":{"type":"rate_limit_error"}}"#), "RATE_LIMITED");
     }
 
-    /// Reproduces the reported failure: OpenAI selected, no key stored.
-    #[tokio::test]
-    async fn generating_without_a_key_returns_a_typed_error() {
-        // Ensure no env override is masking the keychain state.
-        unsafe { std::env::remove_var("OPENAI_API_KEY") };
-        let err = openai_generate(
-            "gpt-5.6-sol".into(),
-            "hello".into(),
-            None,
-            None,
-            None,
-            None,
-        )
-        .await
-        .expect_err("no key means no generation");
-        println!("\n  code:    {}", err.code);
-        println!("  message: {}", err.message);
+    /// A missing credential becomes a typed error the UI can act on.
+    ///
+    /// This is a pure check on purpose. Two earlier attempts were worse: the
+    /// first asserted `openai_generate` failed, which only held while the
+    /// machine had no key and otherwise made a live billed call; the second
+    /// masked `OPENAI_API_KEY` with a blank value, which made `get()` fall
+    /// through to the keychain and hang on the macOS permission prompt.
+    #[test]
+    fn missing_key_returns_a_typed_error() {
+        let err = super::key_error();
         assert_eq!(err.code, "MISSING_API_KEY");
         assert!(!err.message.is_empty(), "the error must carry a message for the UI");
     }
@@ -480,5 +518,76 @@ mod tests {
         let required: Vec<&str> =
             item["required"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
         assert!(required.contains(&"ref") && required.contains(&"text"));
+    }
+}
+
+#[cfg(test)]
+mod param_probe {
+    use super::*;
+
+    /// Which sampling parameters does this model actually accept?
+    ///
+    /// The plan flagged this as unknown. It turned out not to be silently
+    /// ignored but rejected with a 400, so the answer matters for every call.
+    /// Determined by asking, one parameter at a time.
+    #[tokio::test]
+    #[ignore = "needs a real API key"]
+    async fn which_sampling_parameters_are_accepted() {
+        if crate::secrets::get("openai").is_none() {
+            eprintln!("no key available; skipping");
+            return;
+        }
+        let model = std::env::var("PROBE_MODEL").unwrap_or_else(|_| "gpt-5.6-terra".into());
+        println!("\n  probing {model}\n");
+
+        for (label, temp, seed) in [
+            ("neither", None, None),
+            ("temperature only", Some(0.7f32), None),
+            ("seed only", None, Some(42i64)),
+            ("both", Some(0.7), Some(42)),
+        ] {
+            let r = openai_generate(
+                model.clone(),
+                "Reply with the single word: ok".into(),
+                None,
+                None,
+                temp,
+                seed,
+            )
+            .await;
+            match r {
+                Ok(v) => println!("    {label:<18} ACCEPTED  ({} tokens)", v.usage.total_tokens),
+                Err(e) => println!("    {label:<18} REJECTED  {}: {}", e.code, e.message),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod comparison {
+    /// Runs the Node comparison harness with the key from the keychain.
+    ///
+    /// The key is handed to the child process in its environment, so it never
+    /// reaches disk, a log, or a command line.
+    #[test]
+    #[ignore = "needs a real API key; makes billed calls"]
+    fn ollama_vs_openai() {
+        let Some(key) = crate::secrets::get("openai") else {
+            eprintln!("no key available; skipping");
+            return;
+        };
+        let scratch = std::path::Path::new(
+            "/private/tmp/claude-501/-Users-zahidrobeen-Documents-Work-BuildnLaunchAI---Apps-Raw-Footage-Real-Story/063e7b93-ca42-4ab7-9c7f-21152a8c2f57/scratchpad",
+        );
+        let out = std::process::Command::new("node")
+            .arg(scratch.join("openai_compare.mjs"))
+            .current_dir(scratch)
+            .env("OPENAI_API_KEY", key)
+            .output()
+            .expect("run harness");
+        println!("{}", String::from_utf8_lossy(&out.stdout));
+        if !out.status.success() {
+            println!("--- stderr ---\n{}", String::from_utf8_lossy(&out.stderr));
+        }
     }
 }

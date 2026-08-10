@@ -127,11 +127,17 @@ export function StoryPanel({
             <span className="hint">Needs a cloud voice</span>
           )}
         </div>
-        {!languageFor(language).documented && (
+        {language !== "en" && scriptProvider === "local" && (
           <p className="placeholder-note">
-            qwen2.5 doesn’t list {languageFor(language).label} among the
-            languages it names, so quality here is less certain than for
-            English. Check the draft before recording it.
+            The local model writes {languageFor(language).label} poorly — tested
+            on Bengali it invented names and used wrong vocabulary. OpenAI
+            handled the same footage correctly; switch the script writer below.
+          </p>
+        )}
+        {language !== "en" && scriptProvider === "openai" && !languageFor(language).documented && (
+          <p className="placeholder-note">
+            {languageFor(language).label} isn’t one of the languages this app
+            has tested beyond Bengali. Read the draft before recording it.
           </p>
         )}
       </div>
