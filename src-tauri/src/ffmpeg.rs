@@ -337,12 +337,17 @@ pub fn check_media(ffprobe: &str, media: &Path, caps: &FfmpegCaps) -> MediaCheck
     let (dw, dh) = info.display_size();
 
     if info.is_hdr {
-        if caps.zscale {
+        if caps.zscale && caps.tonemap {
             reasons.push("HDR footage will be tone-mapped to SDR.".into());
         } else {
+            // Note the specific formula: Homebrew's plain `ffmpeg` does not
+            // depend on libzimg, so reinstalling it never adds zscale.
+            // `ffmpeg-full` does, and is keg-only so it will not shadow an
+            // existing install — point the app at it via "Locate ffmpeg…".
             reasons.push(
-                "HDR footage, but this ffmpeg build has no zscale (libzimg), so colours may look \
-                 washed out. Reinstalling ffmpeg — `brew install ffmpeg` — usually fixes it."
+                "HDR footage, but this ffmpeg has no zscale (libzimg), so it cannot be tone-mapped \
+                 and will look washed out. Install a build that has it — on macOS, \
+                 `brew install ffmpeg-full` — then point this app at it."
                     .into(),
             );
         }
@@ -437,17 +442,20 @@ pub struct RenderItem {
     pub is_hdr: bool,
 }
 
-/// Filter fragment converting HDR to SDR, or empty for SDR sources.
+/// Filter fragment converting HDR to SDR, or empty when it cannot be done well.
 ///
-/// With libzimg the transfer function is linearised properly. Without it the
-/// best available approximation is a float conversion straight into `tonemap`
-/// — visibly better than doing nothing, but not correct, which is why import
-/// warns the user rather than quietly accepting the result.
+/// `tonemap` requires **linear light**. `zscale=t=linear` is what provides it,
+/// so without libzimg there is no correct way to feed the filter. Running it on
+/// non-linear HLG data anyway was measured against real iPhone HDR footage and
+/// produced a dark, murky frame — worse than leaving the footage alone, which
+/// at least stays bright and recognisable.
+///
+/// So when zscale is absent we deliberately do nothing and rely on the import
+/// warning. A wrong correction that looks deliberate is harder for a user to
+/// diagnose than no correction at all.
 fn tonemap_chain(caps: &FfmpegCaps) -> &'static str {
-    if caps.zscale {
+    if caps.zscale && caps.tonemap {
         ",zscale=t=linear:npl=100,tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p"
-    } else if caps.tonemap {
-        ",format=gbrpf32le,tonemap=hable:desat=0,format=yuv420p"
     } else {
         ""
     }
