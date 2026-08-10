@@ -453,6 +453,7 @@ function App() {
       const result = await provider.synthesize(lines, {
         voiceId: voice,
         projectId,
+        language,
         pronunciations,
         onProgress: setTtsProgress,
       });
@@ -486,7 +487,7 @@ function App() {
           await provider.synthesizeLine(
             { clipId: line.clipId, segmentIndex: line.segmentIndex, text: line.text },
             f.lineNumber,
-            { voiceId: voice, projectId, pronunciations },
+            { voiceId: voice, projectId, language, pronunciations },
           ),
         );
       } catch (err) {
@@ -511,16 +512,69 @@ function App() {
     setDirty(true);
   }
 
+  /**
+   * Audition the voice on this project's own words.
+   *
+   * The built-in sample sentence is English, so previewing a Bengali project
+   * used to play English in a voice chosen to read Bengali — which tells the
+   * user nothing about the thing they are about to pay to generate. The first
+   * script line is the honest sample; the sentence remains the fallback for
+   * auditioning before a script exists.
+   */
   async function onPreview() {
     setPreviewing(true);
     setTtsError(null);
     try {
-      const sample = await provider.preview(voice);
+      const sample = await provider.preview(voice, lines?.[0]?.text, language);
       await new Audio(audioUrl(sample.audioPath)).play();
     } catch (err) {
       setTtsError(errorText(err));
     } finally {
       setPreviewing(false);
+    }
+  }
+
+  /**
+   * Record one line on demand, before committing to the whole script.
+   *
+   * Checking a voice or a pronunciation should not cost a full run — which for
+   * a cloud provider is billed, and for either is the difference between
+   * seconds and minutes.
+   */
+  async function onHearLine(index: number) {
+    if (!lines || !projectId) return;
+    const line = lines[index];
+    if (!line) return;
+    const key = `${line.clipId}#${line.segmentIndex}`;
+    setResynthesizing(key);
+    setTtsError(null);
+    try {
+      const one = await provider.synthesizeLine(
+        { clipId: line.clipId, segmentIndex: line.segmentIndex, text: line.text },
+        index + 1,
+        { voiceId: voice, projectId, language, pronunciations },
+      );
+      setVoiced((cur) => {
+        const rest = (cur ?? []).filter(
+          (v) => `${v.clipId}#${v.segmentIndex}` !== key,
+        );
+        const merged = [...rest, one];
+        // Script order, so a line heard early does not jump to the end.
+        const rank = new Map(lines.map((l, i) => [`${l.clipId}#${l.segmentIndex}`, i]));
+        return merged.sort(
+          (a, b) =>
+            (rank.get(`${a.clipId}#${a.segmentIndex}`) ?? 0) -
+            (rank.get(`${b.clipId}#${b.segmentIndex}`) ?? 0),
+        );
+      });
+      // A single new line invalidates any cut built from the old audio.
+      setAssembly(null);
+      setDirty(true);
+      await new Audio(audioUrl(one.audioPath) + `?t=${Date.now()}`).play();
+    } catch (err) {
+      setTtsError(errorText(err));
+    } finally {
+      setResynthesizing(null);
     }
   }
 
@@ -542,7 +596,7 @@ function App() {
         const redone = await provider.synthesizeLine(
           { clipId: v.clipId, segmentIndex: v.segmentIndex, text: v.text },
           i + 1,
-          { voiceId: voice, projectId, pronunciations: next },
+          { voiceId: voice, projectId, language, pronunciations: next },
         );
         setVoiced((cur) => (cur ? cur.map((x, j) => (j === i ? redone : x)) : cur));
         // Audio changed, so any existing cut is stale.
@@ -743,6 +797,7 @@ function App() {
           busy={ttsBusy}
           resynthesizing={resynthesizing}
           onEditLine={onEditLine}
+          onHearLine={onHearLine}
           onCorrectWord={onCorrectWord}
         >
           <ProviderPicker

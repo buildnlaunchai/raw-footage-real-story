@@ -61,11 +61,28 @@ export interface ProviderCapabilities {
   isCloud: boolean;
   /** Whether a credential must be present before it can be used. */
   needsApiKey: boolean;
+  /**
+   * Whether a voice can be addressed by an id this app never fetched.
+   *
+   * Cloud voices are account-scoped strings, and a cloned voice may not appear
+   * in the listing, so pasting one has to stay possible alongside the picker.
+   * Local voice packs are a fixed set shipped with the app.
+   */
+  acceptsManualVoiceId: boolean;
 }
 
 export interface SynthOptions {
   voiceId: string;
   projectId: string;
+  /**
+   * The script's language, as an ISO 639-1 code.
+   *
+   * Cloud providers choose a model from this. It is not cosmetic: ElevenLabs'
+   * multilingual_v2 does not support Bengali at all and does not say so — it
+   * accepts the request and reads the script with a model that has never seen
+   * the language.
+   */
+  language?: string;
   speed?: number;
   pronunciations?: Record<string, string>;
   onProgress?: (p: SynthProgress) => void;
@@ -78,7 +95,7 @@ export interface TtsProvider {
   blurb: string;
   capabilities: ProviderCapabilities;
   listVoices(): Promise<VoiceOption[]>;
-  preview(voiceId: string, text?: string): Promise<VoicedLine>;
+  preview(voiceId: string, text?: string, language?: string): Promise<VoicedLine>;
   synthesize(lines: ScriptLine[], opts: SynthOptions): Promise<SynthResult>;
   synthesizeLine(
     line: { clipId: string; segmentIndex: number; text: string },
@@ -152,6 +169,7 @@ export const localProvider: TtsProvider = {
     billing: "free-local",
     isCloud: false,
     needsApiKey: false,
+    acceptsManualVoiceId: false,
   },
 
   async listVoices() {
@@ -246,6 +264,7 @@ export const elevenLabsProvider: TtsProvider = {
     billing: "per-character",
     isCloud: true,
     needsApiKey: true,
+    acceptsManualVoiceId: true,
   },
 
   async listVoices() {
@@ -263,7 +282,7 @@ export const elevenLabsProvider: TtsProvider = {
     }
   },
 
-  async preview(voiceId, text = PREVIEW_TEXT) {
+  async preview(voiceId, text = PREVIEW_TEXT, language) {
     try {
       return await invoke<VoicedLine>("elevenlabs_synthesize_line", {
         line: { clipId: "preview", segmentIndex: 0, text },
@@ -271,6 +290,7 @@ export const elevenLabsProvider: TtsProvider = {
         voiceId,
         projectId: "previews",
         modelId: null,
+        language: language ?? null,
       });
     } catch (err) {
       throw asTtsError(err);
@@ -293,6 +313,7 @@ export const elevenLabsProvider: TtsProvider = {
         voiceId: opts.voiceId,
         projectId: opts.projectId,
         modelId: null,
+        language: opts.language ?? null,
       });
     } catch (err) {
       throw asTtsError(err);
@@ -309,6 +330,7 @@ export const elevenLabsProvider: TtsProvider = {
         voiceId: opts.voiceId,
         projectId: opts.projectId,
         modelId: null,
+        language: opts.language ?? null,
       });
     } catch (err) {
       throw asTtsError(err);

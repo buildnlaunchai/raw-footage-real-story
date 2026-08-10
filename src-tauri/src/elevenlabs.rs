@@ -252,16 +252,27 @@ pub async fn synthesize_bytes(
     voice_id: &str,
     text: &str,
     model_id: &str,
+    language: Option<&str>,
 ) -> Result<Vec<u8>, ElevenLabsError> {
     if text.trim().is_empty() {
         return Err(ElevenLabsError::new("EMPTY_TEXT", "That line has no text to speak."));
+    }
+
+    let mut body = serde_json::json!({ "text": text, "model_id": model_id });
+    // `language_code` pins normalisation to the intended language instead of
+    // letting the model guess from the characters. It is rejected by
+    // multilingual_v2, so it is only sent where it is accepted.
+    if let Some(lang) = language {
+        if model_id != "eleven_multilingual_v2" && !lang.is_empty() {
+            body["language_code"] = serde_json::json!(lang);
+        }
     }
 
     let resp = client()?
         .post(format!("{API}/v1/text-to-speech/{voice_id}"))
         .query(&[("output_format", format!("wav_{TARGET_SAMPLE_RATE}"))])
         .header("xi-api-key", key()?)
-        .json(&serde_json::json!({ "text": text, "model_id": model_id }))
+        .json(&body)
         .send()
         .await
         .map_err(transport_error)?;
@@ -586,6 +597,96 @@ fn optional_ffmpeg() -> Option<String> {
 
 const DEFAULT_MODEL: &str = "eleven_multilingual_v2";
 
+/// Models this app prefers, best first, among those that support the language.
+///
+/// Only an ordering: which models exist and which languages each covers is read
+/// from the account at run time. A hardcoded language table would be wrong the
+/// moment ElevenLabs adds a language, which is exactly how Bengali came to be
+/// sent to a model that has never supported it.
+const MODEL_PREFERENCE: [&str; 3] =
+    ["eleven_multilingual_v2", "eleven_v3", "eleven_flash_v2_5"];
+
+/// The catalogue, fetched once per process.
+static MODEL_CACHE: std::sync::OnceLock<Vec<(String, Vec<String>)>> = std::sync::OnceLock::new();
+
+async fn catalogue() -> Vec<(String, Vec<String>)> {
+    if let Some(c) = MODEL_CACHE.get() {
+        return c.clone();
+    }
+    let fetched = fetch_catalogue().await.unwrap_or_default();
+    MODEL_CACHE.get_or_init(|| fetched).clone()
+}
+
+async fn fetch_catalogue() -> Option<Vec<(String, Vec<String>)>> {
+    let resp = client().ok()?
+        .get(format!("{API}/v1/models"))
+        .header("xi-api-key", key().ok()?)
+        .send()
+        .await
+        .ok()?;
+    let models: serde_json::Value = resp.json().await.ok()?;
+    Some(
+        models
+            .as_array()?
+            .iter()
+            .filter(|m| m["can_do_text_to_speech"].as_bool().unwrap_or(false))
+            .map(|m| {
+                let id = m["model_id"].as_str().unwrap_or_default().to_string();
+                let langs = m["languages"]
+                    .as_array()
+                    .map(|ls| {
+                        ls.iter()
+                            .filter_map(|l| l["language_id"].as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                (id, langs)
+            })
+            .collect(),
+    )
+}
+
+/// Which model to speak this language with.
+///
+/// An explicit choice always wins. Otherwise the best preferred model that
+/// actually lists the language, falling back to any model that does, and to the
+/// default when the catalogue cannot be read — an unreachable models endpoint
+/// should not stop synthesis that would otherwise work.
+pub async fn model_for(explicit: Option<String>, language: Option<&str>) -> String {
+    if let Some(m) = explicit.filter(|m| !m.trim().is_empty()) {
+        return m;
+    }
+    let Some(lang) = language.map(str::trim).filter(|l| !l.is_empty()) else {
+        return DEFAULT_MODEL.to_string();
+    };
+    choose_model(&catalogue().await, lang)
+}
+
+/// The choice itself, over a catalogue already in hand.
+///
+/// Separated from fetching so it can be tested against known catalogues rather
+/// than against whatever the account happens to expose today.
+fn choose_model(catalogue: &[(String, Vec<String>)], lang: &str) -> String {
+    let supports = |id: &str| {
+        catalogue
+            .iter()
+            .any(|(m, langs)| m == id && langs.iter().any(|l| l == lang))
+    };
+    for preferred in MODEL_PREFERENCE {
+        if supports(preferred) {
+            return preferred.to_string();
+        }
+    }
+    // Nothing preferred covers it; take anything that does before giving up,
+    // since a model that knows the language beats a better-sounding one that
+    // does not.
+    catalogue
+        .iter()
+        .find(|(_, langs)| langs.iter().any(|l| l == lang))
+        .map(|(id, _)| id.clone())
+        .unwrap_or_else(|| DEFAULT_MODEL.to_string())
+}
+
 /// Synthesise a whole script through ElevenLabs.
 ///
 /// A failure part way through does **not** discard what already succeeded.
@@ -599,12 +700,13 @@ pub async fn elevenlabs_synthesize(
     voice_id: String,
     project_id: String,
     model_id: Option<String>,
+    language: Option<String>,
 ) -> Result<CloudSynthesis, ElevenLabsError> {
     use tauri::Emitter;
 
     let dir = audio_dir(&app, &project_id)?;
     let ffmpeg = optional_ffmpeg();
-    let model = model_id.unwrap_or_else(|| DEFAULT_MODEL.to_string());
+    let model = model_for(model_id, language.as_deref()).await;
     let total = lines.len();
 
     let mut out = Vec::new();
@@ -612,7 +714,7 @@ pub async fn elevenlabs_synthesize(
     let mut converted_any = false;
 
     for (i, line) in lines.iter().enumerate() {
-        match synthesize_bytes(&voice_id, &line.text, &model).await {
+        match synthesize_bytes(&voice_id, &line.text, &model, language.as_deref()).await {
             Ok(bytes) => {
                 let path = dir.join(format!("line-{:02}.wav", i + 1));
                 match write_line_audio(&bytes, &path, ffmpeg.as_deref()) {
@@ -675,10 +777,11 @@ pub async fn elevenlabs_synthesize_line(
     voice_id: String,
     project_id: String,
     model_id: Option<String>,
+    language: Option<String>,
 ) -> Result<crate::tts::VoicedLine, ElevenLabsError> {
     let dir = audio_dir(&app, &project_id)?;
-    let model = model_id.unwrap_or_else(|| DEFAULT_MODEL.to_string());
-    let bytes = synthesize_bytes(&voice_id, &line.text, &model).await?;
+    let model = model_for(model_id, language.as_deref()).await;
+    let bytes = synthesize_bytes(&voice_id, &line.text, &model, language.as_deref()).await?;
     let path = dir.join(format!("line-{:02}.wav", line_number));
     let written = write_line_audio(&bytes, &path, optional_ffmpeg().as_deref())?;
 
@@ -808,5 +911,268 @@ mod audio_tests {
         let e = classify(200, "");
         assert_eq!(e.code, "REQUEST_FAILED");
         assert!(!dest.exists());
+    }
+}
+
+#[cfg(test)]
+mod model_survey {
+    /// What can this account actually reach, and which models claim Bengali?
+    ///
+    /// Listing models costs nothing, so this asks rather than trusting the
+    /// docs — which describe v3 as available on the TTS API without saying
+    /// whether an ordinary key may call it.
+    #[test]
+    #[ignore = "needs a real API key"]
+    fn which_models_and_languages() {
+        let Some(key) = crate::secrets::get("elevenlabs") else {
+            eprintln!("no key available; skipping");
+            return;
+        };
+        let body = match ureq_get("https://api.elevenlabs.io/v1/models", &key) {
+            Ok(b) => b,
+            Err(e) => {
+                println!("request failed: {e}");
+                return;
+            }
+        };
+        let models: serde_json::Value = serde_json::from_str(&body).expect("json");
+        for m in models.as_array().unwrap_or(&vec![]) {
+            let id = m["model_id"].as_str().unwrap_or("?");
+            let langs = m["languages"].as_array().cloned().unwrap_or_default();
+            let codes: Vec<&str> =
+                langs.iter().filter_map(|l| l["language_id"].as_str()).collect();
+            let bengali = codes.iter().any(|c| *c == "bn");
+            println!(
+                "{:<28} {:>3} languages  bengali={}  tts={}",
+                id,
+                codes.len(),
+                if bengali { "YES" } else { "no " },
+                m["can_do_text_to_speech"].as_bool().unwrap_or(false),
+            );
+            if bengali {
+                println!("      -> {}", m["name"].as_str().unwrap_or(""));
+            }
+        }
+    }
+
+    fn ureq_get(url: &str, key: &str) -> Result<String, String> {
+        let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+        rt.block_on(async {
+            let c = reqwest::Client::new();
+            let r = c
+                .get(url)
+                .header("xi-api-key", key)
+                .send()
+                .await
+                .map_err(|e| e.to_string())?;
+            let status = r.status();
+            let text = r.text().await.map_err(|e| e.to_string())?;
+            if !status.is_success() {
+                return Err(format!("{status}: {}", text.chars().take(200).collect::<String>()));
+            }
+            Ok(text)
+        })
+    }
+}
+
+#[cfg(test)]
+mod bengali_ab {
+    /// Bengali on the model we ship versus one that lists Bengali.
+    ///
+    /// Writes both to the scratchpad so a Bengali speaker can judge them; the
+    /// numbers here only show the calls succeeded and how long each result is.
+    #[test]
+    #[ignore = "needs a real API key; makes billed calls"]
+    fn multilingual_v2_versus_v3() {
+        let Some(key) = crate::secrets::get("elevenlabs") else {
+            eprintln!("no key available; skipping");
+            return;
+        };
+        // From the OpenAI Bengali draft, so it is text this app would really speak.
+        const TEXT: &str =
+            "ফ্যাকাশে সকালের আকাশের সামনে হারামের সাদা মিনারগুলো দাঁড়িয়ে থাকে।";
+        let out = std::path::Path::new(
+            "/private/tmp/claude-501/-Users-zahidrobeen-Documents-Work-BuildnLaunchAI---Apps-Raw-Footage-Real-Story/063e7b93-ca42-4ab7-9c7f-21152a8c2f57/scratchpad/bengali-ab",
+        );
+        std::fs::create_dir_all(out).ok();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let voice = rt.block_on(first_voice(&key)).expect("a voice on the account");
+        println!("voice: {voice}\ntext:  {TEXT}\n");
+
+        for (label, model, lang, settings) in [
+            ("current-multilingual_v2", "eleven_multilingual_v2", None, None),
+            ("v3-plain", "eleven_v3", None, None),
+            ("v3-language-code", "eleven_v3", Some("bn"), None),
+            (
+                "v3-settings",
+                "eleven_v3",
+                Some("bn"),
+                Some(serde_json::json!({
+                    "stability": 0.5, "similarity_boost": 0.75,
+                    "style": 0.0, "use_speaker_boost": true
+                })),
+            ),
+        ] {
+            match rt.block_on(say(&key, &voice, TEXT, model, lang, settings)) {
+                Ok(bytes) => {
+                    let p = out.join(format!("{label}.mp3"));
+                    std::fs::write(&p, &bytes).ok();
+                    println!("{label:<24} OK    {:>7} bytes  -> {}", bytes.len(), p.display());
+                }
+                Err(e) => println!("{label:<24} FAIL  {e}"),
+            }
+        }
+    }
+
+    pub(super) async fn first_voice(key: &str) -> Option<String> {
+        let c = reqwest::Client::new();
+        let r = c.get("https://api.elevenlabs.io/v1/voices").header("xi-api-key", key)
+            .send().await.ok()?;
+        let j: serde_json::Value = r.json().await.ok()?;
+        j["voices"].as_array()?.first()?["voice_id"].as_str().map(String::from)
+    }
+
+    async fn say(
+        key: &str, voice: &str, text: &str, model: &str,
+        language_code: Option<&str>, settings: Option<serde_json::Value>,
+    ) -> Result<Vec<u8>, String> {
+        let mut body = serde_json::json!({ "text": text, "model_id": model });
+        if let Some(l) = language_code { body["language_code"] = serde_json::json!(l); }
+        if let Some(s) = settings { body["voice_settings"] = s; }
+        let c = reqwest::Client::new();
+        let r = c
+            .post(format!("https://api.elevenlabs.io/v1/text-to-speech/{voice}"))
+            .header("xi-api-key", key)
+            .json(&body)
+            .send().await.map_err(|e| e.to_string())?;
+        let status = r.status();
+        let bytes = r.bytes().await.map_err(|e| e.to_string())?;
+        if !status.is_success() {
+            return Err(format!("{status}: {}",
+                String::from_utf8_lossy(&bytes).chars().take(220).collect::<String>()));
+        }
+        Ok(bytes.to_vec())
+    }
+}
+
+#[cfg(test)]
+mod format_check {
+    /// Does each model return the WAV this app asks for?
+    ///
+    /// Worth asking before routing a language to a different model: an output
+    /// format the new model does not offer would turn a quality fix into a
+    /// synthesis failure.
+    #[test]
+    #[ignore = "needs a real API key; makes billed calls"]
+    fn wav_24000_is_available_on_each_model() {
+        let Some(key) = crate::secrets::get("elevenlabs") else {
+            eprintln!("no key available; skipping");
+            return;
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let voice = rt.block_on(super::bengali_ab::first_voice(&key)).expect("a voice");
+
+        for model in ["eleven_multilingual_v2", "eleven_v3"] {
+            let got = rt.block_on(async {
+                let c = reqwest::Client::new();
+                let r = c
+                    .post(format!("{}/v1/text-to-speech/{voice}", super::API))
+                    .query(&[("output_format", "wav_24000")])
+                    .header("xi-api-key", &key)
+                    .json(&serde_json::json!({ "text": "Test.", "model_id": model }))
+                    .send()
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let status = r.status();
+                let bytes = r.bytes().await.map_err(|e| e.to_string())?;
+                if !status.is_success() {
+                    return Err(format!(
+                        "{status}: {}",
+                        String::from_utf8_lossy(&bytes).chars().take(160).collect::<String>()
+                    ));
+                }
+                Ok(bytes.to_vec())
+            });
+            match got {
+                Ok(b) => {
+                    let riff = b.starts_with(b"RIFF");
+                    println!("{model:<26} OK  {:>6} bytes  RIFF/WAV={riff}", b.len());
+                }
+                Err(e) => println!("{model:<26} FAIL  {e}"),
+            }
+        }
+    }
+}
+
+
+#[cfg(test)]
+mod model_choice {
+    use super::*;
+
+    /// The real shape, as returned by the account on 2026-08-11.
+    fn catalogue() -> Vec<(String, Vec<String>)> {
+        vec![
+            ("eleven_v3".into(), vec!["en".into(), "bn".into(), "hi".into(), "ta".into()]),
+            ("eleven_multilingual_v2".into(), vec!["en".into(), "hi".into(), "ta".into()]),
+            ("eleven_flash_v2_5".into(), vec!["en".into(), "hi".into()]),
+        ]
+    }
+
+    #[test]
+    fn bengali_goes_to_the_model_that_has_bengali() {
+        // The reported bug: multilingual_v2 does not list bn, and answers
+        // anyway. Silence from the API is not evidence of support.
+        assert_eq!(choose_model(&catalogue(), "bn"), "eleven_v3");
+    }
+
+    #[test]
+    fn languages_both_support_keep_the_established_model() {
+        // Changing the model for English would change how every existing
+        // project sounds, which is not what fixing Bengali should do.
+        assert_eq!(choose_model(&catalogue(), "en"), "eleven_multilingual_v2");
+        assert_eq!(choose_model(&catalogue(), "hi"), "eleven_multilingual_v2");
+    }
+
+    #[test]
+    fn an_unknown_language_falls_back_rather_than_failing() {
+        assert_eq!(choose_model(&catalogue(), "xx"), DEFAULT_MODEL);
+        assert_eq!(choose_model(&[], "bn"), DEFAULT_MODEL);
+    }
+
+    #[test]
+    fn a_language_only_an_unpreferred_model_has_still_finds_it() {
+        let cat = vec![("some_new_model".to_string(), vec!["bn".to_string()])];
+        assert_eq!(choose_model(&cat, "bn"), "some_new_model");
+    }
+
+    #[tokio::test]
+    async fn an_explicit_model_is_never_second_guessed() {
+        assert_eq!(
+            model_for(Some("eleven_flash_v2_5".into()), Some("bn")).await,
+            "eleven_flash_v2_5",
+        );
+        // No language means no basis to choose, so the default stands.
+        assert_eq!(model_for(None, None).await, DEFAULT_MODEL);
+        assert_eq!(model_for(None, Some("  ")).await, DEFAULT_MODEL);
+    }
+}
+
+
+#[cfg(test)]
+mod live_model_choice {
+    /// The same choice, against the live catalogue rather than a fixture.
+    #[test]
+    #[ignore = "needs a real API key"]
+    fn bengali_and_english_route_correctly() {
+        if crate::secrets::get("elevenlabs").is_none() {
+            eprintln!("no key available; skipping");
+            return;
+        }
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        for lang in ["bn", "en", "hi", "ar"] {
+            let m = rt.block_on(super::model_for(None, Some(lang)));
+            println!("{lang} -> {m}");
+        }
     }
 }

@@ -29,6 +29,8 @@ interface Props {
   busy: boolean;
   resynthesizing: string | null;
   onEditLine: (index: number, text: string) => void;
+  /** Record and play a single line, before the whole script is recorded. */
+  onHearLine: (index: number) => void;
   onCorrectWord: (word: string, respelling: string) => void;
   children?: React.ReactNode;
 }
@@ -49,6 +51,7 @@ export function ScriptPanel({
   busy,
   resynthesizing,
   onEditLine,
+  onHearLine,
   onCorrectWord,
   children,
 }: Props) {
@@ -113,6 +116,20 @@ export function ScriptPanel({
                   onChange={(e) => onEditLine(i, e.currentTarget.value)}
                 />
 
+                {!audio && (
+                  <div className="voiced-controls">
+                    <button
+                      type="button"
+                      className="ghost-button small"
+                      disabled={busy || isBusy || !line.text.trim()}
+                      onClick={() => onHearLine(i)}
+                    >
+                      {isBusy ? "Recording…" : "▶ Hear this line"}
+                    </button>
+                    <span className="hint">records just this line</span>
+                  </div>
+                )}
+
                 {audio && (
                   <div className="voiced-controls">
                     <button
@@ -122,6 +139,15 @@ export function ScriptPanel({
                       onClick={() => play(audio)}
                     >
                       {isBusy ? "Re-recording…" : playing === key ? "▶ Playing" : "▶ Play"}
+                    </button>
+                    <button
+                      type="button"
+                      className="ghost-button small"
+                      disabled={busy || isBusy}
+                      onClick={() => onHearLine(i)}
+                      title="Record this line again with the current voice"
+                    >
+                      ↻ Re-record
                     </button>
                     <span className="hint">{(audio.durationMs / 1000).toFixed(1)}s</span>
                     {showPronunciationFixes &&

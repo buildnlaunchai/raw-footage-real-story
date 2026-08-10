@@ -58,9 +58,10 @@ export function ProviderPicker({
   onPreview,
 }: Props) {
   const provider = PROVIDERS[providerId];
+  // A pasted id is simply one the listing does not contain.
+  const listed = voices.some((v) => v.id === voiceId);
   const [keyPresent, setKeyPresent] = useState<boolean | null>(null);
   const [keyInput, setKeyInput] = useState("");
-  const [manualVoice, setManualVoice] = useState("");
   const [testing, setTesting] = useState(false);
   const [usage, setUsage] = useState<CloudUsage | null>(null);
   const [keyError, setKeyError] = useState<string | null>(null);
@@ -255,19 +256,7 @@ export function ProviderPicker({
                   </optgroup>
                 ))}
               </select>
-            ) : (
-              // Falling back to a pasted id rather than dead-ending, since the
-              // voices call can fail for reasons unrelated to synthesis.
-              <input
-                className="clip-input"
-                value={manualVoice}
-                placeholder="Voice ID"
-                onChange={(e) => {
-                  setManualVoice(e.currentTarget.value);
-                  onVoice(e.currentTarget.value.trim());
-                }}
-              />
-            )}
+            ) : null}
             <button
               type="button"
               className="ghost-button"
@@ -277,6 +266,36 @@ export function ProviderPicker({
               {previewing ? "Preview…" : "▶ Preview"}
             </button>
           </div>
+
+          {provider.capabilities.acceptsManualVoiceId && (
+            <>
+              <label className="field-label" htmlFor="voice-manual">
+                Or paste a voice ID
+              </label>
+              <input
+                id="voice-manual"
+                className="clip-input"
+                value={listed ? "" : voiceId}
+                placeholder={
+                  voices.length > 0
+                    ? "e.g. a cloned voice not in the list above"
+                    : "Voice ID"
+                }
+                disabled={disabled}
+                onChange={(e) => {
+                  const next = e.currentTarget.value.trim();
+                  // Clearing the field hands control back to the picker rather
+                  // than leaving the project pointed at an empty voice.
+                  onVoice(next || voices[0]?.id || "");
+                }}
+              />
+              <p className="hint">
+                {listed
+                  ? "Using a voice from your account. Paste an ID to override it."
+                  : `Using pasted ID ${voiceId || "—"}. Clear this to go back to the list.`}
+              </p>
+            </>
+          )}
 
           {voicesError && (
             <div className="warning" role="status">
