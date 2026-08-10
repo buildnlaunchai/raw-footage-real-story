@@ -364,6 +364,27 @@ mod tests {
         assert_eq!(code_for(429, r#"{"error":{"type":"rate_limit_error"}}"#), "RATE_LIMITED");
     }
 
+    /// Reproduces the reported failure: OpenAI selected, no key stored.
+    #[tokio::test]
+    async fn generating_without_a_key_returns_a_typed_error() {
+        // Ensure no env override is masking the keychain state.
+        unsafe { std::env::remove_var("OPENAI_API_KEY") };
+        let err = openai_generate(
+            "gpt-5.6-sol".into(),
+            "hello".into(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect_err("no key means no generation");
+        println!("\n  code:    {}", err.code);
+        println!("  message: {}", err.message);
+        assert_eq!(err.code, "MISSING_API_KEY");
+        assert!(!err.message.is_empty(), "the error must carry a message for the UI");
+    }
+
     #[test]
     fn other_statuses_map_sensibly() {
         assert_eq!(code_for(401, "{}"), "INVALID_API_KEY");

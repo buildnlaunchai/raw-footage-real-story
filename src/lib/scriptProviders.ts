@@ -9,8 +9,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import { OLLAMA_HOST, OLLAMA_MODEL, OLLAMA_MODEL_QUALITY } from "../config/ollama";
 import { generate as ollamaGenerate } from "./ollama";
+import { asScriptProviderError } from "./providerErrors";
 
-export type ScriptProviderId = "local" | "openai";
+export { ScriptProviderError, asScriptProviderError } from "./providerErrors";
 
 /** Named tiers rather than raw model ids, which age badly and ask users to
  *  have opinions about model names. */
@@ -21,6 +22,9 @@ export const OPENAI_MODELS = {
   balanced: "gpt-5.6-terra",
   best: "gpt-5.6-sol",
 } as const;
+
+
+export type ScriptProviderId = "local" | "openai";
 
 export interface TokenUsage {
   inputTokens: number;
@@ -131,31 +135,46 @@ export function makeGenerateFn(
   meter?: UsageMeter,
 ): (args: GenerateArgs) => Promise<string> {
   if (providerId === "local") {
-    return ({ tier: t, ...args }) =>
-      ollamaGenerate({
-        host: OLLAMA_HOST,
-        model: t === "quality" ? OLLAMA_MODEL_QUALITY : OLLAMA_MODEL,
-        ...args,
-      });
+    return async ({ tier: t, ...args }) => {
+      try {
+        return await ollamaGenerate({
+          host: OLLAMA_HOST,
+          model: t === "quality" ? OLLAMA_MODEL_QUALITY : OLLAMA_MODEL,
+          ...args,
+        });
+      } catch (err) {
+        throw asScriptProviderError(err);
+      }
+    };
   }
 
   return async ({ tier: t, numCtx: _numCtx, ...args }) => {
     const model = t === "quality" ? OPENAI_MODELS[tier] : OPENAI_MODELS.fast;
-    const result = await invoke<{ text: string; usage: TokenUsage }>("openai_generate", {
-      model,
-      prompt: args.prompt,
-      system: args.system ?? null,
-      format: args.format ?? null,
-      temperature: args.temperature ?? null,
-      seed: args.seed ?? null,
-    });
-    meter?.add(result.usage);
-    return result.text;
+    try {
+      const result = await invoke<{ text: string; usage: TokenUsage }>("openai_generate", {
+        model,
+        prompt: args.prompt,
+        system: args.system ?? null,
+        format: args.format ?? null,
+        temperature: args.temperature ?? null,
+        seed: args.seed ?? null,
+      });
+      meter?.add(result.usage);
+      return result.text;
+    } catch (err) {
+      // Converted here rather than at the top level so every caller — including
+      // the composer's own internal catches — sees a real Error.
+      throw asScriptProviderError(err);
+    }
   };
 }
 
 export async function testOpenAiKey(apiKey: string): Promise<TokenUsage> {
-  return invoke<TokenUsage>("openai_test_key", { apiKey, model: OPENAI_MODELS.fast });
+  try {
+    return await invoke<TokenUsage>("openai_test_key", { apiKey, model: OPENAI_MODELS.fast });
+  } catch (err) {
+    throw asScriptProviderError(err);
+  }
 }
 
 /** Does this model honour temperature and seed? Reported, never assumed. */

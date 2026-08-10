@@ -38,6 +38,10 @@ interface Props {
   onContinue: () => void;
   continueLabel: string;
   continueBusy: boolean;
+  /** Failure from script generation, shown here rather than at the top of the
+   *  page — an error rendered a screen away from its button reads as nothing
+   *  having happened at all. */
+  continueError: string | null;
 }
 
 export function StoryPanel({
@@ -66,6 +70,7 @@ export function StoryPanel({
   onContinue,
   continueLabel,
   continueBusy,
+  continueError,
 }: Props) {
   const [custom, setCustom] = useState("");
 
@@ -252,19 +257,28 @@ export function StoryPanel({
       </form>
 
       {chosenTitle && (
-        <div className="actions">
-          <button
-            type="button"
-            className="primary-button"
-            onClick={onContinue}
-            disabled={continueBusy || wordCount < 20}
-          >
-            {continueBusy ? "Working…" : continueLabel}
-          </button>
-          <span className="hint">
-            “{chosenTitle}” · ~{wordCount} words
-          </span>
-        </div>
+        <>
+          <div className="actions">
+            <button
+              type="button"
+              className="primary-button"
+              onClick={onContinue}
+              disabled={continueBusy || wordCount < 20}
+            >
+              {continueBusy ? "Working…" : continueLabel}
+            </button>
+            <span className="hint">
+              “{chosenTitle}” · ~{wordCount} words
+            </span>
+          </div>
+
+          {continueError && (
+            <div className="error" role="alert">
+              <strong>Couldn’t generate the script.</strong>
+              <span>{continueError}</span>
+            </div>
+          )}
+        </>
       )}
     </section>
   );

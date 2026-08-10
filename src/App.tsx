@@ -58,6 +58,28 @@ import "./App.css";
  */
 const DEFAULT_VOICE = "af_kore";
 
+/**
+ * Turn anything thrown into something a person can read.
+ *
+ * Tauri rejects with a plain `{code, message}` object rather than an Error, so
+ * a bare `String(err)` produces "[object Object]" — which is how a clear
+ * "Add your OpenAI API key" message reached the UI as noise.
+ */
+function errorText(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === "object" && err !== null) {
+    const e = err as { message?: unknown; code?: unknown };
+    if (typeof e.message === "string" && e.message) return e.message;
+    if (typeof e.code === "string" && e.code) return e.code;
+    try {
+      return JSON.stringify(err);
+    } catch {
+      return "An unknown error occurred.";
+    }
+  }
+  return String(err);
+}
+
 function App() {
   // --- project -------------------------------------------------------------
   const [manifest, setManifest] = useState<ProjectFile | null>(null);
@@ -92,6 +114,7 @@ function App() {
   const [words, setWords] = useState(0);
   const [composing, setComposing] = useState(false);
   const [composeProgress, setComposeProgress] = useState<ComposeProgress | null>(null);
+  const [composeError, setComposeError] = useState<string | null>(null);
   const [pronunciations, setPronunciations] = useState<Record<string, string>>({});
 
   // --- voiceover -----------------------------------------------------------
@@ -145,7 +168,7 @@ function App() {
       })
       .catch((err) => {
         setVoices([]);
-        setVoicesError(err instanceof Error ? err.message : String(err));
+        setVoicesError(errorText(err));
       });
   }, [providerId]);
 
@@ -177,7 +200,7 @@ function App() {
       resetVideoState();
       setDirty(false);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorText(err));
     } finally {
       setBusy(false);
     }
@@ -204,7 +227,7 @@ function App() {
       }
       setDirty(false);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorText(err));
     } finally {
       setBusy(false);
     }
@@ -272,7 +295,7 @@ function App() {
       setDirty(false);
       setSavedAt(new Date().toLocaleTimeString());
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorText(err));
     } finally {
       setBusy(false);
     }
@@ -324,7 +347,7 @@ function App() {
       try {
         applyImport(await importMedia(paths, projectId));
       } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
+        setError(errorText(err));
       } finally {
         setImporting(false);
       }
@@ -368,7 +391,7 @@ function App() {
     try {
       setIdeas(await suggestStoryIdeas(manifest.clips, { onProgress: setIdeaProgress }));
     } catch (err) {
-      setIdeaError(err instanceof Error ? err.message : String(err));
+      setIdeaError(errorText(err));
     } finally {
       setIdeasBusy(false);
       setIdeaProgress(null);
@@ -380,7 +403,7 @@ function App() {
   async function onGenerateScript() {
     if (!manifest || !title) return;
     setComposing(true);
-    setError(null);
+    setComposeError(null);
     setComposeProgress(null);
     try {
       const draft = await generateScriptForTitle(manifest.clips, {
@@ -401,7 +424,7 @@ function App() {
       setAssembly(null);
       setDirty(true);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setComposeError(errorText(err));
     } finally {
       setComposing(false);
       setComposeProgress(null);
@@ -440,7 +463,7 @@ function App() {
       setAssembly(null);
       setDirty(true);
     } catch (err) {
-      setTtsError(err instanceof Error ? err.message : String(err));
+      setTtsError(errorText(err));
       setVoiced(null);
     } finally {
       setTtsBusy(false);
@@ -469,7 +492,7 @@ function App() {
       } catch (err) {
         stillFailing.push({
           ...f,
-          message: err instanceof Error ? err.message : String(err),
+          message: errorText(err),
         });
       }
     }
@@ -495,7 +518,7 @@ function App() {
       const sample = await provider.preview(voice);
       await new Audio(audioUrl(sample.audioPath)).play();
     } catch (err) {
-      setTtsError(err instanceof Error ? err.message : String(err));
+      setTtsError(errorText(err));
     } finally {
       setPreviewing(false);
     }
@@ -525,7 +548,7 @@ function App() {
         // Audio changed, so any existing cut is stale.
         setAssembly(null);
       } catch (err) {
-        setTtsError(err instanceof Error ? err.message : String(err));
+        setTtsError(errorText(err));
       } finally {
         setResynthesizing(null);
       }
@@ -571,7 +594,7 @@ function App() {
       });
       setAssembly(result);
     } catch (err) {
-      setAssemblyError(err instanceof Error ? err.message : String(err));
+      setAssemblyError(errorText(err));
       setAssembly(null);
     } finally {
       setAssemblyBusy(false);
@@ -691,6 +714,7 @@ function App() {
           onContinue={onGenerateScript}
           continueLabel={lines ? "Regenerate script" : "Generate script"}
           continueBusy={composing}
+          continueError={composeError}
         />
       )}
 
