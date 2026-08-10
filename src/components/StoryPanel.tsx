@@ -20,6 +20,8 @@ interface Props {
   wordCount: number;
   style: ScriptStyle;
   onStyle: (s: ScriptStyle) => void;
+  critique: boolean;
+  onCritique: (v: boolean) => void;
   onSuggest: () => void;
   onChooseTitle: (title: string) => void;
   onWordCount: (n: number) => void;
@@ -39,6 +41,8 @@ export function StoryPanel({
   wordCount,
   style,
   onStyle,
+  critique,
+  onCritique,
   onSuggest,
   onChooseTitle,
   onWordCount,
@@ -94,6 +98,20 @@ export function StoryPanel({
             </button>
           ))}
         </div>
+      </div>
+
+      <div className="field-row">
+        <label className="checkbox-row">
+          <input
+            type="checkbox"
+            checked={critique}
+            onChange={(e) => onCritique(e.currentTarget.checked)}
+          />
+          <span>
+            Review and revise the draft
+            <span className="hint"> · one extra pass, roughly 13s</span>
+          </span>
+        </label>
       </div>
 
       <div className="actions">

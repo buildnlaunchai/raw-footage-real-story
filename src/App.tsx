@@ -50,7 +50,12 @@ import {
 } from "./lib/assembly";
 import "./App.css";
 
-const DEFAULT_VOICE = "af_heart";
+/**
+ * Chosen by measurement rather than by being first alphabetically: af_kore
+ * scored highest of the English-accent voices in the audition (74.6 against
+ * af_heart's 58.2). See `src-tauri/src/voice_audition.rs`.
+ */
+const DEFAULT_VOICE = "af_kore";
 
 function App() {
   // --- project -------------------------------------------------------------
@@ -71,6 +76,7 @@ function App() {
   const [title, setTitle] = useState("");
   const [wordCount, setWordCount] = useState(150);
   const [style, setStyle] = useState<ScriptStyle>("cinematic");
+  const [critique, setCritique] = useState(true);
 
   // --- script (C/D) --------------------------------------------------------
   const [lines, setLines] = useState<ScriptLineDraft[] | null>(null);
@@ -340,6 +346,7 @@ function App() {
         title,
         wordCount,
         style,
+        critique,
         onProgress: setComposeProgress,
       });
       setLines(draft.lines);
@@ -580,6 +587,8 @@ function App() {
           wordCount={wordCount}
           style={style}
           onStyle={setStyle}
+          critique={critique}
+          onCritique={setCritique}
           onSuggest={onSuggestIdeas}
           onChooseTitle={setTitle}
           onWordCount={setWordCount}
@@ -595,7 +604,9 @@ function App() {
             ? `Choosing moments (${composeProgress.done}/${composeProgress.total})…`
             : composeProgress.stage === "writing"
               ? "Writing the narration…"
-              : "Adjusting length…"}
+              : composeProgress.stage === "critiquing"
+                ? "Reviewing and revising the draft…"
+                : "Adjusting length…"}
         </p>
       )}
 

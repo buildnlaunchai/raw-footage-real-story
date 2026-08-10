@@ -125,7 +125,7 @@ export interface ScriptDraft {
 }
 
 export interface ComposeProgress {
-  stage: "selecting" | "writing" | "adjusting";
+  stage: "selecting" | "writing" | "critiquing" | "adjusting";
   done: number;
   total: number;
 }
@@ -180,6 +180,75 @@ const WRITE_SYSTEM =
   "You prefer a specific noun or a concrete verb to any adjective. " +
   "The narration reads aloud naturally and carries the viewer from one moment to the next.";
 
+/**
+ * Capitalised tokens: the candidates for invention.
+ *
+ * A model asked to be more vivid will add a fisherman, a village name, a
+ * mountain — things the footage never showed. Proper nouns are the detectable
+ * form of that, and the one that misleads a viewer most directly.
+ */
+export function properNouns(text: string): Set<string> {
+  const out = new Set<string>();
+  for (const m of text.matchAll(/\b[A-Z][a-zA-Z'’-]+\b/g)) {
+    out.add(m[0].toLowerCase());
+  }
+  return out;
+}
+
+/** Every word in a text, lowercased. */
+function allWords(text: string): Set<string> {
+  return new Set(
+    text
+      .toLowerCase()
+      .split(/[^a-z'’-]+/)
+      .filter(Boolean),
+  );
+}
+
+/**
+ * Names the revision introduced that appear nowhere in the source material.
+ *
+ * Candidates are capitalised words, but they are checked against **every** word
+ * of the source regardless of case. That distinction is the whole guard: a
+ * sentence starting "Frost had etched…" capitalises an ordinary word that the
+ * footage description already contains in lower case, and comparing only
+ * capitalised forms would flag it as invented. Doing that would reject nearly
+ * every honest revision and quietly disable the feature.
+ *
+ * The residual gap: a genuinely invented name that only ever appears at the
+ * start of a sentence, and happens to match a source word. Rare enough to
+ * accept, and it fails safe — the worst case is a revision that gets through,
+ * not one wrongly rejected.
+ */
+export function introducedNames(revision: string, allowed: string): string[] {
+  const permitted = allWords(allowed);
+  return [...properNouns(revision)].filter((n) => !permitted.has(n));
+}
+
+const CRITIQUE_SYSTEM =
+  "You improve documentary narration by first diagnosing what is weak about it. " +
+  "You work only with what the footage already shows. " +
+  "You never add a person, place, object or event that is not in the source material — " +
+  "making writing vivid means being more specific about what is there, never inventing " +
+  "something new. " +
+  "You never use the words beautiful, stunning, breathtaking, amazing or incredible.";
+
+const CRITIQUE_SCHEMA = (count: number) => ({
+  type: "object",
+  properties: {
+    // Diagnosis first, in the same response: naming the weakness before
+    // rewriting is what makes this a critique rather than another attempt.
+    weaknesses: { type: "array", items: { type: "string" } },
+    lines: {
+      type: "array",
+      minItems: count,
+      maxItems: count,
+      items: { type: "string" },
+    },
+  },
+  required: ["weaknesses", "lines"],
+});
+
 const REFS_SCHEMA = {
   type: "object",
   properties: { refs: { type: "array", items: { type: "integer" } } },
@@ -225,6 +294,8 @@ export interface ComposeOptions {
   title: string;
   wordCount: number;
   style?: ScriptStyle;
+  /** Self-critique and revise pass. On by default; costs one extra call. */
+  critique?: boolean;
   seed?: number;
   onProgress?: (p: ComposeProgress) => void;
 }
@@ -381,6 +452,62 @@ export async function composeScript(
     throw new ScriptComposeError(
       "The model didn't return a usable script. Try again, or pick a different title.",
     );
+  }
+
+  // --- self-critique and revise ------------------------------------------
+  //
+  // One call, not two: a separate critique then revise costs double and reads
+  // worse, because the model treats a handed-over critique as a checklist to
+  // acknowledge rather than a thing to act on. Forcing the diagnosis to precede
+  // the rewrite *in the same response* is what makes it bite.
+  if (options.critique !== false) {
+    options.onProgress?.({ stage: "critiquing", done: 0, total: 1 });
+    const sourceMaterial = selected.map((c) => c.text).join(" ");
+    const draftText = lines.map((l) => l.text).join(" ");
+    const numbered = lines.map((l, i) => `${i + 1}. ${l.text}`).join("\n");
+
+    try {
+      const raw = await generate({
+        system: CRITIQUE_SYSTEM,
+        temperature: 0.6,
+        seed: options.seed,
+        numCtx: NUM_CTX,
+        tier: "quality",
+        format: CRITIQUE_SCHEMA(lines.length),
+        prompt:
+          `The footage shows only this:\n${selected.map((c) => `- ${c.text}`).join("\n")}\n\n` +
+          `Draft narration for "${options.title}":\n${numbered}\n\n` +
+          `First, list what is weak about this draft. Look for: lines that would fit ` +
+          `any footage anywhere; adjectives doing work a concrete noun or verb should ` +
+          `do; every line having the same length and rhythm; anything claimed that the ` +
+          `footage above does not show.\n\n` +
+          `Then rewrite it, fixing what you found. Keep exactly ${lines.length} lines in ` +
+          `the same order, each about the same moment, totalling about ` +
+          `${options.wordCount} words. Do not introduce any person, place or thing that ` +
+          `is not in the footage above.\n\n` +
+          `Return JSON with "weaknesses" (your diagnosis) and "lines" ` +
+          `(${lines.length} rewritten strings).`,
+      });
+
+      const parsed = JSON.parse(raw) as { weaknesses?: unknown; lines?: unknown };
+      const revised = Array.isArray(parsed.lines)
+        ? parsed.lines.filter((t): t is string => typeof t === "string" && t.trim().length > 0)
+        : [];
+
+      if (revised.length === lines.length) {
+        // Hard gate: a revision that invents is rejected outright, however
+        // well it reads. Asking for vividness invites invention, so this is
+        // the guard that makes the whole pass safe to run by default.
+        const invented = introducedNames(revised.join(" "), `${sourceMaterial} ${draftText} ${options.title}`);
+        if (invented.length === 0) {
+          lines = lines.map((l, i) => ({ ...l, text: revised[i].trim() }));
+        }
+      }
+    } catch {
+      // A malformed critique keeps the draft. A failed improvement is not a
+      // failed script.
+    }
+    options.onProgress?.({ stage: "critiquing", done: 1, total: 1 });
   }
 
   let words = lines.reduce((n, l) => n + countWords(l.text), 0);

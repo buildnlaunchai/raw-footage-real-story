@@ -11,6 +11,8 @@ import { composeScript, type ComposeOptions, type ScriptDraft } from "./scriptCo
 export {
   SCRIPT_STYLES,
   ScriptComposeError,
+  introducedNames,
+  properNouns,
   targetSegmentCount,
   countWords,
   flattenCandidates,

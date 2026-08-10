@@ -880,3 +880,15 @@ kbd {
   background: rgba(255, 92, 57, 0.12);
   color: var(--ink);
 }
+
+.checkbox-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  font-size: 0.88rem;
+  cursor: pointer;
+}
+
+.checkbox-row .hint {
+  display: inline;
+}

@@ -251,3 +251,19 @@ regardless of what the working project looked like.
 If a referenced file has gone missing by export time, its `sourcePath` is set to
 `null` rather than shipped as a path that resolves to nothing — an importer can
 then show that clip as media-offline instead of failing obscurely.
+
+---
+
+## Backlog
+
+### Real music beds
+
+The three bundled beds are procedurally synthesised drones (see
+`src-tauri/resources/music/LICENSE.md`). They sit under a voice without
+competing with it, and nothing more.
+
+Replacing them with genuine music is a **manual sourcing task**, not a build
+task: it needs a human to find tracks, verify licences, and take
+responsibility for that verification. Anything bundled must be CC0 or public
+domain — CC-BY needs attribution the app has nowhere to display, and NC is
+incompatible with distributing through Skool.
