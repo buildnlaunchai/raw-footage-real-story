@@ -19,6 +19,13 @@
  * against a real Ollama without a webview.
  */
 
+import {
+  countUnits,
+  languageFor,
+  lengthInstruction,
+  type ScriptLanguage,
+} from "./languages";
+
 export interface DescribedClip {
   id: string;
   segments: { startSec: number; endSec: number; text: string }[];
@@ -171,14 +178,30 @@ const SELECT_SYSTEM =
   "You only ever choose from the numbered moments you are given. " +
   "You never invent moments, and you never choose one that does not fit the title.";
 
-const WRITE_SYSTEM =
+const WRITE_SYSTEM_BASE =
   "You write documentary voiceover narration for travel footage. " +
   "You write only about what the given moments actually show. " +
   "You never invent places, people or events. " +
-  "You never use the words beautiful, stunning, breathtaking, amazing or incredible; " +
-  "they describe a reaction rather than the footage. " +
   "You prefer a specific noun or a concrete verb to any adjective. " +
   "The narration reads aloud naturally and carries the viewer from one moment to the next.";
+
+/// The banned words are English; naming them when writing Bengali would be
+/// noise at best and a nudge toward English at worst.
+const WRITE_SYSTEM_EN =
+  `${WRITE_SYSTEM_BASE} ` +
+  "You never use the words beautiful, stunning, breathtaking, amazing or incredible; " +
+  "they describe a reaction rather than the footage.";
+
+function writeSystemFor(lang: ScriptLanguage): string {
+  if (lang.code === "en") return WRITE_SYSTEM_EN;
+  return (
+    `${WRITE_SYSTEM_BASE} ` +
+    `You write entirely in ${lang.label} (${lang.nativeLabel}), in natural idiomatic ` +
+    `${lang.label} — not translated English. Never include English words or ` +
+    `transliteration unless they are proper nouns with no ${lang.label} form. ` +
+    `Avoid vague praise words; describe what is there.`
+  );
+}
 
 /**
  * Capitalised tokens: the candidates for invention.
@@ -294,6 +317,8 @@ export interface ComposeOptions {
   title: string;
   wordCount: number;
   style?: ScriptStyle;
+  /** BCP-47-ish code from `languages.ts`. Defaults to English. */
+  language?: string;
   /** Self-critique and revise pass. On by default; costs one extra call. */
   critique?: boolean;
   seed?: number;
@@ -389,18 +414,30 @@ export async function writeScript(
     tier: "quality" as const,
   };
   const style = STYLE_DIRECTION[options.style ?? "cinematic"];
+  const lang = languageFor(options.language ?? "en");
+
+  // The few-shot examples are English prose. Shown to a model writing Bengali
+  // they would teach the rhythm of translated English, which is precisely the
+  // failure they exist to prevent — so non-English relies on the style
+  // direction alone. Native examples per language are a real improvement, but
+  // they need a fluent writer, not a machine translation of these.
+  const preamble = lang.code === "en" ? `${FEW_SHOT}\n\n---\n\n` : "";
+  const inLanguage =
+    lang.code === "en" ? "" : `Write every line in ${lang.label} (${lang.nativeLabel}).\n\n`;
+
   const raw = await generate({
     ...base,
-    system: WRITE_SYSTEM,
+    system: writeSystemFor(lang),
     format: SCRIPT_SCHEMA,
     prompt:
-      `${FEW_SHOT}\n\n---\n\n` +
-      `Video title: "${options.title}"\n\n${style}\n\n` +
+      preamble +
+      `Video title: "${options.title}"\n\n${style}\n\n${inLanguage}` +
       `Moments, in order:\n${listFor(selected)}\n\n` +
-      `Write the narration for this video. The whole script should be about ` +
-      `${options.wordCount} words. Give every moment at least one line; a moment ` +
-      `that carries more of the story may have a longer line. Return JSON with a ` +
-      `"lines" array, each item having "ref" (the moment number) and "text".`,
+      `Write the narration for this video. The whole script should be ` +
+      `${lengthInstruction(options.wordCount, lang)}. Give every moment at least ` +
+      `one line; a moment that carries more of the story may have a longer line. ` +
+      `Return JSON with a "lines" array, each item having "ref" (the moment ` +
+      `number) and "text".`,
   });
 
   const byRef = new Map(selected.map((c) => [c.ref, c]));
@@ -441,6 +478,7 @@ export async function composeScript(
   if (candidates.length === 0) {
     throw new ScriptComposeError("Describe at least one clip before generating a script.");
   }
+  const lang = languageFor(options.language ?? "en");
 
   const selected = await selectSegments(generate, candidates, options);
 
@@ -468,7 +506,9 @@ export async function composeScript(
 
     try {
       const raw = await generate({
-        system: CRITIQUE_SYSTEM,
+        system: `${CRITIQUE_SYSTEM}${
+          lang.code === "en" ? "" : ` You write entirely in ${lang.label} (${lang.nativeLabel}).`
+        }`,
         temperature: 0.6,
         seed: options.seed,
         numCtx: NUM_CTX,
@@ -482,9 +522,9 @@ export async function composeScript(
           `do; every line having the same length and rhythm; anything claimed that the ` +
           `footage above does not show.\n\n` +
           `Then rewrite it, fixing what you found. Keep exactly ${lines.length} lines in ` +
-          `the same order, each about the same moment, totalling about ` +
-          `${options.wordCount} words. Do not introduce any person, place or thing that ` +
-          `is not in the footage above.\n\n` +
+          `the same order, each about the same moment, totalling ` +
+          `${lengthInstruction(options.wordCount, lang)}. Do not introduce any person, ` +
+          `place or thing that is not in the footage above.\n\n` +
           `Return JSON with "weaknesses" (your diagnosis) and "lines" ` +
           `(${lines.length} rewritten strings).`,
       });
@@ -498,7 +538,14 @@ export async function composeScript(
         // Hard gate: a revision that invents is rejected outright, however
         // well it reads. Asking for vividness invites invention, so this is
         // the guard that makes the whole pass safe to run by default.
-        const invented = introducedNames(revised.join(" "), `${sourceMaterial} ${draftText} ${options.title}`);
+        // The guard keys on capitalisation, which only exists in some scripts.
+        // Bengali, Arabic, Chinese and others have no case, so it would find
+        // nothing and wave everything through — better to say so here than to
+        // imply a check that is not happening.
+        const guardApplies = lang.direction === "ltr" && /[A-Za-z]/.test(revised.join(" "));
+        const invented = guardApplies
+          ? introducedNames(revised.join(" "), `${sourceMaterial} ${draftText} ${options.title}`)
+          : [];
         if (invented.length === 0) {
           lines = lines.map((l, i) => ({ ...l, text: revised[i].trim() }));
         }
@@ -510,9 +557,14 @@ export async function composeScript(
     options.onProgress?.({ stage: "critiquing", done: 1, total: 1 });
   }
 
-  let words = lines.reduce((n, l) => n + countWords(l.text), 0);
-  const low = options.wordCount * 0.7;
-  const high = options.wordCount * 1.3;
+  // Measured in this language's own unit; whitespace words are meaningless
+  // for Chinese, Japanese and Thai.
+  let words = lines.reduce((n, l) => n + countUnits(l.text, lang), 0);
+  const target = lang.counting === "characters"
+    ? Math.round(options.wordCount * (lang.code === "th" ? 4.0 : lang.code === "ja" ? 2.0 : 1.6))
+    : options.wordCount;
+  const low = target * 0.7;
+  const high = target * 1.3;
 
   if (words < low || words > high) {
     options.onProgress?.({ stage: "adjusting", done: 0, total: 1 });
@@ -521,7 +573,7 @@ export async function composeScript(
       .map((l, i) => `${i + 1}. ${l.text}`)
       .join("\n");
     const raw = await generate({
-      system: WRITE_SYSTEM,
+      system: writeSystemFor(lang),
       temperature: 0.5,
       seed: options.seed,
       numCtx: NUM_CTX,
@@ -539,7 +591,8 @@ export async function composeScript(
         required: ["lines"],
       },
       prompt:
-        `This narration is ${words} words; it needs to be about ${options.wordCount}.\n\n` +
+        `This narration is ${words} ${lang.counting === "characters" ? "characters" : "words"}; ` +
+        `it needs to be ${lengthInstruction(options.wordCount, lang)}.\n\n` +
         `${current}\n\n` +
         `Rewrite it ${direction}, keeping exactly ${lines.length} lines in the same ` +
         `order and each line about the same moment. Return JSON with a "lines" ` +
@@ -551,10 +604,8 @@ export async function composeScript(
         const revised = parsed.lines.filter((t): t is string => typeof t === "string");
         if (revised.length === lines.length) {
           // Only accept the rewrite if it actually moved toward the target.
-          const revisedWords = revised.reduce((n, t) => n + countWords(t), 0);
-          if (
-            Math.abs(revisedWords - options.wordCount) < Math.abs(words - options.wordCount)
-          ) {
+          const revisedWords = revised.reduce((n, t) => n + countUnits(t, lang), 0);
+          if (Math.abs(revisedWords - target) < Math.abs(words - target)) {
             lines = lines.map((l, i) => ({ ...l, text: revised[i].trim() }));
             words = revisedWords;
           }

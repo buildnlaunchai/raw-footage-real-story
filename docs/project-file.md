@@ -267,3 +267,21 @@ task: it needs a human to find tracks, verify licences, and take
 responsibility for that verification. Anything bundled must be CC0 or public
 domain — CC-BY needs attribution the app has nowhere to display, and NC is
 incompatible with distributing through Skool.
+
+### Non-English script quality
+
+The language selector works end to end, but qwen2.5's Bengali output was
+judged **not good enough to ship** on a Hajj/Umrah test set. Two limitations
+are recorded in code and worth repeating here:
+
+1. **No native few-shot examples.** The English examples are deliberately
+   withheld for other languages, since they would teach translated-English
+   rhythm. Writing native examples per language needs a fluent writer.
+2. **The invention guard does not apply.** It keys on capitalisation, which
+   Bengali, Arabic, Chinese and others do not have — so invented names pass
+   unchecked in those languages. This was predicted in the code and then
+   observed: the Bengali samples hallucinated personal names.
+
+Until a model with stronger Bengali is available, the practical route is to
+generate in English (or write the script by hand), edit it in the script
+panel, and use ElevenLabs for narration.

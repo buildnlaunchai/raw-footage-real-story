@@ -8,6 +8,7 @@
  * being uploaded, which it never is.
  */
 import { useEffect, useState } from "react";
+import type { ScriptLanguage } from "../lib/languages";
 import {
   characterCount,
   clearApiKey,
@@ -30,6 +31,7 @@ interface Props {
   voicesError: string | null;
   onReloadVoices: () => void;
   scriptLines: { text: string }[];
+  language: ScriptLanguage;
   disabled: boolean;
   previewing: boolean;
   onPreview: () => void;
@@ -50,6 +52,7 @@ export function ProviderPicker({
   voicesError,
   onReloadVoices,
   scriptLines,
+  language,
   disabled,
   previewing,
   onPreview,
@@ -103,19 +106,36 @@ export function ProviderPicker({
     <div className="provider-picker">
       <span className="field-label">Voice source</span>
       <div className="style-row">
-        {Object.values(PROVIDERS).map((p) => (
-          <button
-            key={p.id}
-            type="button"
-            className={`style-chip${providerId === p.id ? " is-selected" : ""}`}
-            onClick={() => onProvider(p.id)}
-            disabled={disabled}
-            title={p.blurb}
-          >
-            {p.label}
-          </button>
-        ))}
+        {Object.values(PROVIDERS).map((p) => {
+          // A provider that cannot speak the script's language is offered but
+          // plainly unavailable, rather than silently missing.
+          const unsupported =
+            p.capabilities.languages === "english-only" && !language.localVoiceSupported;
+          return (
+            <button
+              key={p.id}
+              type="button"
+              className={`style-chip${providerId === p.id ? " is-selected" : ""}`}
+              onClick={() => onProvider(p.id)}
+              disabled={disabled || unsupported}
+              title={
+                unsupported
+                  ? `Kokoro only supports English — switch to ElevenLabs for ${language.label} narration.`
+                  : p.blurb
+              }
+            >
+              {p.label}
+            </button>
+          );
+        })}
       </div>
+
+      {!language.localVoiceSupported && (
+        <p className="placeholder-note">
+          Kokoro only supports English — {language.label} narration needs
+          ElevenLabs (cloud).
+        </p>
+      )}
 
       {provider.capabilities.isCloud && (
         <div className="cloud-notice" role="status">

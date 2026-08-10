@@ -8,6 +8,7 @@
 import { useState } from "react";
 import type { IdeaProgress, StoryIdea } from "../lib/storyIdeas";
 import { SCRIPT_STYLES, type ScriptStyle } from "../lib/scriptComposer";
+import { LANGUAGES, languageFor } from "../lib/languages";
 
 interface Props {
   ideas: StoryIdea[] | null;
@@ -20,6 +21,8 @@ interface Props {
   wordCount: number;
   style: ScriptStyle;
   onStyle: (s: ScriptStyle) => void;
+  language: string;
+  onLanguage: (code: string) => void;
   critique: boolean;
   onCritique: (v: boolean) => void;
   onSuggest: () => void;
@@ -41,6 +44,8 @@ export function StoryPanel({
   wordCount,
   style,
   onStyle,
+  language,
+  onLanguage,
   critique,
   onCritique,
   onSuggest,
@@ -81,6 +86,37 @@ export function StoryPanel({
             words · roughly {Math.round((wordCount / 150) * 60)}s of narration
           </span>
         </div>
+      </div>
+
+      <div className="field-row">
+        <label className="field-label" htmlFor="script-language">
+          Language
+        </label>
+        <div className="voice-row">
+          <select
+            id="script-language"
+            className="select"
+            value={language}
+            onChange={(e) => onLanguage(e.currentTarget.value)}
+          >
+            {LANGUAGES.map((l) => (
+              <option key={l.code} value={l.code}>
+                {l.label}
+                {l.nativeLabel !== l.label ? ` · ${l.nativeLabel}` : ""}
+              </option>
+            ))}
+          </select>
+          {!languageFor(language).localVoiceSupported && (
+            <span className="hint">Needs a cloud voice</span>
+          )}
+        </div>
+        {!languageFor(language).documented && (
+          <p className="placeholder-note">
+            qwen2.5 doesn’t list {languageFor(language).label} among the
+            languages it names, so quality here is less certain than for
+            English. Check the draft before recording it.
+          </p>
+        )}
       </div>
 
       <div className="field-row">

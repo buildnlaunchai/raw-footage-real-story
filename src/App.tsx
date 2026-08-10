@@ -20,6 +20,7 @@ import {
   type ProjectFile,
 } from "./lib/project";
 import type { Segment } from "./lib/segments";
+import { DEFAULT_LANGUAGE, languageFor } from "./lib/languages";
 import { suggestStoryIdeas, type IdeaProgress, type StoryIdea } from "./lib/storyIdeas";
 import {
   generateScriptForTitle,
@@ -75,6 +76,7 @@ function App() {
   const [title, setTitle] = useState("");
   const [wordCount, setWordCount] = useState(150);
   const [style, setStyle] = useState<ScriptStyle>("cinematic");
+  const [language, setLanguage] = useState(DEFAULT_LANGUAGE);
   const [critique, setCritique] = useState(true);
 
   // --- script (C/D) --------------------------------------------------------
@@ -107,6 +109,16 @@ function App() {
   const [musicId, setMusicId] = useState<string | null>(null);
 
   const projectId = manifest?.project.id ?? null;
+
+  const scriptLanguage = languageFor(language);
+
+  // Kokoro plus an English lexicon is English-only. Rather than let someone
+  // reach a silent failure, the provider moves and the reason is stated.
+  useEffect(() => {
+    if (!scriptLanguage.localVoiceSupported && providerId === "local") {
+      setProviderId("elevenlabs");
+    }
+  }, [scriptLanguage, providerId]);
 
   const provider = providerFor(providerId);
 
@@ -367,6 +379,7 @@ function App() {
         title,
         wordCount,
         style,
+        language,
         critique,
         onProgress: setComposeProgress,
       });
@@ -652,6 +665,8 @@ function App() {
           wordCount={wordCount}
           style={style}
           onStyle={setStyle}
+          language={language}
+          onLanguage={setLanguage}
           critique={critique}
           onCritique={setCritique}
           onSuggest={onSuggestIdeas}
@@ -699,6 +714,7 @@ function App() {
             voicesError={voicesError}
             onReloadVoices={loadVoices}
             scriptLines={lines}
+            language={scriptLanguage}
             disabled={ttsBusy}
             previewing={previewing}
             onPreview={onPreview}
