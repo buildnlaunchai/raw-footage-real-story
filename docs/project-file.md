@@ -67,7 +67,7 @@ its timeline.
 
 ```jsonc
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
 
   "app": { "slug": "raw-footage-real-story", "version": "0.1.0" },
 
