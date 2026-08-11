@@ -23,6 +23,8 @@ interface Props {
   words: number;
   wordTarget: number;
   voiced: VoicedLine[] | null;
+  /** Keys whose recording no longer matches the words. */
+  staleLines: Set<string>;
   pronunciations: Record<string, string>;
   /** Cloud providers have no lexicon, so nothing can be flagged. */
   showPronunciationFixes: boolean;
@@ -46,6 +48,7 @@ export function ScriptPanel({
   words,
   wordTarget,
   voiced,
+  staleLines,
   pronunciations,
   showPronunciationFixes,
   busy,
@@ -95,8 +98,9 @@ export function ScriptPanel({
           const key = `${line.clipId}#${line.segmentIndex}`;
           const audio = byKey.get(key);
           const isBusy = resynthesizing === key;
+          const isStale = staleLines.has(key);
           return (
-            <li key={key} className="script-row">
+            <li key={key} className="script-row" data-stale={isStale || undefined}>
               <span className="clip-index" aria-hidden="true">
                 {String(i + 1).padStart(2, "0")}
               </span>
@@ -140,6 +144,11 @@ export function ScriptPanel({
                     >
                       {isBusy ? "Re-recording…" : playing === key ? "▶ Playing" : "▶ Play"}
                     </button>
+                    {isStale && (
+                      <span className="skip-chip" title="This line changed after it was recorded">
+                        out of date
+                      </span>
+                    )}
                     <button
                       type="button"
                       className="ghost-button small"

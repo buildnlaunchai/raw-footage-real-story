@@ -8,5 +8,11 @@
     "outDir": ".test-build",
     "rootDir": "src"
   },
-  "include": ["src/lib/scriptComposerCore.ts", "src/lib/languages.ts", "src/lib/scriptParsing.ts", "src/lib/segments.ts"]
+  "include": [
+    "src/lib/scriptComposerCore.ts",
+    "src/lib/languages.ts",
+    "src/lib/scriptParsing.ts",
+    "src/lib/segments.ts",
+    "src/lib/pipeline.ts"
+  ]
 }

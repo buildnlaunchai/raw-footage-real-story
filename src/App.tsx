@@ -7,7 +7,23 @@ import { SegmentEditor } from "./components/SegmentEditor";
 import { StoryPanel } from "./components/StoryPanel";
 import { ScriptPanel } from "./components/ScriptPanel";
 import { ProviderPicker } from "./components/ProviderPicker";
+import { AppShell } from "./components/AppShell";
 import { AssemblyPanel } from "./components/AssemblyPanel";
+import { StageHero } from "./components/StageHero";
+import { StageRail } from "./components/StageRail";
+import { DownloadIcon, PlayIcon } from "./components/Icons";
+import {
+  renderSignature,
+  stageStatuses,
+  staleLineKeys,
+  stalenessReason,
+  unrecordedLineKeys,
+  voiceStampEquals,
+  STAGES,
+  STAGE_ORDER,
+  type StageId,
+  type VoiceStamp,
+} from "./lib/pipeline";
 import { FfmpegSetup } from "./components/FfmpegSetup";
 import { OLLAMA_MODEL } from "./config/ollama";
 import {
@@ -21,7 +37,11 @@ import {
 } from "./lib/project";
 import type { Segment } from "./lib/segments";
 import { DEFAULT_LANGUAGE, languageFor } from "./lib/languages";
-import type { QualityTier, ScriptProviderId } from "./lib/scriptProviders";
+import {
+  SCRIPT_PROVIDERS,
+  type QualityTier,
+  type ScriptProviderId,
+} from "./lib/scriptProviders";
 import { suggestStoryIdeas, type IdeaProgress, type StoryIdea } from "./lib/storyIdeas";
 import {
   generateScriptForTitle,
@@ -31,7 +51,9 @@ import {
 } from "./lib/scriptComposer";
 import { audioUrl } from "./lib/voiceover";
 import {
+  characterCount,
   providerFor,
+  PROVIDERS,
   type LineFailure,
   type ProviderId,
   type SynthProgress,
@@ -81,6 +103,22 @@ function errorText(err: unknown): string {
 }
 
 function App() {
+  // --- shell ---------------------------------------------------------------
+  const [stage, setStage] = useState<StageId>("footage");
+  const [query, setQuery] = useState("");
+
+  /**
+   * What the current narration was recorded with, and what the current cut was
+   * rendered from.
+   *
+   * Neither artifact carries its own inputs — audio does not know which voice
+   * made it, and a rendered file does not know which audio went in — so the
+   * inputs are stamped when each run succeeds. Without that, changing the voice
+   * and re-opening the assembly stage would look perfectly up to date.
+   */
+  const [voiceStamp, setVoiceStamp] = useState<VoiceStamp | null>(null);
+  const [renderedSig, setRenderedSig] = useState("");
+
   // --- project -------------------------------------------------------------
   const [manifest, setManifest] = useState<ProjectFile | null>(null);
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
@@ -129,6 +167,62 @@ function App() {
   const [ttsProgress, setTtsProgress] = useState<SynthProgress | null>(null);
   const [ttsError, setTtsError] = useState<string | null>(null);
   const [resynthesizing, setResynthesizing] = useState<string | null>(null);
+
+  /**
+   * Re-record only the lines whose audio no longer matches.
+   *
+   * The alternative is re-recording everything, which for a cloud voice bills
+   * again for lines that were never touched.
+   */
+  async function onRerecordStale() {
+    if (!lines || !projectId || !voiced) return;
+    const stamp: VoiceStamp = { providerId, voiceId: voice, language, pronunciations };
+    const changed = voiceStamp !== null && !voiceStampEquals(voiceStamp, stamp);
+    const stale = staleLineKeys(lines, voiced, changed);
+    const missing = unrecordedLineKeys(lines, voiced);
+    const targets = lines
+      .map((l, i) => ({ l, i }))
+      .filter(({ l }) => {
+        const key = `${l.clipId}#${l.segmentIndex}`;
+        return stale.has(key) || missing.has(key);
+      });
+    if (targets.length === 0) return;
+
+    setTtsBusy(true);
+    setTtsError(null);
+    try {
+      const redone: VoicedLine[] = [];
+      for (const { l, i } of targets) {
+        redone.push(
+          await provider.synthesizeLine(
+            { clipId: l.clipId, segmentIndex: l.segmentIndex, text: l.text },
+            i + 1,
+            { voiceId: voice, projectId, language, pronunciations },
+          ),
+        );
+      }
+      setVoiced((cur) => {
+        const replaced = new Set(redone.map((v) => `${v.clipId}#${v.segmentIndex}`));
+        const kept = (cur ?? []).filter(
+          (v) => !replaced.has(`${v.clipId}#${v.segmentIndex}`),
+        );
+        const rank = new Map(lines.map((l, i) => [`${l.clipId}#${l.segmentIndex}`, i]));
+        return [...kept, ...redone].sort(
+          (a, b) =>
+            (rank.get(`${a.clipId}#${a.segmentIndex}`) ?? 0) -
+            (rank.get(`${b.clipId}#${b.segmentIndex}`) ?? 0),
+        );
+      });
+      // Everything now matches the current voice, so the stamp moves with it.
+      setVoiceStamp(stamp);
+      setAssembly(null);
+      setDirty(true);
+    } catch (err) {
+      setTtsError(errorText(err));
+    } finally {
+      setTtsBusy(false);
+    }
+  }
 
   // --- assembly ------------------------------------------------------------
   const [ffmpeg, setFfmpeg] = useState<FfmpegInfo | null>(null);
@@ -460,6 +554,7 @@ function App() {
       // Keep whatever succeeded. With a cloud provider those lines are already
       // billed, and discarding them would charge for them twice.
       setVoiced(result.lines.length > 0 ? result.lines : null);
+      setVoiceStamp({ providerId, voiceId: voice, language, pronunciations });
       setFailures(result.failures);
       setAssembly(null);
       setDirty(true);
@@ -647,6 +742,8 @@ function App() {
         onProgress: setRenderProgress,
       });
       setAssembly(result);
+      // Stamp what this cut was made from, so a later edit can be seen.
+      setRenderedSig(renderSignature(voiced, crossfadeMs, musicId));
     } catch (err) {
       setAssemblyError(errorText(err));
       setAssembly(null);
@@ -677,38 +774,329 @@ function App() {
   const described = describedCount(manifest.clips);
   const segments = totalSegments(manifest.clips);
 
-  return (
-    <main className="app app-wide">
-      <header className="masthead">
-        <p className="eyebrow">
+  // --- what is still true? --------------------------------------------------
+  //
+  // With every stage reachable at all times, nothing stops a user editing a
+  // line and walking straight to export. These derive whether each artifact
+  // still matches what produced it, so the rail can say so.
+
+  const currentStamp: VoiceStamp = {
+    providerId,
+    voiceId: voice,
+    language,
+    pronunciations,
+  };
+  // A missing stamp means the audio predates this session — a reopened project.
+  // That is not evidence the voice changed, only that we cannot know, and
+  // crying stale on every open would train people to ignore the warning.
+  const voiceChanged = voiceStamp !== null && !voiceStampEquals(voiceStamp, currentStamp);
+  const staleLines = staleLineKeys(lines, voiced, voiceChanged);
+  const unrecorded = unrecordedLineKeys(lines, voiced);
+  const assemblyCurrent =
+    !assembly ||
+    renderedSig === "" ||
+    renderedSig === renderSignature(voiced, crossfadeMs, musicId);
+
+  const busyStage: StageId | null = importing
+    ? "footage"
+    : ideasBusy
+      ? "story"
+      : composing
+        ? "script"
+        : ttsBusy
+          ? "voice"
+          : assemblyBusy
+            ? "assembly"
+            : null;
+
+  const pipeline = {
+    clipCount: manifest.clips.length,
+    describedCount: described,
+    title,
+    lines,
+    voiced,
+    staleLines,
+    unrecordedLines: unrecorded,
+    hasAssembly: assembly !== null,
+    assemblyCurrent,
+    busy: busyStage,
+  };
+  const statuses = stageStatuses(pipeline);
+  const staleNotes = {
+    voice: stalenessReason("voice", pipeline),
+    assembly: stalenessReason("assembly", pipeline),
+  };
+  const summaries: Record<StageId, string> = {
+    footage:
+      manifest.clips.length === 0
+        ? "Nothing imported"
+        : `${described} of ${segments} described`,
+    story: title.trim() || "No title yet",
+    script: lines ? `${lines.length} lines · ${words} words` : "Not written",
+    voice: voiced ? `${voiced.length} of ${lines?.length ?? 0} recorded` : "Not recorded",
+    assembly: assembly ? `${(assembly.durationMs / 1000).toFixed(0)}s cut` : "Not rendered",
+  };
+
+  const q = query.trim().toLowerCase();
+  const railClips = q
+    ? manifest.clips.filter(
+        (c) =>
+          (c.sourcePath ?? "").toLowerCase().includes(q) ||
+          c.segments.some((sg) => sg.text.toLowerCase().includes(q)),
+      )
+    : manifest.clips;
+
+  const idx = STAGE_ORDER.indexOf(stage);
+  const goPrev = idx > 0 ? () => setStage(STAGE_ORDER[idx - 1]) : null;
+  const goNext = idx < STAGE_ORDER.length - 1 ? () => setStage(STAGE_ORDER[idx + 1]) : null;
+  const heroMedia = manifest.clips.find((c) => c.thumbnailPath)?.thumbnailPath ?? null;
+
+  const attention = staleLines.size + unrecorded.size + failures.length;
+
+  /** A stage that cannot run yet still opens, and says what it needs. */
+  function blocked(needFrom: StageId) {
+    return (
+      <div className="stage-blocked">
+        <h3>{STAGES[stage].label} isn’t ready yet</h3>
+        <p className="hint">{STAGES[stage].needs}</p>
+        <button type="button" className="primary-button" onClick={() => setStage(needFrom)}>
+          Go to {STAGES[needFrom].label}
+        </button>
+      </div>
+    );
+  }
+
+  function staleBanner(note: string | null, action: React.ReactNode) {
+    if (!note) return null;
+    return (
+      <div className="stale-banner" role="status">
+        <strong>Out of date.</strong>
+        <span>{note}</span>
+        {action}
+      </div>
+    );
+  }
+
+  const hero = {
+    footage: {
+      badge: "Stage 1 · Footage",
+      title: manifest.project.name,
+      meta: [
+        `${manifest.clips.length} clip${manifest.clips.length === 1 ? "" : "s"}`,
+        `${segments} segment${segments === 1 ? "" : "s"}`,
+        `${described} described`,
+      ],
+      lede:
+        "Bring in a trip’s worth of footage and mark what happens when. Every " +
+        "described moment becomes something the story can reach for.",
+      actions: (
+        <>
           <button
             type="button"
-            className="link-button"
-            onClick={() => {
-              setManifest(null);
-              setRejected([]);
-              resetVideoState();
-            }}
+            className="primary-button"
+            onClick={async () => runImport(await pickFiles())}
+            disabled={importing}
           >
-            ← Projects
+            {importing ? "Importing…" : "Import footage"}
           </button>
-        </p>
-        <h1>{manifest.project.name}</h1>
-        <p className="lede">
-          {manifest.clips.length} clip{manifest.clips.length === 1 ? "" : "s"} · {segments}{" "}
-          segment{segments === 1 ? "" : "s"} · {described} described
-        </p>
-      </header>
+          {described > 0 && (
+            <button type="button" className="ghost-button" onClick={() => setStage("story")}>
+              Next: Story
+            </button>
+          )}
+        </>
+      ),
+    },
+    story: {
+      badge: "Stage 2 · Story",
+      title: title.trim() || "Choose what this video is about",
+      meta: [
+        `${described} described moment${described === 1 ? "" : "s"}`,
+        `${wordCount} words`,
+        scriptLanguage.label,
+      ],
+      lede:
+        "One library can carry many videos. Pick a title and a shape, and the " +
+        "script stage will choose which moments serve it.",
+      actions: (
+        <>
+          <button
+            type="button"
+            className="primary-button"
+            onClick={onSuggestIdeas}
+            disabled={ideasBusy || described === 0}
+          >
+            {ideasBusy ? "Thinking…" : "Suggest stories"}
+          </button>
+          {title.trim() && (
+            <button type="button" className="ghost-button" onClick={() => setStage("script")}>
+              Next: Script
+            </button>
+          )}
+        </>
+      ),
+    },
+    script: {
+      badge: "Stage 3 · Script",
+      title: title.trim() || "Untitled",
+      meta: [
+        lines ? `${lines.length} lines` : null,
+        lines ? `${words} of ${wordCount} words` : null,
+        scriptLanguage.label,
+        SCRIPT_PROVIDERS[scriptProvider].label,
+      ],
+      lede:
+        "Narration written over the moments you described. Edit any line here — " +
+        "the voice stage will show which recordings that leaves out of date.",
+      actions: (
+        <>
+          <button
+            type="button"
+            className="primary-button"
+            onClick={onGenerateScript}
+            disabled={composing || !title.trim()}
+          >
+            {composing ? "Writing…" : lines ? "Regenerate script" : "Generate script"}
+          </button>
+          {lines && (
+            <button type="button" className="ghost-button" onClick={() => setStage("voice")}>
+              Next: Voice
+            </button>
+          )}
+        </>
+      ),
+    },
+    voice: {
+      badge: "Stage 4 · Voice",
+      title: "Narration",
+      meta: [
+        voiced ? `${voiced.length} recorded` : null,
+        PROVIDERS[providerId].label,
+        scriptLanguage.label,
+      ],
+      lede: provider.capabilities.isCloud
+        ? "Your footage stays on this machine. Narration text is sent to the provider you chose."
+        : "Recorded on this machine. Nothing is uploaded.",
+      actions: (
+        <>
+          <button
+            type="button"
+            className="primary-button"
+            onClick={onGenerateVoiceover}
+            disabled={ttsBusy || !lines || !voice}
+          >
+            <PlayIcon />
+            {ttsBusy
+              ? ttsProgress
+                ? `Recording ${ttsProgress.done}/${ttsProgress.total}…`
+                : "Recording…"
+              : voiced
+                ? "Re-record all"
+                : "Record narration"}
+          </button>
+          <button
+            type="button"
+            className="ghost-button"
+            onClick={onPreview}
+            disabled={previewing || !voice}
+          >
+            {previewing ? "Preview…" : "▶ Preview voice"}
+          </button>
+          {voiced && (
+            <button type="button" className="ghost-button" onClick={() => setStage("assembly")}>
+              Next: Assembly
+            </button>
+          )}
+        </>
+      ),
+    },
+    assembly: {
+      badge: "Stage 5 · Assembly",
+      title: title.trim() || manifest.project.name,
+      meta: [
+        assembly ? `${(assembly.durationMs / 1000).toFixed(1)}s` : null,
+        voiced ? `${voiced.length} shots` : null,
+        crossfadeMs > 0 ? "crossfade" : "hard cuts",
+        musicId ? MUSIC_BEDS.find((m) => m.id === musicId)?.label ?? null : "no music",
+      ],
+      lede:
+        "Narration is the master clock: each clip stays on screen for exactly as " +
+        "long as its line takes to say.",
+      actions: (
+        <>
+          <button
+            type="button"
+            className="primary-button"
+            onClick={onRender}
+            disabled={assemblyBusy || !voiced || !ffmpeg}
+          >
+            <DownloadIcon />
+            {assemblyBusy
+              ? renderProgress
+                ? `Rendering ${renderProgress.done}/${renderProgress.total}…`
+                : "Rendering…"
+              : assembly
+                ? "Render again"
+                : "Render rough cut"}
+          </button>
+          {assembly && <span className="hint">Export options are below.</span>}
+        </>
+      ),
+    },
+  }[stage];
 
-      <div className="actions sticky-actions">
-        <button type="button" className="primary-button" onClick={onSave} disabled={busy || !dirty}>
-          {busy ? "Saving…" : dirty ? "Save project" : "Saved"}
-        </button>
-        <span className="hint">
-          {dirty ? "Unsaved changes" : savedAt ? `Saved at ${savedAt}` : "Up to date"} ·{" "}
-          <kbd>⌘S</kbd>
-        </span>
-      </div>
+  return (
+    <AppShell
+      projectName={manifest.project.name}
+      active={stage}
+      statuses={statuses}
+      onStage={setStage}
+      query={query}
+      onQuery={setQuery}
+      dirty={dirty}
+      saving={busy}
+      savedAt={savedAt}
+      onSave={onSave}
+      attention={attention}
+      attentionLabel={
+        attention === 0
+          ? "Everything is up to date"
+          : `${attention} thing${attention === 1 ? "" : "s"} need attention`
+      }
+      onLeaveProject={() => {
+        setManifest(null);
+        setRejected([]);
+        resetVideoState();
+        setStage("footage");
+      }}
+      rail={
+        <StageRail
+          active={stage}
+          statuses={statuses}
+          summaries={summaries}
+          staleNotes={staleNotes}
+          onStage={setStage}
+          clips={railClips}
+          selectedClipId={selectedClipId}
+          onSelectClip={(id) => {
+            setSelectedClipId(id);
+            setStage("footage");
+          }}
+          thumbUrl={(c) => (c.thumbnailPath ? audioUrl(c.thumbnailPath) : null)}
+        />
+      }
+    >
+      <StageHero
+        badge={hero.badge}
+        status={statuses[stage]}
+        title={hero.title}
+        meta={hero.meta}
+        lede={hero.lede}
+        media={heroMedia ? audioUrl(heroMedia) : null}
+        actions={hero.actions}
+        onPrev={goPrev}
+        onNext={goNext}
+      />
 
       {error && (
         <div className="error" role="alert">
@@ -732,223 +1120,284 @@ function App() {
         </div>
       )}
 
-      <SegmentEditor
-        clips={manifest.clips}
-        selectedId={selectedClipId}
-        importing={importing}
-        onSelect={setSelectedClipId}
-        onChangeSegments={onChangeSegments}
-        onImportClips={async () => runImport(await pickFiles())}
-      />
-
-      {described > 0 && (
-        <StoryPanel
-          ideas={ideas}
-          busy={ideasBusy}
-          progress={ideaProgress}
-          error={ideaError}
-          describedClips={described}
-          totalSegments={segments}
-          chosenTitle={title}
-          wordCount={wordCount}
-          style={style}
-          onStyle={setStyle}
-          language={language}
-          onLanguage={setLanguage}
-          scriptProvider={scriptProvider}
-          onScriptProvider={setScriptProvider}
-          qualityTier={qualityTier}
-          onQualityTier={setQualityTier}
-          usage={scriptUsage}
-          critique={critique}
-          onCritique={setCritique}
-          onSuggest={onSuggestIdeas}
-          onChooseTitle={setTitle}
-          onWordCount={setWordCount}
-          onContinue={onGenerateScript}
-          continueLabel={lines ? "Regenerate script" : "Generate script"}
-          continueBusy={composing}
-          continueError={composeError}
+      {/* ── stage 1 ── */}
+      {stage === "footage" && (
+        <SegmentEditor
+          clips={railClips}
+          selectedId={selectedClipId}
+          importing={importing}
+          onSelect={setSelectedClipId}
+          onChangeSegments={onChangeSegments}
+          onImportClips={async () => runImport(await pickFiles())}
         />
       )}
 
-      {composing && composeProgress && (
-        <p className="working" role="status">
-          {composeProgress.stage === "selecting"
-            ? `Choosing moments (${composeProgress.done}/${composeProgress.total})…`
-            : composeProgress.stage === "writing"
-              ? "Writing the narration…"
-              : composeProgress.stage === "critiquing"
-                ? "Reviewing and revising the draft…"
-                : "Adjusting length…"}
-        </p>
-      )}
-
-      {lines && !composing && (
-        <ScriptPanel
-          clips={manifest.clips}
-          title={title}
-          lines={lines}
-          words={words}
-          wordTarget={wordCount}
-          voiced={voiced}
-          pronunciations={pronunciations}
-          showPronunciationFixes={provider.capabilities.reportsUnpronounceableWords}
-          busy={ttsBusy}
-          resynthesizing={resynthesizing}
-          onEditLine={onEditLine}
-          onHearLine={onHearLine}
-          onCorrectWord={onCorrectWord}
-        >
-          <ProviderPicker
-            providerId={providerId}
-            onProvider={setProviderId}
-            voices={voices}
-            voiceId={voice}
-            onVoice={setVoice}
-            voicesError={voicesError}
-            onReloadVoices={loadVoices}
-            scriptLines={lines}
-            language={scriptLanguage}
-            disabled={ttsBusy}
-            previewing={previewing}
-            onPreview={onPreview}
+      {/* ── stage 2 ── */}
+      {stage === "story" &&
+        (described === 0 ? (
+          blocked("footage")
+        ) : (
+          <StoryPanel
+            ideas={ideas}
+            busy={ideasBusy}
+            progress={ideaProgress}
+            error={ideaError}
+            describedClips={described}
+            totalSegments={segments}
+            chosenTitle={title}
+            wordCount={wordCount}
+            style={style}
+            onStyle={setStyle}
+            language={language}
+            onLanguage={setLanguage}
+            scriptProvider={scriptProvider}
+            onScriptProvider={setScriptProvider}
+            qualityTier={qualityTier}
+            onQualityTier={setQualityTier}
+            usage={scriptUsage}
+            critique={critique}
+            onCritique={setCritique}
+            onSuggest={onSuggestIdeas}
+            onChooseTitle={setTitle}
+            onWordCount={setWordCount}
+            onContinue={onGenerateScript}
+            continueLabel={lines ? "Regenerate script" : "Generate script"}
+            continueBusy={composing}
+            continueError={composeError}
           />
-          <div className="actions">
-            <button
-              type="button"
-              className="primary-button"
-              onClick={onGenerateVoiceover}
-              disabled={ttsBusy || voices.length === 0}
-            >
-              {ttsBusy ? "Recording…" : voiced ? "Re-record voiceover" : "Generate voiceover"}
+        ))}
+
+      {/* ── stage 3 ── */}
+      {stage === "script" &&
+        (!title.trim() ? (
+          blocked("story")
+        ) : composing ? (
+          <div className="panel">
+            <p className="working" role="status">
+              {composeProgress?.stage === "selecting"
+                ? `Choosing moments (${composeProgress.done}/${composeProgress.total})…`
+                : composeProgress?.stage === "writing"
+                  ? "Writing the narration…"
+                  : composeProgress?.stage === "critiquing"
+                    ? "Reviewing and revising the draft…"
+                    : "Working…"}
+            </p>
+          </div>
+        ) : !lines ? (
+          <div className="stage-blocked">
+            <h3>No script yet</h3>
+            <p className="hint">
+              “{title}” is ready to write. This picks the moments that serve it and
+              narrates them.
+            </p>
+            <button type="button" className="primary-button" onClick={onGenerateScript}>
+              Generate script
             </button>
-            {ttsBusy && ttsProgress && (
-              <span className="hint">
-                {ttsProgress.done} of {ttsProgress.total}
-              </span>
+          </div>
+        ) : (
+          <ScriptPanel
+            clips={manifest.clips}
+            title={title}
+            lines={lines}
+            words={words}
+            wordTarget={wordCount}
+            voiced={voiced}
+            staleLines={staleLines}
+            pronunciations={pronunciations}
+            showPronunciationFixes={provider.capabilities.reportsUnpronounceableWords}
+            busy={ttsBusy}
+            resynthesizing={resynthesizing}
+            onEditLine={onEditLine}
+            onHearLine={onHearLine}
+            onCorrectWord={onCorrectWord}
+          />
+        ))}
+
+      {/* ── stage 4 ── */}
+      {stage === "voice" &&
+        (!lines ? (
+          blocked("script")
+        ) : (
+          <>
+            {staleBanner(
+              staleNotes.voice,
+              <button
+                type="button"
+                className="ghost-button small"
+                onClick={onRerecordStale}
+                disabled={ttsBusy}
+              >
+                Re-record just those
+              </button>,
             )}
-          </div>
-          {ttsError && (
-            <div className="error" role="alert">
-              <strong>Couldn’t generate the voiceover.</strong>
-              <span>{ttsError}</span>
-            </div>
-          )}
-          {failures.length > 0 && (
-            <div className="warning" role="status">
-              <strong>
-                {failures.length} line{failures.length === 1 ? "" : "s"} didn’t record.
-              </strong>
-              <span>
-                The rest were kept. {failures[0].message}
-              </span>
-              <div className="actions">
-                <button
-                  type="button"
-                  className="ghost-button small"
-                  onClick={onRetryFailed}
-                  disabled={ttsBusy}
-                >
-                  Retry just those lines
-                </button>
+
+            <div className="panel">
+              <div className="panel-head">
+                <h2>Voice</h2>
+                <span className="hint">
+                  {characterCount(lines)} characters
+                  {provider.capabilities.billing === "per-character" && " · billed"}
+                </span>
               </div>
+              <ProviderPicker
+                providerId={providerId}
+                onProvider={setProviderId}
+                voices={voices}
+                voiceId={voice}
+                onVoice={setVoice}
+                voicesError={voicesError}
+                onReloadVoices={loadVoices}
+                scriptLines={lines}
+                language={scriptLanguage}
+                disabled={ttsBusy}
+                previewing={previewing}
+                onPreview={onPreview}
+              />
+              {ttsError && (
+                <div className="error" role="alert">
+                  <strong>Couldn’t generate the voiceover.</strong>
+                  <span>{ttsError}</span>
+                </div>
+              )}
+              {failures.length > 0 && (
+                <div className="warning" role="status">
+                  <strong>
+                    {failures.length} line{failures.length === 1 ? "" : "s"} didn’t record.
+                  </strong>
+                  <span>The rest were kept. {failures[0].message}</span>
+                  <div className="actions">
+                    <button
+                      type="button"
+                      className="ghost-button small"
+                      onClick={onRetryFailed}
+                      disabled={ttsBusy}
+                    >
+                      Retry just those lines
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
-          )}
-        </ScriptPanel>
-      )}
 
-      {voiced && !ttsBusy && (
-        <FfmpegSetup
-          info={ffmpeg}
-          hasHdrClips={manifest.clips.some((c) => c.isHdr)}
-          onFound={setFfmpeg}
-          onRecheck={async () => setFfmpeg(await detectFfmpeg())}
-        />
-      )}
+            <ScriptPanel
+              clips={manifest.clips}
+              title={title}
+              lines={lines}
+              words={words}
+              wordTarget={wordCount}
+              voiced={voiced}
+              staleLines={staleLines}
+              pronunciations={pronunciations}
+              showPronunciationFixes={provider.capabilities.reportsUnpronounceableWords}
+              busy={ttsBusy}
+              resynthesizing={resynthesizing}
+              onEditLine={onEditLine}
+              onHearLine={onHearLine}
+              onCorrectWord={onCorrectWord}
+            />
+          </>
+        ))}
 
-      {voiced && !ttsBusy && ffmpeg && (
-        <AssemblyPanel
-          voiced={voiced}
-          clips={manifest.clips.map((c) => ({
-            id: c.id,
-            description: c.segments[0]?.text ?? "",
-            sourcePath: c.sourcePath ?? undefined,
-            sourceDurationMs: c.sourceDurationMs ?? undefined,
-            isPlaceholder: c.isPlaceholder,
-            isHdr: c.isHdr,
-          }))}
-          ffmpeg={ffmpeg}
-          result={assembly}
-          busy={assemblyBusy}
-          progress={renderProgress}
-          error={assemblyError}
-          hasPlaceholders
-          makingPlaceholders={false}
-          projectId={manifest.project.id}
-          onMakePlaceholders={() => {}}
-          onRender={onRender}
-          onConsolidate={() => {}}
-          consolidating={false}
-          hasExternalMedia={manifest.clips.some((c) => c.sourcePath && !c.isPlaceholder)}
-        >
-          <div className="field-row">
-            <span className="field-label">Transitions</span>
-            <div className="style-row">
+      {/* ── stage 5 ── */}
+      {stage === "assembly" &&
+        (!voiced ? (
+          blocked("voice")
+        ) : (
+          <>
+            {staleBanner(
+              staleNotes.assembly,
               <button
                 type="button"
-                className={`style-chip${crossfadeMs === 0 ? " is-selected" : ""}`}
-                onClick={() => setCrossfadeMs(0)}
-                title="The default: an instant cut between clips"
+                className="ghost-button small"
+                onClick={onRender}
+                disabled={assemblyBusy || !ffmpeg}
               >
-                Hard cuts
-              </button>
-              <button
-                type="button"
-                className={`style-chip${crossfadeMs === 400 ? " is-selected" : ""}`}
-                onClick={() => setCrossfadeMs(400)}
-                title="A 400ms dissolve; shortens the film slightly"
-              >
-                Crossfade
-              </button>
-            </div>
-          </div>
+                Render again
+              </button>,
+            )}
 
-          <div className="field-row">
-            <span className="field-label">Music</span>
-            <div className="style-row">
-              <button
-                type="button"
-                className={`style-chip${musicId === null ? " is-selected" : ""}`}
-                onClick={() => setMusicId(null)}
-              >
-                None
-              </button>
-              {MUSIC_BEDS.map((m) => (
-                <button
-                  key={m.id}
-                  type="button"
-                  className={`style-chip${musicId === m.id ? " is-selected" : ""}`}
-                  onClick={() => setMusicId(m.id)}
-                  title={m.hint}
-                >
-                  {m.label}
-                </button>
-              ))}
-            </div>
-          </div>
-        </AssemblyPanel>
-      )}
+            <FfmpegSetup
+              info={ffmpeg}
+              hasHdrClips={manifest.clips.some((c) => c.isHdr)}
+              onFound={setFfmpeg}
+              onRecheck={async () => setFfmpeg(await detectFfmpeg())}
+            />
 
-      <footer className="footer">
-        <span className="badge">Library → story → script → voice → cut</span>
-        <p>
-          {provider.capabilities.isCloud
-            ? "Your footage stays on this machine. Narration text is sent to ElevenLabs."
-            : "Everything runs locally. Nothing is uploaded."}
-        </p>
-      </footer>
-    </main>
+            {ffmpeg && (
+              <AssemblyPanel
+                voiced={voiced}
+                clips={manifest.clips.map((c) => ({
+                  id: c.id,
+                  description: c.segments[0]?.text ?? "",
+                  sourcePath: c.sourcePath ?? undefined,
+                  sourceDurationMs: c.sourceDurationMs ?? undefined,
+                  isPlaceholder: c.isPlaceholder,
+                  isHdr: c.isHdr,
+                }))}
+                ffmpeg={ffmpeg}
+                result={assembly}
+                busy={assemblyBusy}
+                progress={renderProgress}
+                error={assemblyError}
+                hasPlaceholders
+                makingPlaceholders={false}
+                projectId={manifest.project.id}
+                onMakePlaceholders={() => {}}
+                onRender={onRender}
+                onConsolidate={() => {}}
+                consolidating={false}
+                hasExternalMedia={manifest.clips.some((c) => c.sourcePath && !c.isPlaceholder)}
+              >
+                <div className="field-row">
+                  <span className="field-label">Transitions</span>
+                  <div className="style-row">
+                    <button
+                      type="button"
+                      className={`style-chip${crossfadeMs === 0 ? " is-selected" : ""}`}
+                      onClick={() => setCrossfadeMs(0)}
+                      title="The default: an instant cut between clips"
+                    >
+                      Hard cuts
+                    </button>
+                    <button
+                      type="button"
+                      className={`style-chip${crossfadeMs === 400 ? " is-selected" : ""}`}
+                      onClick={() => setCrossfadeMs(400)}
+                      title="A 400ms dissolve; shortens the film slightly"
+                    >
+                      Crossfade
+                    </button>
+                  </div>
+                </div>
+
+                <div className="field-row">
+                  <span className="field-label">Music</span>
+                  <div className="style-row">
+                    <button
+                      type="button"
+                      className={`style-chip${musicId === null ? " is-selected" : ""}`}
+                      onClick={() => setMusicId(null)}
+                    >
+                      None
+                    </button>
+                    {MUSIC_BEDS.map((m) => (
+                      <button
+                        key={m.id}
+                        type="button"
+                        className={`style-chip${musicId === m.id ? " is-selected" : ""}`}
+                        onClick={() => setMusicId(m.id)}
+                        title={m.hint}
+                      >
+                        {m.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </AssemblyPanel>
+            )}
+          </>
+        ))}
+    </AppShell>
   );
 }
 
