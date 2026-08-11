@@ -144,12 +144,25 @@ jobs:
         id: tauri
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # The Apple variables are commented out rather than set-and-empty.
+          #
+          # A missing GitHub secret evaluates to "", and Actions has no way to
+          # omit an env key conditionally — so they arrive *set to nothing*.
+          # Rust's env::var returns Ok("") for that, which Tauri reads as "a
+          # certificate was supplied", and the build died with
+          #
+          #   security: SecKeychainItemImport: One or more parameters passed to
+          #   a function were not valid
+          #   failed codesign application: failed to import keychain certificate
+          #
+          # Enrolment is: add the six secrets, uncomment these six lines.
+          #
+          # APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          # APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          # APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          # APPLE_ID: ${{ secrets.APPLE_ID }}
+          # APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           args: ${{ matrix.args }}
           # Only on a tag. A dispatch build is a check, and a check should not
