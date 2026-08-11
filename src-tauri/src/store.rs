@@ -385,9 +385,51 @@ pub struct LibraryClip {
     /// Everything described about the clip, joined — what the table shows.
     pub description: String,
     pub segment_count: usize,
+    /// The described moments themselves.
+    ///
+    /// Carried rather than left to be rebuilt from `description`: a clip split
+    /// into two moments cannot be recovered from the sentence they join into,
+    /// and a view that tried collapsed real segments back into one.
+    pub segments: Vec<project::Segment>,
     /// When the clip entered the library. Falls back to the project's own time
     /// for clips imported before this was tracked.
     pub added_at: String,
+}
+
+/// Flatten one clip into a library row.
+///
+/// Separated from `library_list` so the mapping can be tested: the row used to
+/// carry only the joined description, and a view that needed real segments
+/// rebuilt a single one from that sentence — which quietly destroyed splits.
+pub fn to_library_clip(p: &ProjectFile, c: &project::ProjectClip) -> LibraryClip {
+    LibraryClip {
+        project_id: p.project.id.clone(),
+        project_name: p.project.name.clone(),
+        clip_id: c.id.clone(),
+        file_name: c
+            .file_name
+            .clone()
+            .or_else(|| {
+                c.source_path
+                    .as_deref()
+                    .and_then(|s| Path::new(s).file_name().map(|n| n.to_string_lossy().to_string()))
+            })
+            .unwrap_or_else(|| "Untitled clip".into()),
+        source_path: c.source_path.clone(),
+        thumbnail_path: c.thumbnail_path.clone(),
+        duration_ms: c.source_duration_ms,
+        width: c.width,
+        height: c.height,
+        codec: c.codec.clone(),
+        is_placeholder: c.is_placeholder,
+        is_hdr: c.is_hdr,
+        favorite: c.favorite,
+        deleted_at: c.deleted_at.clone(),
+        description: c.combined_text(),
+        segment_count: c.segments.len(),
+        segments: c.segments.clone(),
+        added_at: p.project.created_at.clone(),
+    }
 }
 
 #[tauri::command]
@@ -398,33 +440,7 @@ pub fn library_list(app: AppHandle) -> Result<Vec<LibraryClip>, StoreError> {
         let manifest = entry.path().join("project.json");
         let Ok(p) = project::load(&manifest) else { continue };
         for c in &p.clips {
-            out.push(LibraryClip {
-                project_id: p.project.id.clone(),
-                project_name: p.project.name.clone(),
-                clip_id: c.id.clone(),
-                file_name: c
-                    .file_name
-                    .clone()
-                    .or_else(|| {
-                        c.source_path
-                            .as_deref()
-                            .and_then(|s| Path::new(s).file_name().map(|n| n.to_string_lossy().to_string()))
-                    })
-                    .unwrap_or_else(|| "Untitled clip".into()),
-                source_path: c.source_path.clone(),
-                thumbnail_path: c.thumbnail_path.clone(),
-                duration_ms: c.source_duration_ms,
-                width: c.width,
-                height: c.height,
-                codec: c.codec.clone(),
-                is_placeholder: c.is_placeholder,
-                is_hdr: c.is_hdr,
-                favorite: c.favorite,
-                deleted_at: c.deleted_at.clone(),
-                description: c.combined_text(),
-                segment_count: c.segments.len(),
-                added_at: p.project.created_at.clone(),
-            });
+            out.push(to_library_clip(&p, c));
         }
     }
     Ok(out)
@@ -559,4 +575,66 @@ pub fn allow_media(app: AppHandle, paths: Vec<String>) -> Result<usize, StoreErr
         }
     }
     Ok(granted)
+}
+
+
+#[cfg(test)]
+mod library_rows {
+    use super::*;
+    use crate::project::{ProjectClip, Segment};
+
+    fn clip_with(segments: Vec<Segment>) -> ProjectClip {
+        ProjectClip {
+            id: "c1".into(),
+            source_path: Some("/tmp/IMG_6016.mov".into()),
+            sha256: None,
+            source_duration_ms: Some(85_055),
+            is_placeholder: false,
+            file_name: Some("IMG_6016.mov".into()),
+            thumbnail_path: None,
+            is_hdr: true,
+            width: Some(1920),
+            height: Some(1080),
+            codec: Some("hevc".into()),
+            favorite: false,
+            deleted_at: None,
+            segments,
+        }
+    }
+
+    /// A split clip must survive the trip to the library and back.
+    ///
+    /// The describe view reads its moments from the row. When the row carried
+    /// only `description`, two moments came back as one covering the whole clip
+    /// — and were then written over the real ones. Joined text cannot be
+    /// unjoined, so the segments have to travel.
+    #[test]
+    fn a_row_carries_every_moment_not_just_their_joined_text() {
+        let mut p = ProjectFile::new("p1".into(), "Mecca".into(), "2026-08-12T00:00:00Z".into());
+        p.clips.push(clip_with(vec![
+            Segment { start_sec: 0.0, end_sec: 12.0, text: "kobutor".into() },
+            Segment { start_sec: 12.0, end_sec: 85.055, text: "mosque".into() },
+        ]));
+
+        let row = to_library_clip(&p, &p.clips[0]);
+
+        assert_eq!(row.segments.len(), 2, "both moments must reach the row");
+        assert_eq!(row.segments[0].text, "kobutor");
+        assert_eq!(row.segments[1].text, "mosque");
+        assert_eq!(row.segments[1].start_sec, 12.0, "the boundary must survive");
+
+        // The joined form is still there for the table, and is exactly the
+        // thing that cannot be turned back into two moments.
+        assert_eq!(row.description, "kobutor. mosque");
+        assert_eq!(row.segment_count, 2);
+    }
+
+    #[test]
+    fn an_undescribed_clip_has_no_moments_rather_than_an_empty_one() {
+        let mut p = ProjectFile::new("p1".into(), "Mecca".into(), "2026-08-12T00:00:00Z".into());
+        p.clips.push(clip_with(Vec::new()));
+        let row = to_library_clip(&p, &p.clips[0]);
+        assert!(row.segments.is_empty());
+        assert_eq!(row.description, "");
+    }
 }

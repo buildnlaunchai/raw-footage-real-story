@@ -24,6 +24,14 @@ export interface LibraryClip {
   deletedAt: string | null;
   description: string;
   segmentCount: number;
+  /**
+   * The described moments themselves.
+   *
+   * The row used to carry only the joined `description`, and anything needing
+   * real segments rebuilt one covering the whole clip from that string — which
+   * silently flattened a split clip and then wrote the flattened version back.
+   */
+  segments: { startSec: number; endSec: number; text: string }[];
   addedAt: string;
 }
 

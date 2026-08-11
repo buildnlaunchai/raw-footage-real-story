@@ -887,8 +887,9 @@ function App() {
       description: c.segments
         .map((sg) => sg.text.trim())
         .filter(Boolean)
-        .join(" "),
+        .join(". "),
       segmentCount: c.segments.length,
+      segments: c.segments,
       addedAt: manifest.project.createdAt,
     }));
     return [...others, ...mine];
@@ -1615,21 +1616,7 @@ function App() {
         <ClipDescriber
           clips={tableRows}
           startAt={`${preview.projectId}/${preview.clipId}`}
-          segmentsFor={(c) =>
-            manifest?.project.id === c.projectId
-              ? (manifest.clips.find((x) => x.id === c.clipId)?.segments ?? [])
-              : // A row from another collection carries only the joined text,
-                // so it starts as one moment covering the whole clip.
-                c.description.trim()
-                ? [
-                    {
-                      startSec: 0,
-                      endSec: (c.durationMs ?? 0) / 1000,
-                      text: c.description,
-                    },
-                  ]
-                : []
-          }
+          segmentsFor={(c) => c.segments}
           onCommit={(c, segs) => {
             if (manifest?.project.id === c.projectId) {
               onChangeSegments(c.clipId, segs);
