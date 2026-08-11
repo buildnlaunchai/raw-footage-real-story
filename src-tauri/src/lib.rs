@@ -72,6 +72,7 @@ pub fn run() {
             store::clip_set_deleted,
             store::clip_purge,
             store::clip_set_description,
+            store::clip_set_segments,
             store::machine_user
         ])
         .run(tauri::generate_context!())

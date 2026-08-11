@@ -517,3 +517,20 @@ pub fn machine_user() -> String {
         .or_else(|_| std::env::var("USERNAME"))
         .unwrap_or_else(|_| "This machine".into())
 }
+
+/// Replace a clip's described moments wholesale.
+///
+/// Unlike `clip_set_description` this carries timings, so it is what the
+/// describe-one-by-one view writes: splitting a clip is the whole point of
+/// that screen, and a single text field cannot express where the boundaries
+/// fall. Empty trailing text is kept — a moment marked but not yet described
+/// is a real state, and dropping it would undo the split.
+#[tauri::command]
+pub fn clip_set_segments(
+    app: AppHandle,
+    project_id: String,
+    clip_id: String,
+    segments: Vec<project::Segment>,
+) -> Result<(), StoreError> {
+    edit_clip(&app, &project_id, &clip_id, |c| c.segments = segments)
+}

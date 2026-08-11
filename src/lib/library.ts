@@ -67,12 +67,21 @@ export async function purgeClip(projectId: string, clipId: string): Promise<void
   await invoke("clip_purge", { projectId, clipId });
 }
 
+/** Write a clip's described moments, timings and all. */
+export async function setSegments(
+  projectId: string,
+  clipId: string,
+  segments: { startSec: number; endSec: number; text: string }[],
+): Promise<void> {
+  await invoke("clip_set_segments", { projectId, clipId, segments });
+}
+
 /**
- * Rewrite a clip's description.
+ * Rewrite a clip's description as a single moment.
  *
- * Resolves false when the clip has been cut into several segments, which the
- * one-box editor here cannot represent — the caller sends the user to the
- * segment editor rather than flattening timings somebody set on purpose.
+ * Resolves false when the clip has been split, which one text field cannot
+ * express. `setSegments` is what the describe view uses; this remains for
+ * callers that only ever deal in whole-clip text.
  */
 export async function setDescription(
   projectId: string,

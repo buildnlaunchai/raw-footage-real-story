@@ -5,7 +5,6 @@
  * and a table is the right shape for it: the description sits beside the frame
  * it belongs to, and moving down the list is one keystroke.
  */
-import { useState } from "react";
 import {
   containerOf,
   formatDuration,
@@ -18,41 +17,19 @@ import { PencilIcon, PlayCircleIcon } from "./Icons";
 
 interface Props {
   clips: LibraryClip[];
-  /** Rows currently saving, keyed `projectId/clipId`. */
-  saving: Set<string>;
   onPlay: (clip: LibraryClip) => void;
-  onDescribe: (clip: LibraryClip, text: string) => void;
-  /** Send a multi-segment clip to the editor that can handle it. */
-  onOpenSegments: (clip: LibraryClip) => void;
+  /** Open the describe view, which handles both whole clips and split ones. */
+  onDescribe: (clip: LibraryClip) => void;
   onOpenProject: (projectId: string) => void;
 }
 
 export function VideoTable({
   clips,
-  saving,
   onPlay,
   onDescribe,
-  onOpenSegments,
   onOpenProject,
 }: Props) {
-  const [editing, setEditing] = useState<string | null>(null);
-  const [draft, setDraft] = useState("");
-
   const key = (c: LibraryClip) => `${c.projectId}/${c.clipId}`;
-
-  function startEdit(c: LibraryClip) {
-    if (c.segmentCount > 1) {
-      onOpenSegments(c);
-      return;
-    }
-    setEditing(key(c));
-    setDraft(c.description);
-  }
-
-  function commit(c: LibraryClip) {
-    if (draft.trim() !== c.description.trim()) onDescribe(c, draft.trim());
-    setEditing(null);
-  }
 
   return (
     <div className="lib-scroll">
@@ -71,7 +48,6 @@ export function VideoTable({
             const k = key(c);
             const when = formatWhen(c.addedAt);
             const hue = tagHue(c.projectId);
-            const isEditing = editing === k;
             const spec = [
               containerOf(c.fileName),
               c.width && c.height ? `${c.width}x${c.height}` : null,
@@ -100,9 +76,14 @@ export function VideoTable({
                     </button>
 
                     <div style={{ minWidth: 0 }}>
-                      <p className="lib-video-name" title={c.fileName}>
+                      <button
+                        type="button"
+                        className="lib-video-name lib-name-button"
+                        title={c.fileName}
+                        onClick={() => onDescribe(c)}
+                      >
                         {c.fileName}
-                      </p>
+                      </button>
                       <p className="lib-video-spec">{spec}</p>
                       <button
                         type="button"
@@ -122,50 +103,25 @@ export function VideoTable({
                 </td>
 
                 <td>
-                  <div className="lib-desc">
-                    {isEditing ? (
-                      <textarea
-                        autoFocus
-                        value={draft}
-                        onChange={(e) => setDraft(e.currentTarget.value)}
-                        onBlur={() => commit(c)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Escape") setEditing(null);
-                          // Enter commits; Shift+Enter keeps a line break, since
-                          // some descriptions genuinely want two sentences.
-                          if (e.key === "Enter" && !e.shiftKey) {
-                            e.preventDefault();
-                            commit(c);
-                          }
-                        }}
-                        placeholder="What happens in this clip?"
-                      />
-                    ) : (
-                      <span className={c.description ? undefined : "lib-desc-empty"}>
-                        {c.description || "Not described yet"}
-                      </span>
-                    )}
-
-                    <button
-                      type="button"
-                      className="lib-desc-edit"
-                      onClick={() => (isEditing ? commit(c) : startEdit(c))}
-                      title={
-                        c.segmentCount > 1
-                          ? "This clip has several described moments — open the segment editor"
-                          : "Edit description"
-                      }
-                    >
+                  {/* Editing happens in the describe view: it is the only one
+                      that can express a clip split into several moments. */}
+                  <button
+                    type="button"
+                    className="lib-desc lib-desc-open"
+                    onClick={() => onDescribe(c)}
+                    title="Describe this clip"
+                  >
+                    <span className={c.description ? undefined : "lib-desc-empty"}>
+                      {c.description || "Not described yet"}
+                    </span>
+                    <span className="lib-desc-edit" aria-hidden="true">
                       <PencilIcon size={14} />
-                    </button>
-                  </div>
+                    </span>
+                  </button>
 
                   {c.segmentCount > 1 && (
-                    <p className="lib-locked">
-                      {c.segmentCount} described moments · edit in Footage
-                    </p>
+                    <p className="lib-locked">{c.segmentCount} described moments</p>
                   )}
-                  {saving.has(k) && <p className="lib-locked">Saving…</p>}
                 </td>
 
                 <td className="lib-when">{formatDuration(c.durationMs)}</td>
@@ -188,8 +144,8 @@ export function VideoTable({
                     <button
                       type="button"
                       className="lib-act"
-                      onClick={() => startEdit(c)}
-                      title="Edit description"
+                      onClick={() => onDescribe(c)}
+                      title="Describe this clip"
                     >
                       <PencilIcon />
                     </button>

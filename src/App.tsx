@@ -9,10 +9,11 @@ import { ScriptPanel } from "./components/ScriptPanel";
 import { ProviderPicker } from "./components/ProviderPicker";
 import { LibrarySidebar, type LibraryView } from "./components/LibrarySidebar";
 import { VideoTable } from "./components/VideoTable";
+import { ClipDescriber } from "./components/ClipDescriber";
 import { FilterIcon, SaveIcon, SearchIcon, SortIcon } from "./components/Icons";
 import {
   listLibrary,
-  setDescription,
+  setSegments,
   storageUsage,
   type LibraryClip,
   type StorageUsage,
@@ -126,7 +127,6 @@ function App() {
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [storage, setStorage] = useState<StorageUsage | null>(null);
   const [userName, setUserName] = useState("");
-  const [savingRows, setSavingRows] = useState<Set<string>>(new Set());
   const [refreshing, setRefreshing] = useState(false);
   const [page, setPage] = useState(1);
   const [sortBy, setSortBy] = useState<"added" | "name" | "duration" | "described">("added");
@@ -842,47 +842,6 @@ function App() {
     void invoke<string>("machine_user").then(setUserName).catch(() => setUserName(""));
   }, [refreshLibrary]);
 
-  /**
-   * Apply a library change.
-   *
-   * When the clip belongs to the project that is currently open, the change
-   * goes through the in-memory manifest instead of the disk command. Writing
-   * the file directly would put it ahead of the copy in state, and the next
-   * save from the editor would quietly undo it.
-   */
-  async function mutateClip(
-    clip: LibraryClip,
-    inMemory: (c: ProjectClip) => ProjectClip,
-    onDisk: () => Promise<unknown>,
-  ) {
-    const key = `${clip.projectId}/${clip.clipId}`;
-    setSavingRows((s) => new Set(s).add(key));
-    try {
-      if (manifest && manifest.project.id === clip.projectId) {
-        setManifest((m) =>
-          m
-            ? {
-                ...m,
-                clips: m.clips.map((c) => (c.id === clip.clipId ? inMemory(c) : c)),
-              }
-            : m,
-        );
-        setDirty(true);
-      } else {
-        await onDisk();
-        await refreshLibrary();
-      }
-    } catch (err) {
-      setError(errorText(err));
-    } finally {
-      setSavingRows((s) => {
-        const next = new Set(s);
-        next.delete(key);
-        return next;
-      });
-    }
-  }
-
   // --- render --------------------------------------------------------------
 
   // --- library table -------------------------------------------------------
@@ -1560,33 +1519,9 @@ function App() {
                   <>
                     <VideoTable
                       clips={pageRows}
-                      saving={savingRows}
                       onPlay={setPreview}
                       onOpenProject={openProjectById}
-                      onOpenSegments={async (c) => {
-                        await openProjectById(c.projectId);
-                        setSplitting(c.clipId);
-                      }}
-                      onDescribe={(c, text) =>
-                        mutateClip(
-                          c,
-                          (clip) => ({
-                            ...clip,
-                            segments: text
-                              ? [
-                                  {
-                                    startSec: clip.segments[0]?.startSec ?? 0,
-                                    endSec:
-                                      clip.segments[0]?.endSec ??
-                                      (c.durationMs ?? 0) / 1000,
-                                    text,
-                                  },
-                                ]
-                              : [],
-                          }),
-                          () => setDescription(c.projectId, c.clipId, text),
-                        )
-                      }
+                      onDescribe={(c) => setPreview(c)}
                     />
 
                     <div className="lib-foot">
@@ -1672,31 +1607,33 @@ function App() {
       </main>
 
       {preview && (
-        <div
-          className="clip-preview"
-          role="dialog"
-          aria-label={preview.fileName}
-          onClick={() => setPreview(null)}
-        >
-          <div className="clip-preview-inner" onClick={(e) => e.stopPropagation()}>
-            {preview.sourcePath ? (
-              <video src={audioUrl(preview.sourcePath)} controls autoPlay playsInline />
-            ) : (
-              <p className="hint">This clip has no media on disk.</p>
-            )}
-            <div className="clip-preview-bar">
-              <strong>{preview.fileName}</strong>
-              <span className="hint">{preview.projectName}</span>
-              <button
-                type="button"
-                className="ghost-button small"
-                onClick={() => setPreview(null)}
-              >
-                Close
-              </button>
-            </div>
-          </div>
-        </div>
+        <ClipDescriber
+          clips={tableRows}
+          startAt={`${preview.projectId}/${preview.clipId}`}
+          segmentsFor={(c) =>
+            manifest?.project.id === c.projectId
+              ? (manifest.clips.find((x) => x.id === c.clipId)?.segments ?? [])
+              : // A row from another collection carries only the joined text,
+                // so it starts as one moment covering the whole clip.
+                c.description.trim()
+                ? [
+                    {
+                      startSec: 0,
+                      endSec: (c.durationMs ?? 0) / 1000,
+                      text: c.description,
+                    },
+                  ]
+                : []
+          }
+          onCommit={(c, segs) => {
+            if (manifest?.project.id === c.projectId) {
+              onChangeSegments(c.clipId, segs);
+            } else {
+              void setSegments(c.projectId, c.clipId, segs).then(() => refreshLibrary());
+            }
+          }}
+          onClose={() => setPreview(null)}
+        />
       )}
     </div>
   );

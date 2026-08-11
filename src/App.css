@@ -2532,3 +2532,166 @@ kbd {
     animation: none;
   }
 }
+
+/* ── describe one at a time ────────────────────────────────────────────── */
+
+.describer {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  background: rgba(0, 0, 0, 0.84);
+  display: grid;
+  place-items: center;
+  padding: clamp(0.75rem, 3vw, 2.5rem);
+}
+
+.describer-panel {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  width: min(78rem, 100%);
+  max-height: 92vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: var(--shadow-card);
+}
+
+.describer-head {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.describer-head .lib-act {
+  margin-left: auto;
+  font-size: 1.1rem;
+}
+
+.describer-name {
+  display: block;
+  font-size: 1.05rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.describer-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
+  gap: 1.25rem;
+  padding: 1.25rem;
+  overflow: auto;
+}
+
+@media (max-width: 900px) {
+  .describer-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.describer-video video {
+  width: 100%;
+  max-height: 46vh;
+  border-radius: var(--r-md);
+  background: #000;
+  display: block;
+}
+
+.describer-tools {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 0.7rem;
+  flex-wrap: wrap;
+}
+
+.describer-tools .ghost-button {
+  margin-left: auto;
+}
+
+.describer-moments {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+  min-width: 0;
+}
+
+.describer-moment {
+  background: var(--card-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: 0.7rem 0.8rem;
+}
+
+.describer-moment-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.45rem;
+  flex-wrap: wrap;
+}
+
+.describer-moment-head .ghost-button {
+  padding: 0.2rem 0.6rem;
+  font-size: 0.78rem;
+}
+
+.describer-moment-head .segment-time {
+  margin-right: auto;
+}
+
+.describer-moment textarea {
+  background: var(--card);
+}
+
+.describer-foot {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.9rem 1.25rem;
+  border-top: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+
+.describer-nav {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  margin-left: auto;
+}
+
+/* The description cell is a way into the describe view, not a field. */
+.lib-desc-open {
+  display: block;
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  color: var(--ink-2);
+}
+
+.lib-desc-open:hover {
+  border-color: var(--accent);
+}
+
+.lib-desc-open:hover .lib-desc-edit {
+  background: var(--accent);
+  color: #fff;
+}
+
+.lib-name-button {
+  border: 0;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+  color: inherit;
+  width: 100%;
+}
+
+.lib-name-button:hover {
+  color: var(--accent);
+}
