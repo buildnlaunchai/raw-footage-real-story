@@ -145,6 +145,92 @@ export function SaveIcon({ size = 18 }: IconProps) {
   );
 }
 
+export function PencilIcon({ size = 16 }: IconProps) {
+  return (
+    <Svg size={size}>
+      <path d="M4 20h4L20 8a2.8 2.8 0 0 0-4-4L4 16z" {...stroke} />
+    </Svg>
+  );
+}
+
+export function PlayCircleIcon({ size = 18 }: IconProps) {
+  return (
+    <Svg size={size}>
+      <circle cx="12" cy="12" r="9" {...stroke} />
+      <path d="M10 8.5v7l6-3.5z" fill="currentColor" />
+    </Svg>
+  );
+}
+
+export function StarIcon({ size = 18, filled = false }: IconProps & { filled?: boolean }) {
+  return (
+    <Svg size={size}>
+      <path
+        d="m12 3.6 2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8L3.5 9.8l5.9-.9z"
+        {...stroke}
+        fill={filled ? "currentColor" : "none"}
+      />
+    </Svg>
+  );
+}
+
+export function TrashIcon({ size = 18 }: IconProps) {
+  return (
+    <Svg size={size}>
+      <path d="M4 7h16M10 7V5h4v2M6 7l1 13h10l1-13M10 11v6M14 11v6" {...stroke} />
+    </Svg>
+  );
+}
+
+export function UndoIcon({ size = 18 }: IconProps) {
+  return (
+    <Svg size={size}>
+      <path d="M4 9h10a5 5 0 0 1 0 10H9M4 9l4-4M4 9l4 4" {...stroke} />
+    </Svg>
+  );
+}
+
+export function HomeIcon({ size = 20 }: IconProps) {
+  return (
+    <Svg size={size}>
+      <path d="m4 11 8-6.5 8 6.5v8a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 19z" {...stroke} />
+    </Svg>
+  );
+}
+
+export function FolderIcon({ size = 20 }: IconProps) {
+  return (
+    <Svg size={size}>
+      <path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" {...stroke} />
+    </Svg>
+  );
+}
+
+export function FilterIcon({ size = 16 }: IconProps) {
+  return (
+    <Svg size={size}>
+      <path d="M4 6h16l-6.2 7.3V19l-3.6-1.8v-3.9z" {...stroke} />
+    </Svg>
+  );
+}
+
+export function SortIcon({ size = 16 }: IconProps) {
+  return (
+    <Svg size={size}>
+      <path d="M7 4v16m0 0-3-3m3 3 3-3M17 20V4m0 0-3 3m3-3 3 3" {...stroke} />
+    </Svg>
+  );
+}
+
+export function DocIcon({ size = 18 }: IconProps) {
+  return (
+    <Svg size={size}>
+      <path d="M6 3h8l4 4v14H6z" {...stroke} />
+      <path d="M14 3v5h4" {...stroke} />
+    </Svg>
+  );
+}
+
 /** The stage icons, in pipeline order. */
 export const STAGE_ICONS = {
   footage: FilmIcon,

@@ -149,8 +149,13 @@ mod tests {
         // should be deliberate rather than accidental.
         unsafe { std::env::set_var("OPENAI_API_KEY", "sk-test-openai") };
         assert_eq!(get("openai").as_deref(), Some("sk-test-openai"));
-        // ...and it must not bleed into the other account.
-        assert_ne!(get("elevenlabs").as_deref(), Some("sk-test-openai"));
+        // ...and it must not bleed into the other account. Asked through
+        // `env_key` rather than `get`, because `get` falls through to the
+        // keychain when the variable is absent, and on macOS that blocks on a
+        // permission prompt the moment the test binary changes — which turned
+        // a passing suite into a hang for reasons that had nothing to do with
+        // the code under test.
+        assert!(env_key("elevenlabs").is_none());
         unsafe { std::env::remove_var("OPENAI_API_KEY") };
     }
 

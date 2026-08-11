@@ -33,6 +33,11 @@ fn clip_with_segments(i: usize, segments: usize) -> ProjectClip {
         file_name: Some(format!("IMG_{:04}.MOV", 4000 + i)),
         thumbnail_path: Some(format!("thumbs/{i:04}.jpg")),
         is_hdr: i % 3 == 0,
+        width: Some(1920),
+        height: Some(1080),
+        codec: Some("h264".into()),
+        favorite: false,
+        deleted_at: None,
         segments: (0..segments)
             .map(|s| Segment {
                 start_sec: s as f64 * per,
@@ -239,6 +244,11 @@ fn project_with_video() -> ProjectFile {
         file_name: None,
         thumbnail_path: None,
         is_hdr: false,
+        width: None,
+        height: None,
+        codec: None,
+        favorite: false,
+        deleted_at: None,
         segments: vec![Segment { start_sec: 0.0, end_sec: 9.0, text: "harbour".into() }],
     });
     let mut v = VideoProject::new("v1".into(), "Frozen".into(), NOW.into());

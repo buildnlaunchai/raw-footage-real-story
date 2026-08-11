@@ -7,11 +7,22 @@ import { SegmentEditor } from "./components/SegmentEditor";
 import { StoryPanel } from "./components/StoryPanel";
 import { ScriptPanel } from "./components/ScriptPanel";
 import { ProviderPicker } from "./components/ProviderPicker";
-import { AppShell } from "./components/AppShell";
+import { LibrarySidebar, type LibraryView } from "./components/LibrarySidebar";
+import { VideoTable } from "./components/VideoTable";
+import { FilterIcon, SaveIcon, SearchIcon, SortIcon } from "./components/Icons";
+import {
+  listLibrary,
+  purgeClip,
+  setDeleted,
+  setDescription,
+  setFavorite,
+  storageUsage,
+  type LibraryClip,
+  type StorageUsage,
+} from "./lib/library";
+import { listProjects, type ProjectSummary } from "./lib/project";
+import { invoke } from "@tauri-apps/api/core";
 import { AssemblyPanel } from "./components/AssemblyPanel";
-import { StageHero } from "./components/StageHero";
-import { StageRail } from "./components/StageRail";
-import { DownloadIcon, PlayIcon } from "./components/Icons";
 import {
   renderSignature,
   stageStatuses,
@@ -38,7 +49,6 @@ import {
 import type { Segment } from "./lib/segments";
 import { DEFAULT_LANGUAGE, languageFor } from "./lib/languages";
 import {
-  SCRIPT_PROVIDERS,
   type QualityTier,
   type ScriptProviderId,
 } from "./lib/scriptProviders";
@@ -53,7 +63,6 @@ import { audioUrl } from "./lib/voiceover";
 import {
   characterCount,
   providerFor,
-  PROVIDERS,
   type LineFailure,
   type ProviderId,
   type SynthProgress,
@@ -102,10 +111,60 @@ function errorText(err: unknown): string {
   return String(err);
 }
 
+/**
+ * Re-derive a table row from a clip edit.
+ *
+ * The row is a flattened view of a clip, so an edit made in memory has to be
+ * flattened the same way rather than waiting for a re-read from disk.
+ */
+function libraryFrom(row: LibraryClip, edit: (c: ProjectClip) => ProjectClip): LibraryClip {
+  const asClip: ProjectClip = {
+    id: row.clipId,
+    sourcePath: row.sourcePath,
+    sha256: null,
+    sourceDurationMs: row.durationMs,
+    isPlaceholder: row.isPlaceholder,
+    fileName: row.fileName,
+    thumbnailPath: row.thumbnailPath,
+    isHdr: row.isHdr,
+    width: row.width,
+    height: row.height,
+    codec: row.codec,
+    favorite: row.favorite,
+    deletedAt: row.deletedAt,
+    segments: [],
+  };
+  const next = edit(asClip);
+  return {
+    ...row,
+    favorite: next.favorite ?? row.favorite,
+    deletedAt: next.deletedAt ?? null,
+    description: next.segments.map((sg) => sg.text.trim()).filter(Boolean).join(" ") ||
+      (next.segments.length === 0 ? "" : row.description),
+    segmentCount: next.segments.length || row.segmentCount,
+  };
+}
+
 function App() {
   // --- shell ---------------------------------------------------------------
   const [stage, setStage] = useState<StageId>("footage");
   const [query, setQuery] = useState("");
+
+  /** Sidebar destination, and which tab of the main column is showing. */
+  const [view, setView] = useState<LibraryView>("home");
+  const [tab, setTab] = useState<"all" | StageId>("all");
+
+  // The library spans every project, so it is loaded separately from whichever
+  // one is open.
+  const [library, setLibrary] = useState<LibraryClip[]>([]);
+  const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [storage, setStorage] = useState<StorageUsage | null>(null);
+  const [userName, setUserName] = useState("");
+  const [savingRows, setSavingRows] = useState<Set<string>>(new Set());
+  const [page, setPage] = useState(1);
+  const [sortBy, setSortBy] = useState<"added" | "name" | "duration" | "described">("added");
+  const [filterProject, setFilterProject] = useState<string>("");
+  const [preview, setPreview] = useState<LibraryClip | null>(null);
 
   /**
    * What the current narration was recorded with, and what the current cut was
@@ -426,6 +485,11 @@ function App() {
           fileName: r.fileName,
           thumbnailPath: r.thumbnailPath,
           isHdr: r.info?.isHdr ?? false,
+          width: r.info?.width ?? null,
+          height: r.info?.height ?? null,
+          codec: r.info?.codec ?? null,
+          favorite: false,
+          deletedAt: null,
           segments: [],
         }));
       return added.length === 0 ? m : { ...m, clips: [...m.clips, ...added] };
@@ -753,32 +817,143 @@ function App() {
     }
   }
 
-  // --- render --------------------------------------------------------------
+  // --- library -------------------------------------------------------------
 
-  if (!manifest) {
-    return (
-      <ProjectGallery onCreate={onCreate} onOpen={onOpen} busy={busy} error={error} />
-    );
+  const refreshLibrary = useCallback(async () => {
+    try {
+      const [clips, list, usage] = await Promise.all([
+        listLibrary(),
+        listProjects(),
+        storageUsage(),
+      ]);
+      setLibrary(clips);
+      setProjects(list);
+      setStorage(usage);
+    } catch (err) {
+      setError(errorText(err));
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshLibrary();
+    void invoke<string>("machine_user").then(setUserName).catch(() => setUserName(""));
+  }, [refreshLibrary]);
+
+  /**
+   * Apply a library change.
+   *
+   * When the clip belongs to the project that is currently open, the change
+   * goes through the in-memory manifest instead of the disk command. Writing
+   * the file directly would put it ahead of the copy in state, and the next
+   * save from the editor would quietly undo it.
+   */
+  async function mutateClip(
+    clip: LibraryClip,
+    inMemory: (c: ProjectClip) => ProjectClip,
+    onDisk: () => Promise<unknown>,
+  ) {
+    const key = `${clip.projectId}/${clip.clipId}`;
+    setSavingRows((s) => new Set(s).add(key));
+    try {
+      if (manifest && manifest.project.id === clip.projectId) {
+        setManifest((m) =>
+          m
+            ? {
+                ...m,
+                clips: m.clips.map((c) => (c.id === clip.clipId ? inMemory(c) : c)),
+              }
+            : m,
+        );
+        setDirty(true);
+        // Reflect it in the table without a round trip to disk.
+        setLibrary((ls) =>
+          ls.map((l) =>
+            l.projectId === clip.projectId && l.clipId === clip.clipId
+              ? libraryFrom(l, inMemory)
+              : l,
+          ),
+        );
+      } else {
+        await onDisk();
+        await refreshLibrary();
+      }
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setSavingRows((s) => {
+        const next = new Set(s);
+        next.delete(key);
+        return next;
+      });
+    }
   }
 
-  const described = describedCount(manifest.clips);
-  const segments = totalSegments(manifest.clips);
+  // --- render --------------------------------------------------------------
 
-  // --- what is still true? --------------------------------------------------
-  //
-  // With every stage reachable at all times, nothing stops a user editing a
-  // line and walking straight to export. These derive whether each artifact
-  // still matches what produced it, so the rail can say so.
+  // --- library table -------------------------------------------------------
 
-  const currentStamp: VoiceStamp = {
-    providerId,
-    voiceId: voice,
-    language,
-    pronunciations,
+  const q = query.trim().toLowerCase();
+  const tableRows = library
+    .filter((c) => (view === "trash" ? c.deletedAt : !c.deletedAt))
+    .filter((c) => (view === "favorites" ? c.favorite : true))
+    .filter((c) => !filterProject || c.projectId === filterProject)
+    .filter(
+      (c) =>
+        !q ||
+        c.fileName.toLowerCase().includes(q) ||
+        c.description.toLowerCase().includes(q) ||
+        c.projectName.toLowerCase().includes(q),
+    )
+    .sort((a, b) => {
+      switch (sortBy) {
+        case "name":
+          return a.fileName.localeCompare(b.fileName);
+        case "duration":
+          return (b.durationMs ?? 0) - (a.durationMs ?? 0);
+        case "described":
+          // Undescribed first: this list exists so they can be dealt with.
+          return Number(Boolean(a.description)) - Number(Boolean(b.description));
+        default:
+          return b.addedAt.localeCompare(a.addedAt);
+      }
+    });
+
+  const PER_PAGE = 10;
+  const pageCount = Math.max(1, Math.ceil(tableRows.length / PER_PAGE));
+  const safePage = Math.min(page, pageCount);
+  const pageRows = tableRows.slice((safePage - 1) * PER_PAGE, safePage * PER_PAGE);
+
+  const counts = {
+    all: library.filter((c) => !c.deletedAt).length,
+    favorites: library.filter((c) => c.favorite && !c.deletedAt).length,
+    trash: library.filter((c) => c.deletedAt).length,
   };
-  // A missing stamp means the audio predates this session — a reopened project.
-  // That is not evidence the voice changed, only that we cannot know, and
-  // crying stale on every open would train people to ignore the warning.
+
+  const VIEW_TITLE: Record<LibraryView, string> = {
+    home: "All Videos",
+    projects: "Projects",
+    all: "All Videos",
+    favorites: "Favourites",
+    trash: "Trash",
+  };
+
+  async function openProjectById(id: string) {
+    if (manifest?.project.id === id) {
+      setView("home");
+      setTab("footage");
+      return;
+    }
+    await onOpen(id);
+    setView("home");
+    setTab("footage");
+  }
+
+  // --- stage derivations (only meaningful with a project open) --------------
+
+  const described = manifest ? describedCount(manifest.clips) : 0;
+  const segments = manifest ? totalSegments(manifest.clips) : 0;
+
+  const currentStamp: VoiceStamp = { providerId, voiceId: voice, language, pronunciations };
   const voiceChanged = voiceStamp !== null && !voiceStampEquals(voiceStamp, currentStamp);
   const staleLines = staleLineKeys(lines, voiced, voiceChanged);
   const unrecorded = unrecordedLineKeys(lines, voiced);
@@ -800,7 +975,7 @@ function App() {
             : null;
 
   const pipeline = {
-    clipCount: manifest.clips.length,
+    clipCount: manifest?.clips.length ?? 0,
     describedCount: described,
     title,
     lines,
@@ -816,40 +991,20 @@ function App() {
     voice: stalenessReason("voice", pipeline),
     assembly: stalenessReason("assembly", pipeline),
   };
-  const summaries: Record<StageId, string> = {
-    footage:
-      manifest.clips.length === 0
-        ? "Nothing imported"
-        : `${described} of ${segments} described`,
-    story: title.trim() || "No title yet",
-    script: lines ? `${lines.length} lines · ${words} words` : "Not written",
-    voice: voiced ? `${voiced.length} of ${lines?.length ?? 0} recorded` : "Not recorded",
-    assembly: assembly ? `${(assembly.durationMs / 1000).toFixed(0)}s cut` : "Not rendered",
-  };
 
-  const q = query.trim().toLowerCase();
-  const railClips = q
-    ? manifest.clips.filter(
-        (c) =>
-          (c.sourcePath ?? "").toLowerCase().includes(q) ||
-          c.segments.some((sg) => sg.text.toLowerCase().includes(q)),
-      )
-    : manifest.clips;
-
-  const idx = STAGE_ORDER.indexOf(stage);
-  const goPrev = idx > 0 ? () => setStage(STAGE_ORDER[idx - 1]) : null;
-  const goNext = idx < STAGE_ORDER.length - 1 ? () => setStage(STAGE_ORDER[idx + 1]) : null;
-  const heroMedia = manifest.clips.find((c) => c.thumbnailPath)?.thumbnailPath ?? null;
-
-  const attention = staleLines.size + unrecorded.size + failures.length;
-
-  /** A stage that cannot run yet still opens, and says what it needs. */
   function blocked(needFrom: StageId) {
     return (
       <div className="stage-blocked">
         <h3>{STAGES[stage].label} isn’t ready yet</h3>
         <p className="hint">{STAGES[stage].needs}</p>
-        <button type="button" className="primary-button" onClick={() => setStage(needFrom)}>
+        <button
+          type="button"
+          className="primary-button"
+          onClick={() => {
+            setStage(needFrom);
+            setTab(needFrom);
+          }}
+        >
           Go to {STAGES[needFrom].label}
         </button>
       </div>
@@ -867,227 +1022,19 @@ function App() {
     );
   }
 
-  const hero = {
-    footage: {
-      badge: "Stage 1 · Footage",
-      title: manifest.project.name,
-      meta: [
-        `${manifest.clips.length} clip${manifest.clips.length === 1 ? "" : "s"}`,
-        `${segments} segment${segments === 1 ? "" : "s"}`,
-        `${described} described`,
-      ],
-      lede:
-        "Bring in a trip’s worth of footage and mark what happens when. Every " +
-        "described moment becomes something the story can reach for.",
-      actions: (
-        <>
-          <button
-            type="button"
-            className="primary-button"
-            onClick={async () => runImport(await pickFiles())}
-            disabled={importing}
-          >
-            {importing ? "Importing…" : "Import footage"}
-          </button>
-          {described > 0 && (
-            <button type="button" className="ghost-button" onClick={() => setStage("story")}>
-              Next: Story
-            </button>
-          )}
-        </>
-      ),
-    },
-    story: {
-      badge: "Stage 2 · Story",
-      title: title.trim() || "Choose what this video is about",
-      meta: [
-        `${described} described moment${described === 1 ? "" : "s"}`,
-        `${wordCount} words`,
-        scriptLanguage.label,
-      ],
-      lede:
-        "One library can carry many videos. Pick a title and a shape, and the " +
-        "script stage will choose which moments serve it.",
-      actions: (
-        <>
-          <button
-            type="button"
-            className="primary-button"
-            onClick={onSuggestIdeas}
-            disabled={ideasBusy || described === 0}
-          >
-            {ideasBusy ? "Thinking…" : "Suggest stories"}
-          </button>
-          {title.trim() && (
-            <button type="button" className="ghost-button" onClick={() => setStage("script")}>
-              Next: Script
-            </button>
-          )}
-        </>
-      ),
-    },
-    script: {
-      badge: "Stage 3 · Script",
-      title: title.trim() || "Untitled",
-      meta: [
-        lines ? `${lines.length} lines` : null,
-        lines ? `${words} of ${wordCount} words` : null,
-        scriptLanguage.label,
-        SCRIPT_PROVIDERS[scriptProvider].label,
-      ],
-      lede:
-        "Narration written over the moments you described. Edit any line here — " +
-        "the voice stage will show which recordings that leaves out of date.",
-      actions: (
-        <>
-          <button
-            type="button"
-            className="primary-button"
-            onClick={onGenerateScript}
-            disabled={composing || !title.trim()}
-          >
-            {composing ? "Writing…" : lines ? "Regenerate script" : "Generate script"}
-          </button>
-          {lines && (
-            <button type="button" className="ghost-button" onClick={() => setStage("voice")}>
-              Next: Voice
-            </button>
-          )}
-        </>
-      ),
-    },
-    voice: {
-      badge: "Stage 4 · Voice",
-      title: "Narration",
-      meta: [
-        voiced ? `${voiced.length} recorded` : null,
-        PROVIDERS[providerId].label,
-        scriptLanguage.label,
-      ],
-      lede: provider.capabilities.isCloud
-        ? "Your footage stays on this machine. Narration text is sent to the provider you chose."
-        : "Recorded on this machine. Nothing is uploaded.",
-      actions: (
-        <>
-          <button
-            type="button"
-            className="primary-button"
-            onClick={onGenerateVoiceover}
-            disabled={ttsBusy || !lines || !voice}
-          >
-            <PlayIcon />
-            {ttsBusy
-              ? ttsProgress
-                ? `Recording ${ttsProgress.done}/${ttsProgress.total}…`
-                : "Recording…"
-              : voiced
-                ? "Re-record all"
-                : "Record narration"}
-          </button>
-          <button
-            type="button"
-            className="ghost-button"
-            onClick={onPreview}
-            disabled={previewing || !voice}
-          >
-            {previewing ? "Preview…" : "▶ Preview voice"}
-          </button>
-          {voiced && (
-            <button type="button" className="ghost-button" onClick={() => setStage("assembly")}>
-              Next: Assembly
-            </button>
-          )}
-        </>
-      ),
-    },
-    assembly: {
-      badge: "Stage 5 · Assembly",
-      title: title.trim() || manifest.project.name,
-      meta: [
-        assembly ? `${(assembly.durationMs / 1000).toFixed(1)}s` : null,
-        voiced ? `${voiced.length} shots` : null,
-        crossfadeMs > 0 ? "crossfade" : "hard cuts",
-        musicId ? MUSIC_BEDS.find((m) => m.id === musicId)?.label ?? null : "no music",
-      ],
-      lede:
-        "Narration is the master clock: each clip stays on screen for exactly as " +
-        "long as its line takes to say.",
-      actions: (
-        <>
-          <button
-            type="button"
-            className="primary-button"
-            onClick={onRender}
-            disabled={assemblyBusy || !voiced || !ffmpeg}
-          >
-            <DownloadIcon />
-            {assemblyBusy
-              ? renderProgress
-                ? `Rendering ${renderProgress.done}/${renderProgress.total}…`
-                : "Rendering…"
-              : assembly
-                ? "Render again"
-                : "Render rough cut"}
-          </button>
-          {assembly && <span className="hint">Export options are below.</span>}
-        </>
-      ),
-    },
-  }[stage];
-
-  return (
-    <AppShell
-      projectName={manifest.project.name}
-      active={stage}
-      statuses={statuses}
-      onStage={setStage}
-      query={query}
-      onQuery={setQuery}
-      dirty={dirty}
-      saving={busy}
-      savedAt={savedAt}
-      onSave={onSave}
-      attention={attention}
-      attentionLabel={
-        attention === 0
-          ? "Everything is up to date"
-          : `${attention} thing${attention === 1 ? "" : "s"} need attention`
-      }
-      onLeaveProject={() => {
-        setManifest(null);
-        setRejected([]);
-        resetVideoState();
-        setStage("footage");
-      }}
-      rail={
-        <StageRail
-          active={stage}
-          statuses={statuses}
-          summaries={summaries}
-          staleNotes={staleNotes}
-          onStage={setStage}
-          clips={railClips}
-          selectedClipId={selectedClipId}
-          onSelectClip={(id) => {
-            setSelectedClipId(id);
-            setStage("footage");
-          }}
-          thumbUrl={(c) => (c.thumbnailPath ? audioUrl(c.thumbnailPath) : null)}
-        />
-      }
-    >
-      <StageHero
-        badge={hero.badge}
-        status={statuses[stage]}
-        title={hero.title}
-        meta={hero.meta}
-        lede={hero.lede}
-        media={heroMedia ? audioUrl(heroMedia) : null}
-        actions={hero.actions}
-        onPrev={goPrev}
-        onNext={goNext}
-      />
-
+  const stageBody = !manifest ? (
+    <div className="stage-blocked">
+      <h3>No collection open</h3>
+      <p className="hint">
+        The pipeline works on one collection at a time. Choose one from the
+        sidebar, or make a new one.
+      </p>
+      <button type="button" className="primary-button" onClick={() => setView("projects")}>
+        Choose a collection
+      </button>
+    </div>
+  ) : (
+    <>
       {error && (
         <div className="error" role="alert">
           <strong>Something went wrong.</strong>
@@ -1110,10 +1057,9 @@ function App() {
         </div>
       )}
 
-      {/* ── stage 1 ── */}
       {stage === "footage" && (
         <SegmentEditor
-          clips={railClips}
+          clips={manifest.clips.filter((c) => !c.deletedAt)}
           selectedId={selectedClipId}
           importing={importing}
           onSelect={setSelectedClipId}
@@ -1122,7 +1068,6 @@ function App() {
         />
       )}
 
-      {/* ── stage 2 ── */}
       {stage === "story" &&
         (described === 0 ? (
           blocked("footage")
@@ -1157,7 +1102,6 @@ function App() {
           />
         ))}
 
-      {/* ── stage 3 ── */}
       {stage === "script" &&
         (!title.trim() ? (
           blocked("story")
@@ -1203,7 +1147,6 @@ function App() {
           />
         ))}
 
-      {/* ── stage 4 ── */}
       {stage === "voice" &&
         (!lines ? (
           blocked("script")
@@ -1224,10 +1167,26 @@ function App() {
             <div className="panel">
               <div className="panel-head">
                 <h2>Voice</h2>
-                <span className="hint">
-                  {characterCount(lines)} characters
-                  {provider.capabilities.billing === "per-character" && " · billed"}
-                </span>
+                <div className="actions">
+                  <span className="hint">
+                    {characterCount(lines)} characters
+                    {provider.capabilities.billing === "per-character" && " · billed"}
+                  </span>
+                  <button
+                    type="button"
+                    className="primary-button"
+                    onClick={onGenerateVoiceover}
+                    disabled={ttsBusy || !voice}
+                  >
+                    {ttsBusy
+                      ? ttsProgress
+                        ? `Recording ${ttsProgress.done}/${ttsProgress.total}…`
+                        : "Recording…"
+                      : voiced
+                        ? "Re-record all"
+                        : "Record narration"}
+                  </button>
+                </div>
               </div>
               <ProviderPicker
                 providerId={providerId}
@@ -1288,7 +1247,6 @@ function App() {
           </>
         ))}
 
-      {/* ── stage 5 ── */}
       {stage === "assembly" &&
         (!voiced ? (
           blocked("voice")
@@ -1387,7 +1345,298 @@ function App() {
             )}
           </>
         ))}
-    </AppShell>
+    </>
+  );
+
+  return (
+    <div className="lib">
+      <LibrarySidebar
+        view={view}
+        onView={(v) => {
+          setView(v);
+          setPage(1);
+          if (v !== "projects") setTab("all");
+        }}
+        counts={counts}
+        projects={projects}
+        openProjectId={manifest?.project.id ?? null}
+        onOpenProject={openProjectById}
+        onNewProject={() => setView("projects")}
+        storage={storage}
+        userName={userName}
+        onOpenSettings={() => setView("projects")}
+      />
+
+      <main className="lib-main">
+        {view === "projects" ? (
+          <ProjectGallery
+            onCreate={onCreate}
+            onOpen={async (id) => {
+              await onOpen(id);
+              setView("home");
+              setTab("footage");
+              void refreshLibrary();
+            }}
+            busy={busy}
+            error={error}
+          />
+        ) : (
+          <>
+            <header className="lib-head">
+              <h1>{VIEW_TITLE[view]}</h1>
+              <span className="lib-head-count">
+                {tab === "all"
+                  ? `${tableRows.length} video${tableRows.length === 1 ? "" : "s"}`
+                  : manifest?.project.name}
+              </span>
+
+              <label className="lib-search">
+                <SearchIcon />
+                <span className="visually-hidden">Search videos and descriptions</span>
+                <input
+                  value={query}
+                  placeholder="Search videos, description…"
+                  onChange={(e) => {
+                    setQuery(e.currentTarget.value);
+                    setPage(1);
+                  }}
+                />
+              </label>
+
+              <label className="lib-tool">
+                <FilterIcon />
+                <span className="visually-hidden">Filter by collection</span>
+                <select
+                  value={filterProject}
+                  onChange={(e) => {
+                    setFilterProject(e.currentTarget.value);
+                    setPage(1);
+                  }}
+                >
+                  <option value="">All collections</option>
+                  {projects.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="lib-tool">
+                <SortIcon />
+                <span className="visually-hidden">Sort</span>
+                <select
+                  value={sortBy}
+                  onChange={(e) => setSortBy(e.currentTarget.value as typeof sortBy)}
+                >
+                  <option value="added">Newest first</option>
+                  <option value="name">Name</option>
+                  <option value="duration">Longest first</option>
+                  <option value="described">Undescribed first</option>
+                </select>
+              </label>
+
+              {manifest && (
+                <button
+                  type="button"
+                  className="lib-tool"
+                  onClick={onSave}
+                  disabled={busy || !dirty}
+                  title={
+                    dirty ? "Save (⌘S)" : savedAt ? `Saved at ${savedAt}` : "Up to date"
+                  }
+                >
+                  <SaveIcon size={16} />
+                  {busy ? "Saving…" : dirty ? "Save" : "Saved"}
+                </button>
+              )}
+
+              <button type="button" className="lib-new" onClick={() => setView("projects")}>
+                + New Project
+              </button>
+            </header>
+
+            <nav className="lib-tabs" aria-label="Views">
+              <button
+                type="button"
+                className="lib-tab"
+                aria-current={tab === "all"}
+                onClick={() => setTab("all")}
+              >
+                All Videos
+              </button>
+              {STAGE_ORDER.map((id) => (
+                <button
+                  key={id}
+                  type="button"
+                  className="lib-tab"
+                  aria-current={tab === id}
+                  onClick={() => {
+                    setTab(id);
+                    setStage(id);
+                  }}
+                  title={manifest ? `${STAGES[id].label} — ${statuses[id]}` : "Open a collection"}
+                >
+                  {manifest && <span className="lib-tab-dot" data-status={statuses[id]} />}
+                  {STAGES[id].label}
+                </button>
+              ))}
+            </nav>
+
+            {tab === "all" ? (
+              <div className="lib-table-wrap">
+                {pageRows.length === 0 ? (
+                  <p className="lib-empty">
+                    {view === "trash"
+                      ? "Nothing in the trash."
+                      : view === "favorites"
+                        ? "No favourites yet. Star a clip to keep it here."
+                        : library.length === 0
+                          ? "No footage yet. Make a project and import some."
+                          : "Nothing matches that."}
+                  </p>
+                ) : (
+                  <>
+                    <VideoTable
+                      clips={pageRows}
+                      saving={savingRows}
+                      trashView={view === "trash"}
+                      onPlay={setPreview}
+                      onOpenProject={openProjectById}
+                      onOpenSegments={async (c) => {
+                        await openProjectById(c.projectId);
+                        setSelectedClipId(c.clipId);
+                      }}
+                      onFavorite={(c) =>
+                        mutateClip(
+                          c,
+                          (clip) => ({ ...clip, favorite: !c.favorite }),
+                          () => setFavorite(c.projectId, c.clipId, !c.favorite),
+                        )
+                      }
+                      onDelete={(c) =>
+                        mutateClip(
+                          c,
+                          (clip) => ({ ...clip, deletedAt: new Date().toISOString() }),
+                          () => setDeleted(c.projectId, c.clipId, true),
+                        )
+                      }
+                      onRestore={(c) =>
+                        mutateClip(
+                          c,
+                          (clip) => ({ ...clip, deletedAt: null }),
+                          () => setDeleted(c.projectId, c.clipId, false),
+                        )
+                      }
+                      onPurge={async (c) => {
+                        await purgeClip(c.projectId, c.clipId);
+                        if (manifest?.project.id === c.projectId) {
+                          setManifest((m) =>
+                            m ? { ...m, clips: m.clips.filter((x) => x.id !== c.clipId) } : m,
+                          );
+                        }
+                        void refreshLibrary();
+                      }}
+                      onDescribe={(c, text) =>
+                        mutateClip(
+                          c,
+                          (clip) => ({
+                            ...clip,
+                            segments: text
+                              ? [
+                                  {
+                                    startSec: clip.segments[0]?.startSec ?? 0,
+                                    endSec:
+                                      clip.segments[0]?.endSec ??
+                                      (c.durationMs ?? 0) / 1000,
+                                    text,
+                                  },
+                                ]
+                              : [],
+                          }),
+                          () => setDescription(c.projectId, c.clipId, text),
+                        )
+                      }
+                    />
+
+                    <div className="lib-foot">
+                      <span>
+                        Showing {(safePage - 1) * PER_PAGE + 1} to{" "}
+                        {Math.min(safePage * PER_PAGE, tableRows.length)} of{" "}
+                        {tableRows.length} video{tableRows.length === 1 ? "" : "s"}
+                      </span>
+                      {pageCount > 1 && (
+                        <div className="lib-pages">
+                          <button
+                            type="button"
+                            className="lib-page"
+                            onClick={() => setPage(safePage - 1)}
+                            disabled={safePage === 1}
+                            aria-label="Previous page"
+                          >
+                            ‹
+                          </button>
+                          {Array.from({ length: pageCount }, (_, i) => (
+                            <button
+                              key={i}
+                              type="button"
+                              className="lib-page"
+                              aria-current={safePage === i + 1}
+                              onClick={() => setPage(i + 1)}
+                            >
+                              {i + 1}
+                            </button>
+                          ))}
+                          <button
+                            type="button"
+                            className="lib-page"
+                            onClick={() => setPage(safePage + 1)}
+                            disabled={safePage === pageCount}
+                            aria-label="Next page"
+                          >
+                            ›
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </>
+                )}
+              </div>
+            ) : (
+              stageBody
+            )}
+          </>
+        )}
+      </main>
+
+      {preview && (
+        <div
+          className="clip-preview"
+          role="dialog"
+          aria-label={preview.fileName}
+          onClick={() => setPreview(null)}
+        >
+          <div className="clip-preview-inner" onClick={(e) => e.stopPropagation()}>
+            {preview.sourcePath ? (
+              <video src={audioUrl(preview.sourcePath)} controls autoPlay playsInline />
+            ) : (
+              <p className="hint">This clip has no media on disk.</p>
+            )}
+            <div className="clip-preview-bar">
+              <strong>{preview.fileName}</strong>
+              <span className="hint">{preview.projectName}</span>
+              <button
+                type="button"
+                className="ghost-button small"
+                onClick={() => setPreview(null)}
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 

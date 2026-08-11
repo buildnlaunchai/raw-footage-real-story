@@ -89,6 +89,16 @@ its timeline.
   "clips": [
     {
       "id": "uuid",
+
+      // Library fields. All optional and defaulted: clips imported before the
+      // library view existed load unchanged, and the table shows what it has
+      // rather than guessing a resolution it was never told.
+      "width": 1920, "height": 1080, "codec": "h264",
+      "favorite": false,
+      // Set when the clip is in the trash. Soft, because footage is referenced
+      // rather than copied — deleting a clip destroys the description somebody
+      // wrote, not the video, and that is worth being able to undo.
+      "deletedAt": null,
       "sourcePath": "clips/placeholder-00.mp4",  // null if no media yet
       "sha256": "…",                             // null if no media
       "sourceDurationMs": 47000,                 // null if unknown

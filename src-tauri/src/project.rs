@@ -86,6 +86,24 @@ pub struct ProjectClip {
     pub thumbnail_path: Option<String>,
     #[serde(default)]
     pub is_hdr: bool,
+    /// Frame size, when it was read at import. Absent on clips imported before
+    /// the library view existed; the UI shows what it has rather than guessing.
+    #[serde(default)]
+    pub width: Option<u32>,
+    #[serde(default)]
+    pub height: Option<u32>,
+    #[serde(default)]
+    pub codec: Option<String>,
+    /// Starred in the library.
+    #[serde(default)]
+    pub favorite: bool,
+    /// When this clip was sent to the trash, if it was.
+    ///
+    /// Soft rather than hard: clips reference footage that lives outside the
+    /// project, so removing one only forgets a description somebody typed.
+    /// That is worth being able to undo.
+    #[serde(default)]
+    pub deleted_at: Option<String>,
     /// Ordered by `start_sec`. Empty until the clip has been described.
     #[serde(default)]
     pub segments: Vec<Segment>,
@@ -311,6 +329,11 @@ fn migrate_v1(value: serde_json::Value) -> Result<ProjectFile, String> {
             file_name: None,
             thumbnail_path: None,
             is_hdr: false,
+            width: None,
+            height: None,
+            codec: None,
+            favorite: false,
+            deleted_at: None,
             segments,
         });
     }

@@ -25,6 +25,14 @@ export interface ProjectClip {
   isPlaceholder: boolean;
   fileName: string | null;
   thumbnailPath: string | null;
+  /** Frame size and codec, when they were read at import. */
+  width?: number | null;
+  height?: number | null;
+  codec?: string | null;
+  /** Starred in the library. */
+  favorite?: boolean;
+  /** Set when the clip is in the trash; it keeps its description until purged. */
+  deletedAt?: string | null;
   isHdr: boolean;
   segments: Segment[];
 }

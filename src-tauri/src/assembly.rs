@@ -480,6 +480,11 @@ pub async fn assembly_render(
                 file_name: None,
                 thumbnail_path: None,
                 is_hdr: c.is_hdr.unwrap_or(false),
+                width: None,
+                height: None,
+                codec: None,
+                favorite: false,
+                deleted_at: None,
                 segments: if c.description.trim().is_empty() {
                     Vec::new()
                 } else {

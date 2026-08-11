@@ -273,3 +273,247 @@ pub fn project_poster_from_image(
 pub fn project_clear_poster(app: AppHandle, id: String) -> Result<(), StoreError> {
     set_poster(&app, &id, None)
 }
+
+// ---------------------------------------------------------------------------
+// Storage
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageUsage {
+    /// Everything the app itself wrote: manifests, thumbnails, narration, cuts.
+    pub app_bytes: u64,
+    /// Source footage the library points at. Not the app's to delete.
+    pub footage_bytes: u64,
+    /// Volume capacity, when it could be read. `None` on platforms where this
+    /// is not implemented, so the UI can show sizes without inventing a total.
+    pub disk_total_bytes: Option<u64>,
+    pub disk_free_bytes: Option<u64>,
+}
+
+fn dir_size(path: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    entries
+        .filter_map(|e| e.ok())
+        .map(|e| match e.file_type() {
+            Ok(t) if t.is_dir() => dir_size(&e.path()),
+            Ok(t) if t.is_file() => e.metadata().map(|m| m.len()).unwrap_or(0),
+            _ => 0,
+        })
+        .sum()
+}
+
+/// Volume capacity and free space.
+///
+/// Shelling out to `df` rather than taking a dependency for two numbers. It is
+/// absent on Windows, and the return type says so rather than guessing — an
+/// invented capacity would make the bar a decoration that looks like a fact.
+#[cfg(unix)]
+fn disk_stats(path: &Path) -> (Option<u64>, Option<u64>) {
+    let Ok(out) = std::process::Command::new("df").arg("-k").arg(path).output() else {
+        return (None, None);
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let Some(line) = text.lines().nth(1) else {
+        return (None, None);
+    };
+    let cols: Vec<&str> = line.split_whitespace().collect();
+    // Filesystem, 1K-blocks, Used, Available, ...
+    let total = cols.get(1).and_then(|v| v.parse::<u64>().ok()).map(|k| k * 1024);
+    let free = cols.get(3).and_then(|v| v.parse::<u64>().ok()).map(|k| k * 1024);
+    (total, free)
+}
+
+#[cfg(not(unix))]
+fn disk_stats(_path: &Path) -> (Option<u64>, Option<u64>) {
+    (None, None)
+}
+
+#[tauri::command]
+pub fn storage_usage(app: AppHandle) -> Result<StorageUsage, StoreError> {
+    let root = projects_root(&app)?;
+    let app_bytes = dir_size(&root);
+
+    // Footage is counted once per path: the same file referenced by two
+    // projects occupies one place on disk, and counting it twice would tell
+    // the user they are using space they are not.
+    let mut seen = std::collections::HashSet::new();
+    let mut footage_bytes = 0u64;
+    for summary_path in std::fs::read_dir(&root).into_iter().flatten().flatten() {
+        let manifest = summary_path.path().join("project.json");
+        if let Ok(p) = project::load(&manifest) {
+            for clip in &p.clips {
+                if let Some(src) = clip.source_path.as_deref() {
+                    if seen.insert(src.to_string()) {
+                        footage_bytes += std::fs::metadata(src).map(|m| m.len()).unwrap_or(0);
+                    }
+                }
+            }
+        }
+    }
+
+    let (disk_total_bytes, disk_free_bytes) = disk_stats(&root);
+    Ok(StorageUsage { app_bytes, footage_bytes, disk_total_bytes, disk_free_bytes })
+}
+
+// ---------------------------------------------------------------------------
+// Library
+// ---------------------------------------------------------------------------
+//
+// The library view spans every project, so it cannot be served from whichever
+// one happens to be open. These read and write clips by (project, clip) pair.
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryClip {
+    pub project_id: String,
+    pub project_name: String,
+    pub clip_id: String,
+    pub file_name: String,
+    pub source_path: Option<String>,
+    pub thumbnail_path: Option<String>,
+    pub duration_ms: Option<u64>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub codec: Option<String>,
+    pub is_placeholder: bool,
+    pub is_hdr: bool,
+    pub favorite: bool,
+    pub deleted_at: Option<String>,
+    /// Everything described about the clip, joined — what the table shows.
+    pub description: String,
+    pub segment_count: usize,
+    /// When the clip entered the library. Falls back to the project's own time
+    /// for clips imported before this was tracked.
+    pub added_at: String,
+}
+
+#[tauri::command]
+pub fn library_list(app: AppHandle) -> Result<Vec<LibraryClip>, StoreError> {
+    let root = projects_root(&app)?;
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(&root).into_iter().flatten().flatten() {
+        let manifest = entry.path().join("project.json");
+        let Ok(p) = project::load(&manifest) else { continue };
+        for c in &p.clips {
+            out.push(LibraryClip {
+                project_id: p.project.id.clone(),
+                project_name: p.project.name.clone(),
+                clip_id: c.id.clone(),
+                file_name: c
+                    .file_name
+                    .clone()
+                    .or_else(|| {
+                        c.source_path
+                            .as_deref()
+                            .and_then(|s| Path::new(s).file_name().map(|n| n.to_string_lossy().to_string()))
+                    })
+                    .unwrap_or_else(|| "Untitled clip".into()),
+                source_path: c.source_path.clone(),
+                thumbnail_path: c.thumbnail_path.clone(),
+                duration_ms: c.source_duration_ms,
+                width: c.width,
+                height: c.height,
+                codec: c.codec.clone(),
+                is_placeholder: c.is_placeholder,
+                is_hdr: c.is_hdr,
+                favorite: c.favorite,
+                deleted_at: c.deleted_at.clone(),
+                description: c.combined_text(),
+                segment_count: c.segments.len(),
+                added_at: p.project.created_at.clone(),
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// Apply one change to one clip, in place.
+fn edit_clip<F>(app: &AppHandle, project_id: &str, clip_id: &str, f: F) -> Result<(), StoreError>
+where
+    F: FnOnce(&mut project::ProjectClip),
+{
+    let path = project_dir(app, project_id)?.join("project.json");
+    let mut manifest = load_from(&path)?;
+    let clip = manifest
+        .clips
+        .iter_mut()
+        .find(|c| c.id == clip_id)
+        .ok_or_else(|| StoreError::new("NO_CLIP", "That clip is no longer in the project."))?;
+    f(clip);
+    save_to(&path, &manifest)
+}
+
+#[tauri::command]
+pub fn clip_set_favorite(
+    app: AppHandle,
+    project_id: String,
+    clip_id: String,
+    favorite: bool,
+) -> Result<(), StoreError> {
+    edit_clip(&app, &project_id, &clip_id, |c| c.favorite = favorite)
+}
+
+/// Move a clip to the trash, or bring it back.
+///
+/// The description is kept either way. Footage is referenced rather than copied,
+/// so what a delete actually destroys is the writing somebody did about it.
+#[tauri::command]
+pub fn clip_set_deleted(
+    app: AppHandle,
+    project_id: String,
+    clip_id: String,
+    deleted_at: Option<String>,
+) -> Result<(), StoreError> {
+    edit_clip(&app, &project_id, &clip_id, |c| c.deleted_at = deleted_at)
+}
+
+/// Drop a clip for good.
+#[tauri::command]
+pub fn clip_purge(app: AppHandle, project_id: String, clip_id: String) -> Result<(), StoreError> {
+    let path = project_dir(&app, &project_id)?.join("project.json");
+    let mut manifest = load_from(&path)?;
+    manifest.clips.retain(|c| c.id != clip_id);
+    save_to(&path, &manifest)
+}
+
+/// Replace what a clip says.
+///
+/// A clip described as one span keeps being one span. A clip cut into several
+/// is left alone, because collapsing it here would silently throw away timings
+/// somebody set deliberately in the segment editor.
+#[tauri::command]
+pub fn clip_set_description(
+    app: AppHandle,
+    project_id: String,
+    clip_id: String,
+    text: String,
+) -> Result<bool, StoreError> {
+    let mut applied = false;
+    edit_clip(&app, &project_id, &clip_id, |c| {
+        if c.segments.len() > 1 {
+            return;
+        }
+        applied = true;
+        let end = c.source_duration_ms.unwrap_or(0) as f64 / 1000.0;
+        match c.segments.first_mut() {
+            Some(s) => s.text = text.clone(),
+            None => c.segments.push(project::Segment { start_sec: 0.0, end_sec: end, text }),
+        }
+        c.segments.retain(|s| !s.text.trim().is_empty());
+    })?;
+    Ok(applied)
+}
+
+/// Whose machine this is.
+///
+/// The app has no accounts, so the sidebar shows the OS user rather than
+/// inventing a profile and a role to go with it.
+#[tauri::command]
+pub fn machine_user() -> String {
+    std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_else(|_| "This machine".into())
+}
