@@ -14,18 +14,13 @@ import {
   type LibraryClip,
 } from "../lib/library";
 import { audioUrl } from "../lib/voiceover";
-import { PencilIcon, PlayCircleIcon, StarIcon, TrashIcon, UndoIcon } from "./Icons";
+import { PencilIcon, PlayCircleIcon } from "./Icons";
 
 interface Props {
   clips: LibraryClip[];
   /** Rows currently saving, keyed `projectId/clipId`. */
   saving: Set<string>;
-  trashView: boolean;
   onPlay: (clip: LibraryClip) => void;
-  onFavorite: (clip: LibraryClip) => void;
-  onDelete: (clip: LibraryClip) => void;
-  onRestore: (clip: LibraryClip) => void;
-  onPurge: (clip: LibraryClip) => void;
   onDescribe: (clip: LibraryClip, text: string) => void;
   /** Send a multi-segment clip to the editor that can handle it. */
   onOpenSegments: (clip: LibraryClip) => void;
@@ -35,12 +30,7 @@ interface Props {
 export function VideoTable({
   clips,
   saving,
-  trashView,
   onPlay,
-  onFavorite,
-  onDelete,
-  onRestore,
-  onPurge,
   onDescribe,
   onOpenSegments,
   onOpenProject,
@@ -187,63 +177,22 @@ export function VideoTable({
 
                 <td>
                   <div className="lib-actions">
-                    {trashView ? (
-                      <>
-                        <button
-                          type="button"
-                          className="lib-act"
-                          onClick={() => onRestore(c)}
-                          title="Put back"
-                        >
-                          <UndoIcon />
-                        </button>
-                        <button
-                          type="button"
-                          className="lib-act"
-                          onClick={() => onPurge(c)}
-                          title="Delete for good"
-                        >
-                          <TrashIcon />
-                        </button>
-                      </>
-                    ) : (
-                      <>
-                        <button
-                          type="button"
-                          className="lib-act"
-                          onClick={() => onPlay(c)}
-                          title="Play"
-                        >
-                          <PlayCircleIcon />
-                        </button>
-                        <button
-                          type="button"
-                          className="lib-act"
-                          onClick={() => startEdit(c)}
-                          title="Edit description"
-                        >
-                          <PencilIcon />
-                        </button>
-                        <button
-                          type="button"
-                          className="lib-act"
-                          onClick={() => onDelete(c)}
-                          title="Move to trash"
-                        >
-                          <TrashIcon />
-                        </button>
-                        <button
-                          type="button"
-                          className="lib-act"
-                          data-on={c.favorite}
-                          onClick={() => onFavorite(c)}
-                          title={c.favorite ? "Remove from favourites" : "Add to favourites"}
-                          aria-pressed={c.favorite}
-                        >
-                          <StarIcon filled={c.favorite} />
-                        </button>
-                      </>
-                    )}
+                    <button
+                      type="button"
+                      className="lib-act"
+                      onClick={() => onPlay(c)}
+                      title="Play"
+                    >
+                      <PlayCircleIcon />
+                    </button>
+                    <button
+                      type="button"
+                      className="lib-act"
+                      onClick={() => startEdit(c)}
+                      title="Edit description"
+                    >
+                      <PencilIcon />
+                    </button>
                   </div>
                 </td>
               </tr>

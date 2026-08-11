@@ -12,10 +12,7 @@ import { VideoTable } from "./components/VideoTable";
 import { FilterIcon, SaveIcon, SearchIcon, SortIcon } from "./components/Icons";
 import {
   listLibrary,
-  purgeClip,
-  setDeleted,
   setDescription,
-  setFavorite,
   storageUsage,
   type LibraryClip,
   type StorageUsage,
@@ -154,7 +151,8 @@ function App() {
   // Home is intentionally empty for now, so the app opens on the library
   // rather than on a blank page.
   const [view, setView] = useState<LibraryView>("all");
-  const [tab, setTab] = useState<"all" | StageId>("all");
+  /** Which stage is showing inside a collection. */
+  const [tab, setTab] = useState<StageId>("footage");
 
   // The library spans every project, so it is loaded separately from whichever
   // one is open.
@@ -481,9 +479,12 @@ function App() {
     if (usable.length === 0) return;
     setManifest((m) => {
       if (!m) return m;
+      // Grown as the batch is walked, not just seeded from the manifest: the
+      // same file picked twice in one import used to pass this filter twice,
+      // because `existing` never learned about the first copy.
       const existing = new Set(m.clips.map((c) => c.sourcePath));
       const added: ProjectClip[] = usable
-        .filter((r) => !existing.has(r.sourcePath))
+        .filter((r) => !existing.has(r.sourcePath) && existing.add(r.sourcePath) !== null)
         .map((r) => ({
           id: crypto.randomUUID(),
           sourcePath: r.sourcePath,
@@ -910,12 +911,11 @@ function App() {
   // component rather than two: describing a clip is the same act whether you
   // arrived at it from the library or from inside a project, and a second
   // editor would be a second place for the two to disagree.
-  const onFootageTab = tab === "footage";
+  const onFootageTab = view === "project" && tab === "footage";
   const baseRows = onFootageTab
     ? library.filter((c) => c.projectId === manifest?.project.id && !c.deletedAt)
     : library
-        .filter((c) => (view === "trash" ? c.deletedAt : !c.deletedAt))
-        .filter((c) => (view === "favorites" ? c.favorite : true))
+        .filter((c) => !c.deletedAt)
         .filter((c) => !filterProject || c.projectId === filterProject);
 
   const tableRows = baseRows
@@ -945,29 +945,21 @@ function App() {
   const safePage = Math.min(page, pageCount);
   const pageRows = tableRows.slice((safePage - 1) * PER_PAGE, safePage * PER_PAGE);
 
-  const counts = {
-    all: library.filter((c) => !c.deletedAt).length,
-    favorites: library.filter((c) => c.favorite && !c.deletedAt).length,
-    trash: library.filter((c) => c.deletedAt).length,
-  };
+  const counts = { all: library.filter((c) => !c.deletedAt).length };
 
   const VIEW_TITLE: Record<LibraryView, string> = {
-    home: "All Videos",
+    home: "Home",
     projects: "Projects",
     all: "All Videos",
-    favorites: "Favourites",
-    trash: "Trash",
+    project: manifest?.project.name ?? "Collection",
   };
 
+  /** Opening a collection is what puts the pipeline on screen. */
   async function openProjectById(id: string) {
-    if (manifest?.project.id === id) {
-      setView("home");
-      setTab("footage");
-      return;
-    }
-    await onOpen(id);
-    setView("home");
+    if (manifest?.project.id !== id) await onOpen(id);
+    setView("project");
     setTab("footage");
+    setPage(1);
   }
 
   // --- stage derivations (only meaningful with a project open) --------------
@@ -1366,7 +1358,6 @@ function App() {
         onView={(v) => {
           setView(v);
           setPage(1);
-          if (v !== "projects") setTab("all");
         }}
         counts={counts}
         projects={projects}
@@ -1399,9 +1390,9 @@ function App() {
             <header className="lib-head">
               <h1>{VIEW_TITLE[view]}</h1>
               <span className="lib-head-count">
-                {tab === "all"
+                {view === "all" || onFootageTab
                   ? `${tableRows.length} video${tableRows.length === 1 ? "" : "s"}`
-                  : manifest?.project.name}
+                  : STAGES[tab].produces}
               </span>
 
               <label className="lib-search">
@@ -1417,6 +1408,7 @@ function App() {
                 />
               </label>
 
+              {view !== "project" && (
               <label className="lib-tool">
                 <FilterIcon />
                 <span className="visually-hidden">Filter by collection</span>
@@ -1435,6 +1427,7 @@ function App() {
                   ))}
                 </select>
               </label>
+              )}
 
               <label className="lib-tool">
                 <SortIcon />
@@ -1461,6 +1454,7 @@ function App() {
                 </button>
               )}
 
+
               {manifest && (
                 <button
                   type="button"
@@ -1476,39 +1470,42 @@ function App() {
                 </button>
               )}
 
-              <button type="button" className="lib-new" onClick={() => setView("projects")}>
-                + New Project
-              </button>
+              {/* Creating collections belongs to Projects and the sidebar's
+                  "+", not to a page whose job is listing what already exists. */}
+              {view === "project" && (
+                <button
+                  type="button"
+                  className="lib-tool"
+                  onClick={() => setView("projects")}
+                >
+                  All collections
+                </button>
+              )}
             </header>
 
-            <nav className="lib-tabs" aria-label="Views">
-              <button
-                type="button"
-                className="lib-tab"
-                aria-current={tab === "all"}
-                onClick={() => setTab("all")}
-              >
-                All Videos
-              </button>
-              {STAGE_ORDER.map((id) => (
-                <button
-                  key={id}
-                  type="button"
-                  className="lib-tab"
-                  aria-current={tab === id}
-                  onClick={() => {
-                    setTab(id);
-                    setStage(id);
-                  }}
-                  title={manifest ? `${STAGES[id].label} — ${statuses[id]}` : "Open a collection"}
-                >
-                  {manifest && <span className="lib-tab-dot" data-status={statuses[id]} />}
-                  {STAGES[id].label}
-                </button>
-              ))}
-            </nav>
+            {view === "project" && (
+              <nav className="lib-tabs" aria-label="Stages">
+                {STAGE_ORDER.map((id) => (
+                  <button
+                    key={id}
+                    type="button"
+                    className="lib-tab"
+                    aria-current={tab === id}
+                    onClick={() => {
+                      setTab(id);
+                      setStage(id);
+                      setPage(1);
+                    }}
+                    title={`${STAGES[id].label} — ${statuses[id]}`}
+                  >
+                    <span className="lib-tab-dot" data-status={statuses[id]} />
+                    {STAGES[id].label}
+                  </button>
+                ))}
+              </nav>
+            )}
 
-            {tab === "all" || onFootageTab ? (
+            {view === "all" || onFootageTab ? (
               onFootageTab && !manifest ? (
                 <div className="stage-blocked">
                   <h3>No collection open</h3>
@@ -1528,55 +1525,20 @@ function App() {
               <div className="lib-table-wrap">
                 {pageRows.length === 0 ? (
                   <p className="lib-empty">
-                    {view === "trash"
-                      ? "Nothing in the trash."
-                      : view === "favorites"
-                        ? "No favourites yet. Star a clip to keep it here."
-                        : library.length === 0
-                          ? "No footage yet. Make a project and import some."
-                          : "Nothing matches that."}
+                    {library.length === 0
+                      ? "No footage yet. Open a collection to import some."
+                      : "Nothing matches that."}
                   </p>
                 ) : (
                   <>
                     <VideoTable
                       clips={pageRows}
                       saving={savingRows}
-                      trashView={view === "trash"}
                       onPlay={setPreview}
                       onOpenProject={openProjectById}
                       onOpenSegments={async (c) => {
                         await openProjectById(c.projectId);
                         setSplitting(c.clipId);
-                      }}
-                      onFavorite={(c) =>
-                        mutateClip(
-                          c,
-                          (clip) => ({ ...clip, favorite: !c.favorite }),
-                          () => setFavorite(c.projectId, c.clipId, !c.favorite),
-                        )
-                      }
-                      onDelete={(c) =>
-                        mutateClip(
-                          c,
-                          (clip) => ({ ...clip, deletedAt: new Date().toISOString() }),
-                          () => setDeleted(c.projectId, c.clipId, true),
-                        )
-                      }
-                      onRestore={(c) =>
-                        mutateClip(
-                          c,
-                          (clip) => ({ ...clip, deletedAt: null }),
-                          () => setDeleted(c.projectId, c.clipId, false),
-                        )
-                      }
-                      onPurge={async (c) => {
-                        await purgeClip(c.projectId, c.clipId);
-                        if (manifest?.project.id === c.projectId) {
-                          setManifest((m) =>
-                            m ? { ...m, clips: m.clips.filter((x) => x.id !== c.clipId) } : m,
-                          );
-                        }
-                        void refreshLibrary();
                       }}
                       onDescribe={(c, text) =>
                         mutateClip(

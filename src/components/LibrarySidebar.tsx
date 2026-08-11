@@ -6,21 +6,21 @@
  */
 import { formatBytes, tagHue, type StorageUsage } from "../lib/library";
 import type { ProjectSummary } from "../lib/project";
-import {
-  DocIcon,
-  FilmIcon,
-  FolderIcon,
-  HomeIcon,
-  StarIcon,
-  TrashIcon,
-} from "./Icons";
+import { DocIcon, FilmIcon, FolderIcon, HomeIcon } from "./Icons";
 
-export type LibraryView = "home" | "projects" | "all" | "favorites" | "trash";
+/**
+ * Sidebar destinations.
+ *
+ * "project" is where the pipeline lives — it is reached by opening a
+ * collection rather than by a nav row of its own, because it only means
+ * anything with a collection open.
+ */
+export type LibraryView = "home" | "projects" | "all" | "project";
 
 interface Props {
   view: LibraryView;
   onView: (v: LibraryView) => void;
-  counts: { all: number; favorites: number; trash: number };
+  counts: { all: number };
   projects: ProjectSummary[];
   openProjectId: string | null;
   onOpenProject: (id: string) => void;
@@ -35,8 +35,6 @@ const NAV: { id: LibraryView; label: string; Icon: typeof HomeIcon }[] = [
   { id: "home", label: "Home", Icon: HomeIcon },
   { id: "projects", label: "Projects", Icon: FolderIcon },
   { id: "all", label: "All Videos", Icon: FilmIcon },
-  { id: "favorites", label: "Favourites", Icon: StarIcon },
-  { id: "trash", label: "Trash", Icon: TrashIcon },
 ];
 
 export function LibrarySidebar({
@@ -51,8 +49,7 @@ export function LibrarySidebar({
   userName,
   onOpenSettings,
 }: Props) {
-  const countFor = (id: LibraryView) =>
-    id === "all" ? counts.all : id === "favorites" ? counts.favorites : id === "trash" ? counts.trash : null;
+  const countFor = (id: LibraryView) => (id === "all" ? counts.all : null);
 
   // Only the app's own data is a share of anything meaningful; footage is
   // referenced where the user already keeps it.
