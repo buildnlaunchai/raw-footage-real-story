@@ -118,6 +118,22 @@ pub fn run() -> i32 {
         }
     }
 
+    // --- 3. what did we find of the outside world? --------------------------
+    //
+    // Reported, never fatal. ffmpeg is not bundled and the app is built to work
+    // without it — but on Windows nobody had checked whether discovery looks
+    // where winget and scoop actually install, and a log line is how that stops
+    // being a guess.
+    println!("\nexternal tools:");
+    match crate::ffmpeg::detect(&crate::ffmpeg::FfmpegSettings::default()) {
+        Ok(info) => {
+            println!("  ffmpeg   {}", info.ffmpeg);
+            println!("  ffprobe  {}", info.ffprobe);
+            println!("  zscale   {}", if info.caps.zscale { "yes" } else { "no — HDR cannot be tone-mapped" });
+        }
+        Err(e) => println!("  ffmpeg   not found ({}) — assembly will be unavailable", e.code),
+    }
+
     println!("\nPASS  this build can find its resources and speak.");
     0
 }

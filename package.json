@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "preflight": "./scripts/preflight.sh",
-    "test": "tsc -p tsconfig.test.json && node scripts/esm-extensions.mjs && node --test \"tests/**/*.test.mjs\""
+    "test": "tsc -p tsconfig.test.json && node scripts/esm-extensions.mjs && node scripts/run-tests.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
@@ -25,5 +25,8 @@
     "@vitejs/plugin-react": "^4.6.0",
     "typescript": "~5.8.3",
     "vite": "^7.0.4"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

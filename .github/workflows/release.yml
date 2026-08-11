@@ -69,8 +69,25 @@ jobs:
         shell: bash
         run: ./scripts/fetch-model.sh
 
+      # Installed so the self-test can report whether discovery finds it. The
+      # app works without ffmpeg — only assembly needs it — but the Windows
+      # lookup paths for winget and scoop were written from documentation and
+      # had never met a real install.
+      - name: Install ffmpeg (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          winget install --exact --id Gyan.FFmpeg `
+            --accept-source-agreements --accept-package-agreements `
+            --disable-interactivity --silent
+          exit 0
+
       - uses: actions/setup-node@v4
         with:
+          # 20 is the floor package.json declares. It was also what turned up
+          # the test-runner glob difference, so it stays as the version CI
+          # proves against.
           node-version: 20
           cache: npm
 
