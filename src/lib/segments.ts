@@ -61,6 +61,34 @@ export function mergeAt(segments: Segment[], index: number): Segment[] {
   return [...segments.slice(0, index - 1), merged, ...segments.slice(index + 1)];
 }
 
+/**
+ * Drop a moment, giving its span to a neighbour.
+ *
+ * Unlike `mergeAt` this discards the text rather than joining it: removing is
+ * what you reach for when a description is wrong, and keeping the words would
+ * be the opposite of what was asked.
+ *
+ * The last remaining moment cannot be removed — a clip always spans its own
+ * length — so clearing its text is what "not described" means there.
+ */
+export function removeAt(segments: Segment[], index: number): Segment[] {
+  if (index < 0 || index >= segments.length) return segments;
+  if (segments.length === 1) {
+    return [{ ...segments[0], text: "" }];
+  }
+  if (index === 0) {
+    const [first, second, ...rest] = segments;
+    return [{ ...second, startSec: first.startSec }, ...rest];
+  }
+  const prev = segments[index - 1];
+  const cur = segments[index];
+  return [
+    ...segments.slice(0, index - 1),
+    { ...prev, endSec: cur.endSec },
+    ...segments.slice(index + 1),
+  ];
+}
+
 /** True when segments tile the clip in order with no gaps or overlaps. */
 export function isContiguous(segments: Segment[], durationSec?: number): boolean {
   if (segments.length === 0) return false;

@@ -2695,3 +2695,24 @@ kbd {
 .lib-name-button:hover {
   color: var(--accent);
 }
+
+.describer-remove {
+  width: 1.7rem;
+  height: 1.7rem;
+  border-radius: 7px;
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--ink-dim);
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  font-size: 0.85rem;
+  line-height: 1;
+  flex: none;
+}
+
+.describer-remove:hover {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+}

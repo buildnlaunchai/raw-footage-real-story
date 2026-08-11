@@ -12,6 +12,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   initialSegments,
   mergeAt,
+  removeAt,
   splitAt,
   type Segment,
 } from "../lib/segments";
@@ -283,6 +284,21 @@ export function ClipDescriber({ clips, startAt, segmentsFor, onCommit, onClose }
                       <PlayIcon size={13} />
                     </button>
                   )}
+                  <button
+                    type="button"
+                    className="describer-remove"
+                    onClick={() => setSegments((cur) => removeAt(cur, i))}
+                    title={
+                      segments.length === 1
+                        ? "Clear this description"
+                        : "Remove this moment and give its time to the one beside it"
+                    }
+                    aria-label={
+                      segments.length === 1 ? "Clear description" : "Remove this moment"
+                    }
+                  >
+                    ✕
+                  </button>
                 </div>
                 <textarea
                   className="clip-input"

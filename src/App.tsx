@@ -1364,12 +1364,11 @@ function App() {
             projects={projects}
             onRefresh={refreshLibrary}
             onCreate={onCreate}
-            onOpen={async (id) => {
-              await onOpen(id);
-              setView("home");
-              setTab("footage");
-              void refreshLibrary();
-            }}
+            // The one way in, so opening a collection cannot mean two
+            // different things. This used to route to Home, which was the
+            // workspace until Home was deliberately emptied — after which
+            // "Make the movie" landed on a blank page.
+            onOpen={openProjectById}
             busy={busy}
             error={error}
           />
