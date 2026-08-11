@@ -435,11 +435,27 @@ pub fn make_thumbnail(
     duration_ms: u64,
     width: u32,
 ) -> Result<(), FfmpegError> {
+    // A tenth in: far enough past a fade-up or a black first frame to show
+    // something, early enough to still be the shot the clip is about.
+    grab_frame(ffmpeg, media, out, duration_ms / 10, width)
+}
+
+/// One frame at a chosen moment, written as an image.
+///
+/// Separate from `make_thumbnail` because a poster is chosen by a person
+/// scrubbing to a frame they like, not by a rule of thumb.
+pub fn grab_frame(
+    ffmpeg: &str,
+    media: &Path,
+    out: &Path,
+    at_ms: u64,
+    width: u32,
+) -> Result<(), FfmpegError> {
     if let Some(parent) = out.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| FfmpegError::new("MKDIR_FAILED", e.to_string()))?;
     }
-    let at = (duration_ms as f64 / 1000.0) * 0.10;
+    let at = at_ms as f64 / 1000.0;
     run(
         Command::new(ffmpeg)
             .args(["-y", "-v", "error", "-ss", &format!("{at:.3}")])
@@ -451,7 +467,7 @@ pub fn make_thumbnail(
                 "-q:v", "3",
             ])
             .arg(out),
-        "generate thumbnail",
+        "grab frame",
     )?;
     Ok(())
 }

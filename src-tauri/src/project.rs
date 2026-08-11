@@ -44,6 +44,12 @@ pub struct ProjectMeta {
     pub name: String,
     pub created_at: String,
     pub updated_at: String,
+    /// Cover image for the gallery, inside the project folder.
+    ///
+    /// Optional and defaulted, so projects written before posters existed load
+    /// unchanged and gain one the first time anybody sets it.
+    #[serde(default)]
+    pub poster_path: Option<String>,
 }
 
 /// A described moment inside a clip.
@@ -222,7 +228,13 @@ impl ProjectFile {
                 slug: "raw-footage-real-story".into(),
                 version: env!("CARGO_PKG_VERSION").into(),
             },
-            project: ProjectMeta { id, name, created_at: now.clone(), updated_at: now },
+            project: ProjectMeta {
+                id,
+                name,
+                created_at: now.clone(),
+                updated_at: now,
+                poster_path: None,
+            },
             clips: Vec::new(),
             videos: Vec::new(),
         }

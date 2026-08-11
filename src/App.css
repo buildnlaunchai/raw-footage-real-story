@@ -1412,3 +1412,378 @@ kbd {
   margin-left: auto;
   background: #fff;
 }
+
+/* ── project gallery ───────────────────────────────────────────────────── */
+/*
+ * The one dark screen in the app. It is showing footage, and footage reads
+ * better against black than against the working canvas the rest of the app uses.
+ */
+
+.gallery {
+  min-height: 100vh;
+  background: #0d0e10;
+  color: #fff;
+  display: flex;
+  flex-direction: column;
+}
+
+.gallery-stage {
+  position: relative;
+  min-height: min(66vh, 40rem);
+  display: flex;
+  flex-direction: column;
+  isolation: isolate;
+  overflow: hidden;
+}
+
+.gallery-media {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  z-index: -2;
+}
+
+.gallery-media-empty {
+  background: radial-gradient(80% 60% at 70% 20%, #23262c 0%, #0d0e10 70%);
+}
+
+.gallery-stage::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: linear-gradient(
+      95deg,
+      rgba(10, 11, 13, 0.95) 0%,
+      rgba(10, 11, 13, 0.78) 42%,
+      rgba(10, 11, 13, 0.18) 78%,
+      rgba(10, 11, 13, 0.05) 100%
+    ),
+    linear-gradient(0deg, #0d0e10 2%, rgba(13, 14, 16, 0) 45%);
+}
+
+.gallery-top {
+  display: flex;
+  align-items: center;
+  gap: 2rem;
+  padding: clamp(1.1rem, 2.4vw, 2rem) clamp(1.25rem, 4vw, 3.5rem);
+}
+
+.gallery-brand {
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  font-size: 0.95rem;
+  color: var(--accent);
+}
+
+.gallery-nav {
+  display: flex;
+  align-items: baseline;
+  gap: 1rem;
+  font-size: 0.98rem;
+  color: rgba(255, 255, 255, 0.62);
+}
+
+.gallery-nav [aria-current="true"] {
+  color: #fff;
+  font-weight: 600;
+}
+
+.gallery-nav .hint {
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.gallery-search {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  background: rgba(255, 255, 255, 0.12);
+  backdrop-filter: blur(8px);
+  border-radius: 999px;
+  padding: 0.55rem 1.1rem;
+  color: rgba(255, 255, 255, 0.75);
+  min-width: 13rem;
+}
+
+.gallery-search input {
+  background: none;
+  border: 0;
+  outline: none;
+  color: #fff;
+  width: 100%;
+}
+
+.gallery-search input::placeholder {
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.gallery-hero {
+  margin-top: auto;
+  padding: clamp(1.25rem, 4vw, 3.5rem);
+  max-width: 46rem;
+}
+
+.gallery-chips {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 1.1rem;
+}
+
+.gallery-chip {
+  background: rgba(255, 255, 255, 0.14);
+  backdrop-filter: blur(6px);
+  border-radius: 999px;
+  padding: 0.4rem 0.95rem;
+  font-size: 0.84rem;
+  font-weight: 500;
+}
+
+.gallery-title {
+  margin: 0 0 0.7rem;
+  font-size: clamp(2.2rem, 6vw, 4rem);
+  line-height: 1.02;
+  letter-spacing: -0.035em;
+  font-weight: 800;
+}
+
+.gallery-meta {
+  margin: 0 0 1.6rem;
+  display: flex;
+  gap: 0.55rem;
+  align-items: center;
+  flex-wrap: wrap;
+  color: rgba(255, 255, 255, 0.78);
+  font-size: 1rem;
+}
+
+.gallery-meta .is-good {
+  color: #46d39a;
+  font-weight: 600;
+}
+
+.gallery-meta .sep {
+  opacity: 0.4;
+}
+
+.gallery-lede {
+  margin: 0 0 1.6rem;
+  font-size: 1.1rem;
+  line-height: 1.6;
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.gallery-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+}
+
+.gallery-play {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.65rem;
+  border: 0;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.16);
+  backdrop-filter: blur(8px);
+  color: #fff;
+  font-size: 1.05rem;
+  font-weight: 600;
+  padding: 0.85rem 1.7rem;
+  cursor: pointer;
+}
+
+.gallery-play:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.24);
+}
+
+.gallery-primary {
+  border: 0;
+  border-radius: 12px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 1.05rem;
+  font-weight: 700;
+  padding: 0.85rem 1.7rem;
+  cursor: pointer;
+  box-shadow: 0 10px 26px rgba(229, 50, 42, 0.35);
+}
+
+.gallery-primary:hover:not(:disabled) {
+  filter: brightness(1.07);
+}
+
+.gallery-ghost {
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: 999px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.88);
+  font-size: 0.88rem;
+  padding: 0.5rem 1.05rem;
+  cursor: pointer;
+}
+
+.gallery-ghost:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.gallery-play:disabled,
+.gallery-primary:disabled,
+.gallery-ghost:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.gallery-cover-tools {
+  display: flex;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+  margin-left: 0.4rem;
+}
+
+.gallery-error {
+  margin: 1rem 0 0;
+  color: #ff9a90;
+  font-size: 0.92rem;
+}
+
+/* ── shelf ─────────────────────────────────────────────────────────────── */
+
+.gallery-shelf {
+  padding: clamp(1.25rem, 3vw, 2.5rem) clamp(1.25rem, 4vw, 3.5rem) 3.5rem;
+  background: #0d0e10;
+}
+
+.gallery-shelf .section-head h2 {
+  color: #fff;
+}
+
+.gallery-new {
+  display: flex;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+  margin-bottom: 1.2rem;
+}
+
+.gallery-new input {
+  flex: 1 1 18rem;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 12px;
+  padding: 0.75rem 1.1rem;
+  color: #fff;
+  outline: none;
+}
+
+.gallery-new input:focus {
+  border-color: var(--accent);
+}
+
+.gallery-new input::placeholder {
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.gallery-row {
+  list-style: none;
+  margin: 0;
+  padding: 0.25rem 0 0.5rem;
+  display: flex;
+  gap: 1rem;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.gallery-row > li {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.gallery-card {
+  position: relative;
+  width: 16rem;
+  aspect-ratio: 16 / 10;
+  border-radius: 14px;
+  overflow: hidden;
+  border: 2px solid transparent;
+  padding: 0;
+  background: #191b1f;
+  cursor: pointer;
+  color: #fff;
+  text-align: left;
+  display: block;
+}
+
+.gallery-card[aria-current="true"] {
+  border-color: var(--accent);
+}
+
+.gallery-card img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.gallery-card-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: rgba(255, 255, 255, 0.4);
+  font-size: 0.85rem;
+}
+
+.gallery-card-body {
+  position: absolute;
+  inset: auto 0 0 0;
+  padding: 0.85rem 0.95rem;
+  background: linear-gradient(0deg, rgba(8, 9, 11, 0.94), rgba(8, 9, 11, 0));
+  display: block;
+}
+
+.gallery-card-title {
+  display: block;
+  font-weight: 700;
+  font-size: 1rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gallery-card-sub {
+  display: block;
+  font-size: 0.8rem;
+  color: rgba(255, 255, 255, 0.7);
+  margin-top: 0.1rem;
+}
+
+.gallery-delete {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  width: 1.9rem;
+  height: 1.9rem;
+  border-radius: 50%;
+  border: 0;
+  background: rgba(8, 9, 11, 0.72);
+  color: #fff;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.gallery-row > li:hover .gallery-delete,
+.gallery-delete:focus-visible {
+  opacity: 1;
+}
+
+.gallery-empty {
+  color: rgba(255, 255, 255, 0.55);
+}

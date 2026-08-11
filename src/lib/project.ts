@@ -86,6 +86,12 @@ export interface ProjectFile {
 export interface ProjectSummary {
   id: string;
   name: string;
+  /** Cover image, if one was set. */
+  posterPath: string | null;
+  /** Clip stills, used for a card with no cover of its own. */
+  thumbnails: string[];
+  /** Clip media in order, so a project can be previewed as a reel. */
+  previewPaths: string[];
   updatedAt: string;
   clipCount: number;
   segmentCount: number;
@@ -191,4 +197,41 @@ export function formatTime(sec: number): string {
   const m = Math.floor(s / 60);
   const r = s - m * 60;
   return `${m}:${r.toFixed(1).padStart(4, "0")}`;
+}
+
+
+// --- covers ----------------------------------------------------------------
+//
+// A project's cover is either a frame the user liked or an image they chose.
+// Both land inside the project folder, so a cover cannot go missing because
+// somebody tidied the folder it came from.
+
+/** Freeze the frame at `atMs` of a clip and use it as the cover. */
+export async function setPosterFromFrame(
+  id: string,
+  sourcePath: string,
+  atMs: number,
+): Promise<string> {
+  try {
+    return await invoke<string>("project_poster_from_frame", { id, sourcePath, atMs });
+  } catch (err) {
+    throw asError(err);
+  }
+}
+
+/** Copy a chosen image in as the cover. */
+export async function setPosterFromImage(id: string, sourcePath: string): Promise<string> {
+  try {
+    return await invoke<string>("project_poster_from_image", { id, sourcePath });
+  } catch (err) {
+    throw asError(err);
+  }
+}
+
+export async function clearPoster(id: string): Promise<void> {
+  try {
+    await invoke("project_clear_poster", { id });
+  } catch (err) {
+    throw asError(err);
+  }
 }

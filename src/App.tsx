@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 
-import { ProjectPicker } from "./components/ProjectPicker";
+import { ProjectGallery } from "./components/ProjectGallery";
 import { SegmentEditor } from "./components/SegmentEditor";
 import { StoryPanel } from "./components/StoryPanel";
 import { ScriptPanel } from "./components/ScriptPanel";
@@ -757,17 +757,7 @@ function App() {
 
   if (!manifest) {
     return (
-      <main className="app">
-        <header className="masthead">
-          <p className="eyebrow">Build &amp; Launch AI</p>
-          <h1>Raw Footage, Real Story</h1>
-          <p className="lede">
-            Bring in a trip’s worth of footage, describe what’s in it, and cut as
-            many videos from it as you like. Everything runs on this machine.
-          </p>
-        </header>
-        <ProjectPicker onCreate={onCreate} onOpen={onOpen} busy={busy} error={error} />
-      </main>
+      <ProjectGallery onCreate={onCreate} onOpen={onOpen} busy={busy} error={error} />
     );
   }
 

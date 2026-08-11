@@ -44,6 +44,12 @@ impl StoreError {
 pub struct ProjectSummary {
     pub id: String,
     pub name: String,
+    /// Cover image, if one was set.
+    pub poster_path: Option<String>,
+    /// Clip stills, for a gallery card with no poster.
+    pub thumbnails: Vec<String>,
+    /// Clip media, in order, so the gallery can play a project as a reel.
+    pub preview_paths: Vec<String>,
     pub updated_at: String,
     pub clip_count: usize,
     pub segment_count: usize,
@@ -87,6 +93,18 @@ pub fn summarise(p: &ProjectFile) -> ProjectSummary {
     ProjectSummary {
         id: p.project.id.clone(),
         name: p.project.name.clone(),
+        poster_path: p.project.poster_path.clone(),
+        thumbnails: p
+            .clips
+            .iter()
+            .filter_map(|c| c.thumbnail_path.clone())
+            .take(6)
+            .collect(),
+        preview_paths: p
+            .clips
+            .iter()
+            .filter_map(|c| c.source_path.clone())
+            .collect(),
         updated_at: p.project.updated_at.clone(),
         clip_count: p.clips.len(),
         segment_count: p.segment_count(),
@@ -184,4 +202,74 @@ pub fn project_delete(app: AppHandle, id: String) -> Result<(), StoreError> {
             .map_err(|e| StoreError::new("DELETE_FAILED", format!("{}: {e}", dir.display())))?;
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Posters
+// ---------------------------------------------------------------------------
+
+/// Where a project's cover image lives.
+fn poster_dest(app: &AppHandle, id: &str, ext: &str) -> Result<PathBuf, StoreError> {
+    Ok(project_dir(app, id)?.join(format!("poster.{ext}")))
+}
+
+/// Rewrite just the poster on an already-saved project.
+///
+/// Loads and saves rather than taking the manifest from the frontend: the
+/// gallery has a summary, not a whole project, and sending one back to be
+/// written would let a stale copy overwrite newer work.
+fn set_poster(app: &AppHandle, id: &str, poster: Option<String>) -> Result<(), StoreError> {
+    let manifest_path = project_dir(app, id)?.join("project.json");
+    let mut manifest = load_from(&manifest_path)?;
+    manifest.project.poster_path = poster;
+    save_to(&manifest_path, &manifest)
+}
+
+/// Use a frame of a clip as the project's cover.
+#[tauri::command]
+pub fn project_poster_from_frame(
+    app: AppHandle,
+    id: String,
+    source_path: String,
+    at_ms: u64,
+) -> Result<String, StoreError> {
+    let info = crate::ffmpeg::detect(&crate::ffmpeg::FfmpegSettings::default())
+        .map_err(|e| StoreError::new("NO_FFMPEG", e.message))?;
+    let dest = poster_dest(&app, &id, "jpg")?;
+    crate::ffmpeg::grab_frame(&info.ffmpeg, Path::new(&source_path), &dest, at_ms, 1280)
+        .map_err(|e| StoreError::new("FRAME_FAILED", e.message))?;
+    let path = dest.to_string_lossy().to_string();
+    set_poster(&app, &id, Some(path.clone()))?;
+    Ok(path)
+}
+
+/// Use an image the user picked as the project's cover.
+#[tauri::command]
+pub fn project_poster_from_image(
+    app: AppHandle,
+    id: String,
+    source_path: String,
+) -> Result<String, StoreError> {
+    let src = Path::new(&source_path);
+    let ext = src
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .filter(|e| matches!(e.as_str(), "jpg" | "jpeg" | "png" | "webp"))
+        .ok_or_else(|| {
+            StoreError::new("BAD_IMAGE", "Choose a JPEG, PNG or WebP image.")
+        })?;
+    let dest = poster_dest(&app, &id, &ext)?;
+    // Copied into the project rather than referenced: a cover that vanishes
+    // when the user tidies their Downloads folder is worse than none.
+    std::fs::copy(src, &dest)
+        .map_err(|e| StoreError::new("COPY_FAILED", format!("{}: {e}", src.display())))?;
+    let path = dest.to_string_lossy().to_string();
+    set_poster(&app, &id, Some(path.clone()))?;
+    Ok(path)
+}
+
+#[tauri::command]
+pub fn project_clear_poster(app: AppHandle, id: String) -> Result<(), StoreError> {
+    set_poster(&app, &id, None)
 }

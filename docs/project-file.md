@@ -75,7 +75,14 @@ its timeline.
     "id": "uuid",
     "name": "Iceland trip",
     "createdAt": "2026-08-10T00:00:00Z",
-    "updatedAt": "2026-08-10T00:00:00Z"
+    "updatedAt": "2026-08-10T00:00:00Z",
+
+    // Optional cover image for the gallery: either a frame frozen out of a
+    // clip or an image the user supplied. Always inside the project folder,
+    // so it travels with a bundle. Absent on projects made before covers
+    // existed, which read and write unchanged — this is additive, and
+    // schemaVersion stays at 2.
+    "posterPath": "/…/projects/<id>/poster.jpg"
   },
 
   // The clip library. Described once, reused by every video.

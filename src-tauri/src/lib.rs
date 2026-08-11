@@ -62,7 +62,10 @@ pub fn run() {
             store::project_save,
             store::project_open,
             store::project_list,
-            store::project_delete
+            store::project_delete,
+            store::project_poster_from_frame,
+            store::project_poster_from_image,
+            store::project_clear_poster
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
