@@ -12,6 +12,7 @@ import { VideoTable } from "./components/VideoTable";
 import { ClipDescriber } from "./components/ClipDescriber";
 import { FilterIcon, SaveIcon, SearchIcon, SortIcon } from "./components/Icons";
 import {
+  allowMedia,
   listLibrary,
   setSegments,
   storageUsage,
@@ -823,6 +824,10 @@ function App() {
       setLibrary(clips);
       setProjects(list);
       setStorage(usage);
+
+      // Footage lives outside the app folder, so the webview has to be told it
+      // may read each file before any player can show it.
+      await allowMedia(clips.map((c) => c.sourcePath));
 
       // A project deleted from disk — here or in Finder — must not stay open,
       // or the stages keep working on something that is no longer there.

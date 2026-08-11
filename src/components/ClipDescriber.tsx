@@ -43,6 +43,7 @@ export function ClipDescriber({ clips, startAt, segmentsFor, onCommit, onClose }
   const [currentKey, setCurrentKey] = useState(startAt);
   const [segments, setSegments] = useState<Segment[]>([]);
   const [playhead, setPlayhead] = useState(0);
+  const [mediaError, setMediaError] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const committed = useRef<{ clip: LibraryClip; segments: Segment[] } | null>(null);
 
@@ -71,6 +72,7 @@ export function ClipDescriber({ clips, startAt, segmentsFor, onCommit, onClose }
         : initialSegments((clip.durationMs ?? 0) / 1000),
     );
     setPlayhead(0);
+    setMediaError(null);
   }, [clip?.clipId, clip?.projectId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /** Write the working copy back, unless nothing was typed into a fresh clip. */
@@ -202,9 +204,28 @@ export function ClipDescriber({ clips, startAt, segmentsFor, onCommit, onClose }
                 muted
                 playsInline
                 onTimeUpdate={(e) => setPlayhead(e.currentTarget.currentTime)}
+                // A black rectangle is not a diagnosis. Say what failed, since
+                // the usual causes — a file that has moved, or a codec the
+                // webview will not decode — need different fixes.
+                onError={() =>
+                  setMediaError(
+                    `Couldn’t play this file. It may have moved, or be in a format ` +
+                      `this player can’t decode. Thumbnails and rendering are ` +
+                      `unaffected — they go through ffmpeg.`,
+                  )
+                }
+                onLoadedData={() => setMediaError(null)}
               />
             ) : (
               <p className="lib-empty">This clip has no media on disk.</p>
+            )}
+
+            {mediaError && (
+              <div className="warning" role="alert">
+                <strong>Preview unavailable.</strong>
+                <span>{mediaError}</span>
+                <span className="hint">{clip.sourcePath}</span>
+              </div>
             )}
 
             <div className="describer-tools">

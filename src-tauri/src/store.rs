@@ -534,3 +534,29 @@ pub fn clip_set_segments(
 ) -> Result<(), StoreError> {
     edit_clip(&app, &project_id, &clip_id, |c| c.segments = segments)
 }
+
+/// Let the webview read specific media files.
+///
+/// Footage is referenced where the user keeps it, not copied into the project,
+/// so it sits outside the `$APPDATA/**` the asset protocol allows by default —
+/// which is why thumbnails (written into the project folder) appeared while the
+/// clips themselves would not play.
+///
+/// Granted file by file rather than by widening the static scope to the home
+/// directory: the app should be able to read the footage somebody imported, not
+/// everything they own. The scope is in-memory, so this is called again on every
+/// launch as the library is read.
+#[tauri::command]
+pub fn allow_media(app: AppHandle, paths: Vec<String>) -> Result<usize, StoreError> {
+    let scope = app.asset_protocol_scope();
+    let mut granted = 0;
+    for p in paths {
+        let path = Path::new(&p);
+        // A path that has gone away is not an error here: the library still
+        // lists it, and the UI reports the missing file where it is used.
+        if path.is_file() && scope.allow_file(path).is_ok() {
+            granted += 1;
+        }
+    }
+    Ok(granted)
+}

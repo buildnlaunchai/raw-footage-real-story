@@ -39,6 +39,28 @@ export async function listLibrary(): Promise<LibraryClip[]> {
   return await invoke<LibraryClip[]>("library_list");
 }
 
+/**
+ * Let the webview read these files.
+ *
+ * The asset protocol only allows the app's own folder by default, and footage
+ * is referenced where the user keeps it. Without this the player gets a black
+ * frame while the thumbnail beside it loads fine, which reads as a broken
+ * video rather than a permission it was never given.
+ *
+ * The grant is in-memory, so this runs every time the library is read.
+ */
+export async function allowMedia(paths: (string | null)[]): Promise<number> {
+  const real = paths.filter((p): p is string => Boolean(p));
+  if (real.length === 0) return 0;
+  try {
+    return await invoke<number>("allow_media", { paths: real });
+  } catch {
+    // A failed grant should not stop the library loading; the player reports
+    // the file it could not read.
+    return 0;
+  }
+}
+
 export async function storageUsage(): Promise<StorageUsage> {
   return await invoke<StorageUsage>("storage_usage");
 }
