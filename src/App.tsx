@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 
@@ -165,6 +165,13 @@ function App() {
   const [sortBy, setSortBy] = useState<"added" | "name" | "duration" | "described">("added");
   const [filterProject, setFilterProject] = useState<string>("");
   const [preview, setPreview] = useState<LibraryClip | null>(null);
+  /** Clip whose timings are being edited; the table's one box cannot hold them. */
+  const [splitting, setSplitting] = useState<string | null>(null);
+  /**
+   * Held in a ref because import runs above where the loader is defined, and
+   * reordering them would put the loader above the state it reads.
+   */
+  const refreshLibraryRef = useRef<(() => Promise<void>) | null>(null);
 
   /**
    * What the current narration was recorded with, and what the current cut was
@@ -180,7 +187,6 @@ function App() {
 
   // --- project -------------------------------------------------------------
   const [manifest, setManifest] = useState<ProjectFile | null>(null);
-  const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [importing, setImporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -349,7 +355,7 @@ function App() {
     setError(null);
     try {
       setManifest(await createProject(name));
-      setSelectedClipId(null);
+      setSplitting(null);
       resetVideoState();
       setDirty(false);
     } catch (err) {
@@ -365,7 +371,7 @@ function App() {
     try {
       const opened = await openProject(id);
       setManifest(opened);
-      setSelectedClipId(opened.clips[0]?.id ?? null);
+      setSplitting(null);
       resetVideoState();
       // Reopen the most recent video, so a saved script survives a restart.
       const last = opened.videos[opened.videos.length - 1];
@@ -504,6 +510,8 @@ function App() {
       setError(null);
       try {
         applyImport(await importMedia(paths, projectId));
+        // The table reads the library, not the manifest, so it has to be told.
+        void refreshLibraryRef.current?.();
       } catch (err) {
         setError(errorText(err));
       } finally {
@@ -834,6 +842,8 @@ function App() {
     }
   }, []);
 
+  refreshLibraryRef.current = refreshLibrary;
+
   useEffect(() => {
     void refreshLibrary();
     void invoke<string>("machine_user").then(setUserName).catch(() => setUserName(""));
@@ -893,10 +903,20 @@ function App() {
   // --- library table -------------------------------------------------------
 
   const q = query.trim().toLowerCase();
-  const tableRows = library
-    .filter((c) => (view === "trash" ? c.deletedAt : !c.deletedAt))
-    .filter((c) => (view === "favorites" ? c.favorite : true))
-    .filter((c) => !filterProject || c.projectId === filterProject)
+
+  // The Footage tab is the same table scoped to the open collection. One list
+  // component rather than two: describing a clip is the same act whether you
+  // arrived at it from the library or from inside a project, and a second
+  // editor would be a second place for the two to disagree.
+  const onFootageTab = tab === "footage";
+  const baseRows = onFootageTab
+    ? library.filter((c) => c.projectId === manifest?.project.id && !c.deletedAt)
+    : library
+        .filter((c) => (view === "trash" ? c.deletedAt : !c.deletedAt))
+        .filter((c) => (view === "favorites" ? c.favorite : true))
+        .filter((c) => !filterProject || c.projectId === filterProject);
+
+  const tableRows = baseRows
     .filter(
       (c) =>
         !q ||
@@ -1055,17 +1075,6 @@ function App() {
             ))}
           </ul>
         </div>
-      )}
-
-      {stage === "footage" && (
-        <SegmentEditor
-          clips={manifest.clips.filter((c) => !c.deletedAt)}
-          selectedId={selectedClipId}
-          importing={importing}
-          onSelect={setSelectedClipId}
-          onChangeSegments={onChangeSegments}
-          onImportClips={async () => runImport(await pickFiles())}
-        />
       )}
 
       {stage === "story" &&
@@ -1436,6 +1445,17 @@ function App() {
                 </select>
               </label>
 
+              {onFootageTab && manifest && (
+                <button
+                  type="button"
+                  className="lib-new"
+                  onClick={async () => runImport(await pickFiles())}
+                  disabled={importing}
+                >
+                  {importing ? "Importing…" : "+ Add footage"}
+                </button>
+              )}
+
               {manifest && (
                 <button
                   type="button"
@@ -1483,7 +1503,23 @@ function App() {
               ))}
             </nav>
 
-            {tab === "all" ? (
+            {tab === "all" || onFootageTab ? (
+              onFootageTab && !manifest ? (
+                <div className="stage-blocked">
+                  <h3>No collection open</h3>
+                  <p className="hint">
+                    Footage belongs to a collection. Choose one from the sidebar,
+                    or browse everything under All Videos.
+                  </p>
+                  <button
+                    type="button"
+                    className="primary-button"
+                    onClick={() => setView("projects")}
+                  >
+                    Choose a collection
+                  </button>
+                </div>
+              ) : (
               <div className="lib-table-wrap">
                 {pageRows.length === 0 ? (
                   <p className="lib-empty">
@@ -1505,7 +1541,7 @@ function App() {
                       onOpenProject={openProjectById}
                       onOpenSegments={async (c) => {
                         await openProjectById(c.projectId);
-                        setSelectedClipId(c.clipId);
+                        setSplitting(c.clipId);
                       }}
                       onFavorite={(c) =>
                         mutateClip(
@@ -1602,8 +1638,40 @@ function App() {
                   </>
                 )}
               </div>
+              )
             ) : (
               stageBody
+            )}
+
+            {/* Timings live here, not in the table: one box cannot hold three. */}
+            {onFootageTab && manifest && splitting && (
+              <>
+                <div className="actions" style={{ margin: "1rem 0 0.5rem" }}>
+                  <span className="hint">
+                    Editing the moments inside one clip. The table above edits
+                    whole-clip descriptions.
+                  </span>
+                  <button
+                    type="button"
+                    className="ghost-button small"
+                    style={{ marginLeft: "auto" }}
+                    onClick={() => setSplitting(null)}
+                  >
+                    Done
+                  </button>
+                </div>
+                <SegmentEditor
+                clips={manifest.clips.filter((c) => c.id === splitting && !c.deletedAt)}
+                selectedId={splitting}
+                importing={importing}
+                onSelect={setSplitting}
+                onChangeSegments={(clipId, segs) => {
+                  onChangeSegments(clipId, segs);
+                  void refreshLibrary();
+                }}
+                  onImportClips={async () => runImport(await pickFiles())}
+                />
+              </>
             )}
           </>
         )}
