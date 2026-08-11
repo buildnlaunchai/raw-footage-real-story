@@ -2500,3 +2500,8 @@ kbd {
 .clip-preview-bar .ghost-button {
   margin-left: auto;
 }
+
+/* Home is deliberately blank for now; it holds its space without filler. */
+.lib-home-empty {
+  min-height: 60vh;
+}

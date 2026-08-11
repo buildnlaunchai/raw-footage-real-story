@@ -151,7 +151,9 @@ function App() {
   const [query, setQuery] = useState("");
 
   /** Sidebar destination, and which tab of the main column is showing. */
-  const [view, setView] = useState<LibraryView>("home");
+  // Home is intentionally empty for now, so the app opens on the library
+  // rather than on a blank page.
+  const [view, setView] = useState<LibraryView>("all");
   const [tab, setTab] = useState<"all" | StageId>("all");
 
   // The library spans every project, so it is loaded separately from whichever
@@ -1377,7 +1379,10 @@ function App() {
       />
 
       <main className="lib-main">
-        {view === "projects" ? (
+        {view === "home" ? (
+          // Left empty on purpose, pending a decision about what belongs here.
+          <div className="lib-home-empty" />
+        ) : view === "projects" ? (
           <ProjectGallery
             onCreate={onCreate}
             onOpen={async (id) => {
