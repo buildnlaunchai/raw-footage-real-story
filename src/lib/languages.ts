@@ -32,11 +32,39 @@ export interface ScriptLanguage {
   localVoiceSupported: boolean;
   /** Whether Qwen2.5's model card names this language explicitly. */
   documented: boolean;
+  /**
+   * What register to write in, where the default lands wrong.
+   *
+   * "Natural and idiomatic" is not enough guidance for a language with a real
+   * literary/spoken split. Asked for good Bengali, a model reaches for the
+   * prose it saw most of — which is books — and produces something correct and
+   * unspeakable. Naming the split, and the forms to avoid, is the fix; it has
+   * to be per language because the trap is different in each.
+   */
+  registerHint?: string;
 }
 
 export const LANGUAGES: ScriptLanguage[] = [
   { code: "en", label: "English", nativeLabel: "English", counting: "words", direction: "ltr", localVoiceSupported: true, documented: true },
-  { code: "bn", label: "Bengali", nativeLabel: "বাংলা", counting: "words", direction: "ltr", localVoiceSupported: false, documented: false },
+  {
+    code: "bn",
+    label: "Bengali",
+    nativeLabel: "বাংলা",
+    counting: "words",
+    direction: "ltr",
+    localVoiceSupported: false,
+    documented: false,
+    registerHint:
+      "Write in modern spoken Bengali — চলিত ভাষা, the register of today's " +
+      "television and online narration. Never write সাধু ভাষা: no করিয়া, হইয়া, " +
+      "তাহার, কহিল, রহিয়াছে or any other archaic verb or pronoun form. Prefer " +
+      "everyday words over heavy তৎসম vocabulary — বাড়ি not গৃহ, রাস্তা not " +
+      "পথপ্রান্ত, মানুষ not জনসাধারণ. Use ordinary present and past forms: হচ্ছে, " +
+      "করছে, দাঁড়িয়ে আছে. Write the way a thoughtful person speaks now, not the " +
+      "way a book is written. For Hajj and Umrah footage use the vocabulary " +
+      "Bengali Muslims use — হাজি or হজযাত্রী rather than তীর্থযাত্রী, and never " +
+      "Hindu religious terms.",
+  },
   { code: "ar", label: "Arabic", nativeLabel: "العربية", counting: "words", direction: "rtl", localVoiceSupported: false, documented: true },
   { code: "es", label: "Spanish", nativeLabel: "Español", counting: "words", direction: "ltr", localVoiceSupported: false, documented: true },
   { code: "fr", label: "French", nativeLabel: "Français", counting: "words", direction: "ltr", localVoiceSupported: false, documented: true },

@@ -601,3 +601,24 @@ pub fn assembly_export_project_only(
         .map_err(|e| FfmpegError { code: "EXPORT_FAILED".into(), message: e.to_string() })?;
     Ok(out.to_string_lossy().into())
 }
+
+/// Copy the finished cut wherever the user wants it.
+///
+/// The rendered file is already an mp4 in the project folder; this is a copy to
+/// a chosen destination and nothing more. Bundles and project files are a
+/// different job — this one is "give me the video".
+#[tauri::command]
+pub fn save_video_as(from: String, to: String) -> Result<String, FfmpegError> {
+    let src = std::path::Path::new(&from);
+    if !src.is_file() {
+        return Err(FfmpegError {
+            code: "NO_VIDEO".into(),
+            message: "That render is no longer on disk. Render again.".into(),
+        });
+    }
+    std::fs::copy(src, &to).map_err(|e| FfmpegError {
+        code: "COPY_FAILED".into(),
+        message: format!("{to}: {e}"),
+    })?;
+    Ok(to)
+}

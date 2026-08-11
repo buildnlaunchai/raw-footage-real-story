@@ -612,3 +612,62 @@ mod tests {
         assert!(total_audio / total_time > 1.0, "should beat realtime");
     }
 }
+
+/// Join the recorded lines into one file, so the narration can be heard whole.
+///
+/// Reading a script line by line tells you each sentence works; it does not
+/// tell you whether the whole thing does — where it drags, where two lines
+/// collide. That is only audible end to end, and waiting for a video render to
+/// find out is an expensive way to learn it.
+///
+/// Written into the project's audio folder, so the asset protocol can serve it
+/// and it is cleaned up with everything else.
+#[tauri::command]
+pub fn narration_concat(
+    app: AppHandle,
+    project_id: String,
+    paths: Vec<String>,
+    gap_ms: u64,
+) -> Result<String, TtsError> {
+    if paths.is_empty() {
+        return Err(TtsError::new("EMPTY_TEXT", "There is no narration to join yet."));
+    }
+    let dir = audio_dir(&app, &project_id)?;
+    let mut all: Vec<f32> = Vec::new();
+    // The pause between lines the cut will have, so what you hear here is the
+    // pacing you get rather than an unbroken run-on.
+    let gap = vec![0f32; (SAMPLE_RATE as usize * gap_ms as usize) / 1000];
+
+    for (i, p) in paths.iter().enumerate() {
+        let mut reader = hound::WavReader::open(p)
+            .map_err(|e| TtsError::new("BAD_AUDIO", format!("{p}: {e}")))?;
+        let spec = reader.spec();
+        if spec.channels != 1 || spec.sample_rate != SAMPLE_RATE {
+            return Err(TtsError::new(
+                "BAD_AUDIO",
+                format!(
+                    "{p} is {}ch @{}Hz; every line must be mono {SAMPLE_RATE}Hz to join.",
+                    spec.channels, spec.sample_rate
+                ),
+            ));
+        }
+        let samples: Vec<f32> = match spec.sample_format {
+            hound::SampleFormat::Int => reader
+                .samples::<i16>()
+                .filter_map(Result::ok)
+                .map(|s| s as f32 / 32767.0)
+                .collect(),
+            hound::SampleFormat::Float => {
+                reader.samples::<f32>().filter_map(Result::ok).collect()
+            }
+        };
+        if i > 0 {
+            all.extend_from_slice(&gap);
+        }
+        all.extend_from_slice(&samples);
+    }
+
+    let out = dir.join("narration-full.wav");
+    write_wav(&out, &all).map_err(|e| TtsError::new("WAV_WRITE_FAILED", e))?;
+    Ok(out.to_string_lossy().to_string())
+}

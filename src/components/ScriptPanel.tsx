@@ -61,6 +61,8 @@ export function ScriptPanel({
   const [correcting, setCorrecting] = useState<string | null>(null);
   const [respelling, setRespelling] = useState("");
   const [playing, setPlaying] = useState<string | null>(null);
+  /** The whole script as one readable column, rather than a stack of rows. */
+  const [expanded, setExpanded] = useState(false);
 
   useEffect(() => {
     setRespelling(correcting ? (pronunciations[correcting.toLowerCase()] ?? "") : "");
@@ -81,6 +83,15 @@ export function ScriptPanel({
     <section className="panel">
       <div className="panel-head">
         <h2>{title || "Script"}</h2>
+        <div className="actions">
+          <button
+            type="button"
+            className="ghost-button small"
+            onClick={() => setExpanded(true)}
+          >
+            Read the whole script
+          </button>
+        </div>
         <p className="hint">
           {lines.length} line{lines.length === 1 ? "" : "s"} · {words} words
           {wordTarget > 0 && (
@@ -235,6 +246,54 @@ export function ScriptPanel({
       )}
 
       {children}
+      {expanded && (
+        <div
+          className="describer"
+          role="dialog"
+          aria-label="The whole script"
+          onClick={() => setExpanded(false)}
+        >
+          <div className="describer-panel" onClick={(e) => e.stopPropagation()}>
+            <div className="describer-head">
+              <div style={{ minWidth: 0 }}>
+                <strong className="describer-name">{title || "Script"}</strong>
+                <span className="hint">
+                  {lines.length} line{lines.length === 1 ? "" : "s"} · {words} words
+                </span>
+              </div>
+              <button
+                type="button"
+                className="lib-act"
+                onClick={() => setExpanded(false)}
+                aria-label="Close"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="script-read">
+              {/* Still one field per line: the lines are what the timeline
+                  addresses, and editing the script as one blob would leave no
+                  way to tell which clip a sentence belongs to. */}
+              {lines.map((line, i) => (
+                <div className="script-read-line" key={`${line.clipId}#${line.segmentIndex}`}>
+                  <p className="script-read-source">
+                    {String(i + 1).padStart(2, "0")} ·{" "}
+                    {segmentText(clips, line.clipId, line.segmentIndex)}
+                  </p>
+                  <textarea
+                    className="clip-input script-read-text"
+                    rows={Math.max(2, Math.ceil(line.text.length / 60))}
+                    value={line.text}
+                    disabled={busy}
+                    onChange={(e) => onEditLine(i, e.currentTarget.value)}
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 }

@@ -58,7 +58,7 @@ import {
   type ScriptLineDraft,
   type ScriptStyle,
 } from "./lib/scriptComposer";
-import { audioUrl } from "./lib/voiceover";
+import { audioUrl, concatNarration } from "./lib/voiceover";
 import {
   characterCount,
   providerFor,
@@ -129,6 +129,9 @@ function App() {
   const [storage, setStorage] = useState<StorageUsage | null>(null);
   const [userName, setUserName] = useState("");
   const [refreshing, setRefreshing] = useState(false);
+  /** The recorded lines joined end to end, for hearing the script whole. */
+  const [fullNarration, setFullNarration] = useState<string | null>(null);
+  const [joining, setJoining] = useState(false);
   const [page, setPage] = useState(1);
   const [sortBy, setSortBy] = useState<"added" | "name" | "duration" | "described">("added");
   const [filterProject, setFilterProject] = useState<string>("");
@@ -613,6 +616,7 @@ function App() {
       // billed, and discarding them would charge for them twice.
       setVoiced(result.lines.length > 0 ? result.lines : null);
       setVoiceStamp({ providerId, voiceId: voice, language, pronunciations });
+      setFullNarration(null);
       setFailures(result.failures);
       setAssembly(null);
       setDirty(true);
@@ -808,6 +812,20 @@ function App() {
     } finally {
       setAssemblyBusy(false);
       setRenderProgress(null);
+    }
+  }
+
+  /** Join the recorded lines so the script can be heard end to end. */
+  async function onJoinNarration() {
+    if (!voiced || !projectId) return;
+    setJoining(true);
+    setTtsError(null);
+    try {
+      setFullNarration(await concatNarration(projectId, voiced.map((v) => v.audioPath)));
+    } catch (err) {
+      setTtsError(errorText(err));
+    } finally {
+      setJoining(false);
     }
   }
 
@@ -1154,26 +1172,10 @@ function App() {
             <div className="panel">
               <div className="panel-head">
                 <h2>Voice</h2>
-                <div className="actions">
-                  <span className="hint">
-                    {characterCount(lines)} characters
-                    {provider.capabilities.billing === "per-character" && " · billed"}
-                  </span>
-                  <button
-                    type="button"
-                    className="primary-button"
-                    onClick={onGenerateVoiceover}
-                    disabled={ttsBusy || !voice}
-                  >
-                    {ttsBusy
-                      ? ttsProgress
-                        ? `Recording ${ttsProgress.done}/${ttsProgress.total}…`
-                        : "Recording…"
-                      : voiced
-                        ? "Re-record all"
-                        : "Record narration"}
-                  </button>
-                </div>
+                <span className="hint">
+                  {characterCount(lines)} characters
+                  {provider.capabilities.billing === "per-character" && " · billed"}
+                </span>
               </div>
               <ProviderPicker
                 providerId={providerId}
@@ -1189,6 +1191,41 @@ function App() {
                 previewing={previewing}
                 onPreview={onPreview}
               />
+              <div className="voice-record">
+                <button
+                  type="button"
+                  className="primary-button"
+                  onClick={onGenerateVoiceover}
+                  disabled={ttsBusy || !voice}
+                >
+                  {ttsBusy
+                    ? ttsProgress
+                      ? `Recording ${ttsProgress.done}/${ttsProgress.total}…`
+                      : "Recording…"
+                    : voiced
+                      ? "Re-record all"
+                      : "Record narration"}
+                </button>
+                <span className="hint">
+                  {!voice
+                    ? "Choose a voice above first."
+                    : voiced
+                      ? "Re-records every line with the current voice."
+                      : `Records all ${lines.length} lines.`}
+                </span>
+              </div>
+
+              {ttsBusy && ttsProgress && (
+                <div className="progress-track">
+                  <div
+                    className="progress-fill"
+                    style={{
+                      width: `${(ttsProgress.done / Math.max(1, ttsProgress.total)) * 100}%`,
+                    }}
+                  />
+                </div>
+              )}
+
               {ttsError && (
                 <div className="error" role="alert">
                   <strong>Couldn’t generate the voiceover.</strong>
@@ -1231,6 +1268,50 @@ function App() {
               onHearLine={onHearLine}
               onCorrectWord={onCorrectWord}
             />
+
+            {voiced && voiced.length > 0 && (
+              <div className="panel">
+                <div className="panel-head">
+                  <h2>The whole narration</h2>
+                  <span className="hint">
+                    {voiced.length} line{voiced.length === 1 ? "" : "s"}, end to end
+                  </span>
+                </div>
+
+                {fullNarration ? (
+                  <audio
+                    className="narration-player"
+                    controls
+                    src={audioUrl(fullNarration) + `?t=${Date.now()}`}
+                  />
+                ) : (
+                  <p className="hint" style={{ margin: "0 0 0.9rem" }}>
+                    Line by line tells you each sentence works. Whether the script
+                    works is only audible end to end.
+                  </p>
+                )}
+
+                <div className="actions">
+                  <button
+                    type="button"
+                    className={fullNarration ? "ghost-button" : "primary-button"}
+                    onClick={onJoinNarration}
+                    disabled={joining || ttsBusy}
+                  >
+                    {joining
+                      ? "Joining…"
+                      : fullNarration
+                        ? "Rebuild after edits"
+                        : "▶ Play the whole narration"}
+                  </button>
+                  {staleLines.size > 0 && fullNarration && (
+                    <span className="hint">
+                      Some lines changed since this was joined.
+                    </span>
+                  )}
+                </div>
+              </div>
+            )}
           </>
         ))}
 
@@ -1260,6 +1341,7 @@ function App() {
 
             {ffmpeg && (
               <AssemblyPanel
+                title={title}
                 voiced={voiced}
                 clips={manifest.clips.map((c) => ({
                   id: c.id,
@@ -1276,11 +1358,8 @@ function App() {
                 error={assemblyError}
                 hasPlaceholders
                 makingPlaceholders={false}
-                projectId={manifest.project.id}
                 onMakePlaceholders={() => {}}
                 onRender={onRender}
-                onConsolidate={() => {}}
-                consolidating={false}
                 hasExternalMedia={manifest.clips.some((c) => c.sourcePath && !c.isPlaceholder)}
               >
                 <div className="field-row">

@@ -181,3 +181,18 @@ export async function resynthesizeLine(
     throw asError(err);
   }
 }
+
+
+/**
+ * Join the recorded lines into one file and return its path.
+ *
+ * `gapMs` mirrors the pause the cut puts between shots, so the preview is the
+ * pacing you will get rather than an unbroken run-on.
+ */
+export async function concatNarration(
+  projectId: string,
+  paths: string[],
+  gapMs = 350,
+): Promise<string> {
+  return await invoke<string>("narration_concat", { projectId, paths, gapMs });
+}

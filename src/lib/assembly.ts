@@ -302,3 +302,9 @@ export const MUSIC_BEDS: { id: string; label: string; hint: string }[] = [
   { id: "open-road", label: "Open road", hint: "brighter, a little movement" },
   { id: "cold-air", label: "Cold air", hint: "airy, textural" },
 ];
+
+
+/** Copy the finished cut to a chosen location. */
+export async function saveVideoAs(from: string, to: string): Promise<string> {
+  return await invoke<string>("save_video_as", { from, to });
+}

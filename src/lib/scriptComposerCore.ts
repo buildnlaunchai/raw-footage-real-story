@@ -212,7 +212,14 @@ function writeSystemFor(lang: ScriptLanguage): string {
     `You write entirely in ${lang.label} (${lang.nativeLabel}), in natural idiomatic ` +
     `${lang.label} — not translated English. Never include English words or ` +
     `transliteration unless they are proper nouns with no ${lang.label} form. ` +
-    `Avoid vague praise words; describe what is there.`
+    `Avoid vague praise words; describe what is there. ` +
+    // Asked only for "natural and idiomatic", a model writes the register it
+    // has read most of, which is books. This narration is going to be spoken
+    // aloud over someone's holiday footage, so it has to sound like speech.
+    `This script will be read aloud, so write speech: the contemporary spoken ` +
+    `register, plain modern vocabulary, sentences a person could say in one ` +
+    `breath. Not literary, not archaic, not formal written prose. ` +
+    (lang.registerHint ? `${lang.registerHint} ` : "")
   );
 }
 

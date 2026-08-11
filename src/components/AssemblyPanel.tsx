@@ -2,18 +2,20 @@
 import { useRef, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import {
-  exportBundle,
-  exportProjectOnly,
+  saveVideoAs,
   type AssembleResult,
   type FfmpegInfo,
   type RenderProgress,
   type TimelineItem,
 } from "../lib/assembly";
 import { audioUrl } from "../lib/voiceover";
+import { DownloadIcon } from "./Icons";
 import type { Clip } from "../lib/types";
 import type { VoicedLine } from "../lib/ttsProviders";
 
 interface Props {
+  /** Used to name the saved file. */
+  title?: string;
   clips: Clip[];
   /** The narration behind the timeline, so each row can show what is said. */
   voiced: VoicedLine[] | null;
@@ -24,11 +26,8 @@ interface Props {
   error: string | null;
   hasPlaceholders: boolean;
   makingPlaceholders: boolean;
-  projectId: string;
   onMakePlaceholders: () => void;
   onRender: () => void;
-  onConsolidate: () => void;
-  consolidating: boolean;
   hasExternalMedia: boolean;
   children?: React.ReactNode;
 }
@@ -44,6 +43,7 @@ function secs(ms: number): string {
 }
 
 export function AssemblyPanel({
+  title,
   clips,
   voiced,
   ffmpeg,
@@ -53,11 +53,8 @@ export function AssemblyPanel({
   error,
   hasPlaceholders,
   makingPlaceholders,
-  projectId,
   onMakePlaceholders,
   onRender,
-  onConsolidate,
-  consolidating,
   hasExternalMedia,
   children,
 }: Props) {
@@ -68,27 +65,31 @@ export function AssemblyPanel({
     (voiced ?? []).map((v) => [`${v.clipId}#${v.segmentIndex ?? 0}`, v.text]),
   );
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const suggestedName =
+    (title?.trim() || "rough-cut").replace(/[^\w\d ]+/g, "").replace(/\s+/g, "-").toLowerCase() ||
+    "rough-cut";
   const [exported, setExported] = useState<string | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
 
-  async function doExport(kind: "bundle" | "project") {
+  /**
+   * Save the finished cut as an mp4.
+   *
+   * The bundle and project-file exports were built for handing a project to
+   * something else. What is wanted here is the video, so that is the only
+   * thing offered.
+   */
+  async function saveVideo() {
+    if (!result) return;
     setExportError(null);
     setExported(null);
     try {
       const path = await save({
-        title: kind === "bundle" ? "Export bundle" : "Export project file",
-        defaultPath: kind === "bundle" ? "rough-cut-bundle.zip" : "project.json",
-        filters:
-          kind === "bundle"
-            ? [{ name: "Zip archive", extensions: ["zip"] }]
-            : [{ name: "JSON", extensions: ["json"] }],
+        title: "Save video",
+        defaultPath: `${suggestedName}.mp4`,
+        filters: [{ name: "MP4 video", extensions: ["mp4"] }],
       });
       if (!path) return;
-      const written =
-        kind === "bundle"
-          ? await exportBundle(projectId, path)
-          : await exportProjectOnly(projectId, path);
-      setExported(written);
+      setExported(await saveVideoAs(result.videoPath, path));
     } catch (err) {
       setExportError(err instanceof Error ? err.message : String(err));
     }
@@ -177,23 +178,12 @@ export function AssemblyPanel({
           </ol>
 
           <div className="actions">
-            <button type="button" className="primary-button" onClick={() => doExport("bundle")}>
-              Export bundle (.zip)
+            <button type="button" className="primary-button" onClick={saveVideo}>
+              <DownloadIcon /> Save video (.mp4)
             </button>
-            <button type="button" className="ghost-button" onClick={() => doExport("project")}>
-              Project file only
-            </button>
-            {hasExternalMedia && (
-              <button
-                type="button"
-                className="ghost-button"
-                onClick={onConsolidate}
-                disabled={consolidating}
-                title="Copy referenced video files into the project folder so it survives the originals moving"
-              >
-                {consolidating ? "Copying…" : "Consolidate media"}
-              </button>
-            )}
+            <span className="hint">
+              {secs(result.durationMs)} · {result.timeline.length} shots
+            </span>
           </div>
 
           {hasExternalMedia && (
