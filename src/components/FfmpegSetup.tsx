@@ -15,8 +15,12 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { setFfmpegPath, type FfmpegInfo } from "../lib/assembly";
 
 const INSTALL_HINT: { label: string; command: string }[] = [
-  { label: "macOS", command: "brew install ffmpeg" },
-  { label: "Windows", command: "winget install ffmpeg" },
+  // ffmpeg-full rather than ffmpeg: the plain formula is built without libzimg,
+  // so it has no zscale and cannot tone-map HDR footage.
+  { label: "macOS", command: "brew install ffmpeg-full" },
+  // The package id is required. `winget install ffmpeg` matches several
+  // packages and prompts for a disambiguation the user has no way to resolve.
+  { label: "Windows", command: "winget install -e --id Gyan.FFmpeg" },
   { label: "Linux", command: "sudo apt install ffmpeg" },
 ];
 

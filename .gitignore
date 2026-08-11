@@ -60,3 +60,6 @@ src-tauri/WixTools/
 # --- Tooling ---------------------------------------------------------------
 .claude/settings.local.json
 .test-build/
+
+# Fetched by scripts/fetch-model.sh, not stored in the repo.
+src-tauri/resources/kokoro/model_q8f16.onnx

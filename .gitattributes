@@ -1,2 +1,5 @@
-src-tauri/resources/kokoro/*.onnx filter=lfs diff=lfs merge=lfs -text
+# The model is not in LFS: at 82MB it burned GitHub's free 1GB/month bandwidth
+# in a couple of releases, and a throttled LFS repo blocks clones for everyone.
+# `scripts/fetch-model.sh` pulls it from Hugging Face, pinned and hash-checked.
+# The voice packs stay here — 28MB, and not published as single files anywhere.
 src-tauri/resources/kokoro/voices/*.bin filter=lfs diff=lfs merge=lfs -text

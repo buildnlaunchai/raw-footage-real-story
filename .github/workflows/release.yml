@@ -1,0 +1,194 @@
+name: Build installers
+
+# Two ways in:
+#   - pushing a `v*` tag builds and attaches installers to a draft release
+#   - workflow_dispatch builds and uploads artifacts, touching no release
+#
+# The second matters: most builds are checks, and a check that creates a
+# release is a check nobody runs.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      # Both platforms always finish. A Windows failure that cancels the macOS
+      # build tells you half of what the run was for.
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            label: macOS
+            # Universal, not arm64: macos-14 runners are Apple Silicon, so the
+            # default target produces something Intel Macs refuse to open —
+            # which reaches the user as "the app is broken".
+            target: universal-apple-darwin
+            args: "--target universal-apple-darwin"
+          - os: windows-latest
+            label: Windows
+            target: ""
+            args: ""
+
+    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.label }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The voice packs live in LFS. The model does not — see
+          # scripts/fetch-model.sh for why.
+          lfs: true
+
+      # ── gate 1: are the LFS files real? ─────────────────────────────────
+      # A failed smudge leaves a ~130-byte pointer that reads perfectly well as
+      # a file. Everything downstream then succeeds and ships a mute app, so
+      # this is checked before anything is built rather than after.
+      - name: Verify LFS payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          voices=$(ls src-tauri/resources/kokoro/voices/*.bin | wc -l | tr -d ' ')
+          echo "voice packs: $voices"
+          [ "$voices" -ge 55 ] || { echo "FAIL expected >= 55 voice packs"; exit 1; }
+          fail=0
+          for f in src-tauri/resources/kokoro/voices/*.bin; do
+            if head -c 40 "$f" | grep -q "version https://git-lfs"; then
+              echo "FAIL $f is an LFS pointer, not the file"; fail=1
+            fi
+          done
+          [ "$fail" -eq 0 ] || exit 1
+          echo "ok: LFS files are real"
+
+      - name: Fetch the model
+        shell: bash
+        run: ./scripts/fetch-model.sh
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          # Both halves of the universal binary need their target installed.
+          targets: ${{ matrix.os == 'macos-14' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: ${{ matrix.target }}
+
+      - run: npm ci
+
+      # Everything that guards the app itself still has to pass before we
+      # spend twenty minutes bundling it.
+      - name: Test
+        shell: bash
+        run: |
+          npm test
+          cd src-tauri && cargo test --lib
+
+      # ─────────────────────────────────────────────────────────────────────
+      # Signing goes here. Deliberately inert rather than absent: tauri-action
+      # skips signing when these are empty, so enrolling in the Apple Developer
+      # Program is "add five secrets", not "rewrite the workflow".
+      #
+      #   APPLE_CERTIFICATE           base64 of the .p12
+      #   APPLE_CERTIFICATE_PASSWORD  its password
+      #   APPLE_SIGNING_IDENTITY      "Developer ID Application: NAME (TEAMID)"
+      #   APPLE_ID / APPLE_PASSWORD   app-specific password, for notarytool
+      #   APPLE_TEAM_ID               the team
+      #
+      # Windows signing would add WINDOWS_CERTIFICATE / _PASSWORD the same way.
+      # ─────────────────────────────────────────────────────────────────────
+      - uses: tauri-apps/tauri-action@v0
+        id: tauri
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          args: ${{ matrix.args }}
+          # Only on a tag. A dispatch build is a check, and a check should not
+          # create releases.
+          tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+          releaseName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+          releaseDraft: true
+          prerelease: false
+          releaseBody: |
+            Unsigned build. Your OS will warn you before it opens.
+            See INSTALL.md for what the warning says and how to get past it.
+
+      # ── gates 2 and 3: is the artifact people download actually usable? ──
+      #
+      # Run against the installer's contents, not the build tree. On macOS the
+      # .app does not survive: the dmg bundler moves it inside the image and
+      # deletes it, so the disk image is the only thing left to check — which is
+      # the right thing to check anyway.
+      #
+      # Gate 2 (files are present) and gate 3 (it can speak) are one step here
+      # because the self-test does both, and does the second properly: it
+      # resolves resources from its own executable, so it reads the bundle
+      # rather than the checkout sitting next to it on the runner.
+      - name: Verify the installer — macOS
+        if: matrix.os == 'macos-14'
+        shell: bash
+        run: |
+          set -euo pipefail
+          dmg=$(find src-tauri/target -name "*.dmg" | head -1)
+          echo "dmg: $dmg"
+          mnt=$(hdiutil attach "$dmg" -nobrowse -readonly | grep -o '/Volumes/.*' | head -1)
+          trap 'hdiutil detach "$mnt" -quiet || true' EXIT
+          app="$mnt/Raw Footage, Real Story.app"
+          res="$app/Contents/Resources/resources"
+
+          ls -la "$res/kokoro/model_q8f16.onnx"
+          echo "voices: $(ls "$res/kokoro/voices"/*.bin | wc -l | tr -d ' ')"
+          [ -f "$res/lexicon/cmudict.dict" ] && [ -f "$res/lexicon/us_gold.json" ]
+
+          # Both slices must be there, or Intel users get an app that will not
+          # open and no message explaining why.
+          lipo -archs "$app/Contents/MacOS/raw-footage-real-story"
+          lipo -archs "$app/Contents/MacOS/raw-footage-real-story" | grep -q x86_64
+          lipo -archs "$app/Contents/MacOS/raw-footage-real-story" | grep -q arm64
+
+          "$app/Contents/MacOS/raw-footage-real-story" --selftest
+
+      - name: Verify the installer — Windows
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          exe=$(find src-tauri/target -name "raw-footage-real-story.exe" -not -path "*/deps/*" -not -path "*/build/*" | head -1)
+          echo "exe: $exe"
+          res="$(dirname "$exe")/resources"
+          ls -la "$res/kokoro/model_q8f16.onnx"
+          echo "voices: $(ls "$res/kokoro/voices"/*.bin | wc -l | tr -d ' ')"
+
+          # Whether ort links ONNX Runtime statically here is unverified — it is
+          # static on macOS, which says nothing about Windows. If a DLL exists it
+          # has to sit beside the exe, and the self-test is what proves it does.
+          echo "--- onnxruntime DLLs found ---"
+          find src-tauri/target -name "onnxruntime*.dll" 2>/dev/null | head -5 || true
+          echo "--- DLLs beside the exe ---"
+          ls "$(dirname "$exe")"/*.dll 2>/dev/null || echo "(none — statically linked)"
+
+          "$exe" --selftest
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ matrix.label }}
+          if-no-files-found: error
+          path: |
+            src-tauri/target/**/release/bundle/dmg/*.dmg
+            src-tauri/target/**/release/bundle/nsis/*.exe

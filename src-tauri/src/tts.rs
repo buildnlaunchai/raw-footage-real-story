@@ -671,3 +671,17 @@ pub fn narration_concat(
     write_wav(&out, &all).map_err(|e| TtsError::new("WAV_WRITE_FAILED", e))?;
     Ok(out.to_string_lossy().to_string())
 }
+
+/// One synthesis, with no app handle and no window.
+///
+/// The self-test needs the whole real path — resource lookup, ONNX session,
+/// phonemiser, inference — without a running Tauri app, because that is the
+/// difference between "the bundle contains files" and "the bundle works".
+pub fn synthesise_for_selftest(text: &str) -> Result<Vec<f32>, String> {
+    let ph = crate::g2p::text_to_phonemes(text);
+    if ph.phonemes.is_empty() {
+        return Err("phonemiser produced nothing — the lexicons did not load".into());
+    }
+    let mut session = load_session()?;
+    synthesize_with(&mut session, &ph.phonemes, "af_kore", 1.0)
+}

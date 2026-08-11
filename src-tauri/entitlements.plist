@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hardened-runtime entitlements.
+
+  Inert until the app is signed: an unsigned build ignores this file entirely.
+  It exists now so that enrolling in the Apple Developer Program is a matter of
+  adding secrets, not of discovering at notarisation time that the runtime
+  restrictions break inference.
+
+  Notarisation requires the hardened runtime, which forbids writable-executable
+  memory. ONNX Runtime generates code at load; without the JIT allowance it is
+  killed the first time it tries to speak — and that failure appears only in a
+  signed build, which is the worst moment to meet it.
+-->
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+  <!-- The app reads footage from wherever the user keeps it, chosen through a
+       file dialog. Without this a signed build can open a video and then not
+       read it. -->
+  <key>com.apple.security.files.user-selected.read-write</key>
+  <true/>
+</dict>
+</plist>

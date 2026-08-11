@@ -91,6 +91,49 @@ const EXTRA_DIRS: &[&str] = &[
     r"C:\Program Files\ffmpeg\bin",
     r"C:\ProgramData\chocolatey\bin",
 ];
+
+/// Where Windows package managers actually put ffmpeg.
+///
+/// The static list above covers a manual unzip and Chocolatey. It misses both
+/// of the tools people are most likely to use, which mattered because the setup
+/// screen told them to run winget and then could not find what winget installed:
+///
+/// - **winget** shims into `%LOCALAPPDATA%\Microsoft\WinGet\Links`, and puts
+///   the real binary under `…\WinGet\Packages\<id>\ffmpeg-<version>\bin` —
+///   a path with a version in it, so it has to be searched rather than named.
+/// - **scoop** shims into `%USERPROFILE%\scoop\shims`.
+///
+/// Home-relative and version-dependent, so this cannot be a list of constants.
+#[cfg(target_os = "windows")]
+fn user_install_dirs() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        let winget = PathBuf::from(&local).join("Microsoft").join("WinGet");
+        out.push(winget.join("Links"));
+
+        // Packages/<publisher.package>/<ffmpeg-N.N-full_build>/bin — two levels
+        // of directory whose names carry a version, so walk rather than guess.
+        if let Ok(pkgs) = std::fs::read_dir(winget.join("Packages")) {
+            for pkg in pkgs.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()) {
+                if let Ok(inner) = std::fs::read_dir(pkg.path()) {
+                    for d in inner.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()) {
+                        out.push(d.path().join("bin"));
+                        out.push(d.path());
+                    }
+                }
+            }
+        }
+    }
+    if let Ok(home) = std::env::var("USERPROFILE") {
+        out.push(PathBuf::from(&home).join("scoop").join("shims"));
+    }
+    out
+}
+
+#[cfg(not(target_os = "windows"))]
+fn user_install_dirs() -> Vec<PathBuf> {
+    Vec::new()
+}
 #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 const EXTRA_DIRS: &[&str] = &["/usr/bin", "/usr/local/bin", "/snap/bin"];
 
@@ -134,6 +177,9 @@ fn candidates(stem: &str) -> Vec<PathBuf> {
         for dir in std::env::split_paths(&path) {
             push(dir.join(&exe));
         }
+    }
+    for dir in user_install_dirs() {
+        push(dir.join(&exe));
     }
     for dir in EXTRA_DIRS {
         push(Path::new(dir).join(&exe));

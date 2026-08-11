@@ -1,3 +1,4 @@
+mod selftest;
 mod assembly;
 mod elevenlabs;
 mod assembly_tests;
@@ -19,6 +20,13 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Before any window: a build that cannot find its own resources should say
+    // so on a CI runner, not on a stranger's laptop.
+    if std::env::args().any(|a| a == "--selftest") {
+        std::process::exit(selftest::run());
+    }
+
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -29,6 +37,11 @@ pub fn run() {
             // the crate directory in that case.
             if let Ok(dir) = app.path().resource_dir() {
                 resources::init(dir.join("resources"));
+            }
+            // Loud on stderr rather than silent until first use. A packaging
+            // mistake is not the user's to diagnose from "synthesis failed".
+            if let Some(problem) = resources::problem() {
+                eprintln!("resources unusable: {problem}");
             }
             Ok(())
         })
