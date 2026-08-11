@@ -85,6 +85,22 @@ its timeline.
     "posterPath": "/…/projects/<id>/poster.jpg"
   },
 
+  // Every generation, kept. Regenerating used to overwrite, so comparing two
+  // attempts meant remembering the first. Additive and defaulted, so projects
+  // written before takes existed load unchanged — schemaVersion stays 2.
+  "takes": [
+    {
+      "id": "uuid", "kind": "script | voice | render",
+      "createdAt": "…", "label": "6 lines · 107 words",
+      "detail": "Bengali · emotional · OpenAI (cloud)",
+      "lines": [ { "clipId": "…", "segmentIndex": 0, "text": "…" } ],
+      "audio": [ { "…": "…", "audioPath": "…", "durationMs": 4200 } ],
+      // Only render takes own a file, and only they delete one when removed.
+      "videoPath": "/…/render/cut-<takeId>.mp4",
+      "durationMs": 117700
+    }
+  ],
+
   // The clip library. Described once, reused by every video.
   "clips": [
     {

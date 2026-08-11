@@ -10,6 +10,18 @@ import { ProviderPicker } from "./components/ProviderPicker";
 import { LibrarySidebar, type LibraryView } from "./components/LibrarySidebar";
 import { VideoTable } from "./components/VideoTable";
 import { ClipDescriber } from "./components/ClipDescriber";
+import { SettingsPanel } from "./components/SettingsPanel";
+import { TakeHistory } from "./components/TakeHistory";
+import {
+  addTake,
+  deleteTake,
+  listTakes,
+  renderTake,
+  scriptTake,
+  voiceTake,
+  type Take,
+} from "./lib/takes";
+import { getWritingInstructions, SCRIPT_PROVIDERS } from "./lib/scriptProviders";
 import { FilterIcon, SaveIcon, SearchIcon, SortIcon } from "./components/Icons";
 import {
   allowMedia,
@@ -62,6 +74,7 @@ import { audioUrl, concatNarration } from "./lib/voiceover";
 import {
   characterCount,
   providerFor,
+  PROVIDERS,
   type LineFailure,
   type ProviderId,
   type SynthProgress,
@@ -132,6 +145,14 @@ function App() {
   /** The recorded lines joined end to end, for hearing the script whole. */
   const [fullNarration, setFullNarration] = useState<string | null>(null);
   const [joining, setJoining] = useState(false);
+
+  /** Kept generations, and which of each kind is loaded. */
+  const [takes, setTakes] = useState<Take[]>([]);
+  const [currentScriptTake, setCurrentScriptTake] = useState<string | null>(null);
+  const [currentVoiceTake, setCurrentVoiceTake] = useState<string | null>(null);
+  const [currentRenderTake, setCurrentRenderTake] = useState<string | null>(null);
+  /** The Settings override, read once and passed to every composition. */
+  const [instructions, setInstructions] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const [sortBy, setSortBy] = useState<"added" | "name" | "duration" | "described">("added");
   const [filterProject, setFilterProject] = useState<string>("");
@@ -569,6 +590,7 @@ function App() {
         critique,
         provider: scriptProvider,
         qualityTier,
+        instructions: instructions ?? undefined,
         onProgress: setComposeProgress,
       });
       setLines(draft.lines);
@@ -578,6 +600,15 @@ function App() {
       setVoiced(null);
       setAssembly(null);
       setDirty(true);
+
+      // Kept before anything can overwrite it, so regenerating compares rather
+      // than replaces.
+      const take = scriptTake(
+        draft.lines,
+        `${scriptLanguage.label} · ${style} · ${SCRIPT_PROVIDERS[scriptProvider].label}`,
+      );
+      setTakes(await addTake(manifest.project.id, take));
+      setCurrentScriptTake(take.id);
     } catch (err) {
       setComposeError(errorText(err));
     } finally {
@@ -617,6 +648,14 @@ function App() {
       setVoiced(result.lines.length > 0 ? result.lines : null);
       setVoiceStamp({ providerId, voiceId: voice, language, pronunciations });
       setFullNarration(null);
+      if (result.lines.length > 0 && projectId) {
+        const take = voiceTake(
+          result.lines,
+          `${PROVIDERS[providerId].label} · ${voice} · ${scriptLanguage.label}`,
+        );
+        setTakes(await addTake(projectId, take));
+        setCurrentVoiceTake(take.id);
+      }
       setFailures(result.failures);
       setAssembly(null);
       setDirty(true);
@@ -772,6 +811,9 @@ function App() {
     if (!voiced || !manifest) return;
     setAssemblyBusy(true);
     setAssemblyError(null);
+    // Fixed up front: it names the output file, so the take and the mp4 it
+    // owns cannot end up pointing at different things.
+    const takeId = crypto.randomUUID();
     try {
       // Clip specs describe the media; segment offsets travel per line, so a
       // clip used twice at different moments gets two independent starts.
@@ -797,6 +839,7 @@ function App() {
         voice,
         createdAt: manifest.project.createdAt,
         videoId: "video-1",
+        takeId,
         videoTitle: title,
         segmentStarts,
         crossfadeMs,
@@ -806,6 +849,17 @@ function App() {
       setAssembly(result);
       // Stamp what this cut was made from, so a later edit can be seen.
       setRenderedSig(renderSignature(voiced, crossfadeMs, musicId));
+
+      const take = renderTake(
+        takeId,
+        result.videoPath,
+        result.durationMs,
+        `${crossfadeMs > 0 ? "crossfade" : "hard cuts"} · ${
+          musicId ? (MUSIC_BEDS.find((m) => m.id === musicId)?.label ?? musicId) : "no music"
+        }`,
+      );
+      setTakes(await addTake(manifest.project.id, take));
+      setCurrentRenderTake(takeId);
     } catch (err) {
       setAssemblyError(errorText(err));
       setAssembly(null);
@@ -863,6 +917,7 @@ function App() {
   useEffect(() => {
     void refreshLibrary();
     void invoke<string>("machine_user").then(setUserName).catch(() => setUserName(""));
+    void getWritingInstructions().then(setInstructions);
   }, [refreshLibrary]);
 
   // --- render --------------------------------------------------------------
@@ -954,6 +1009,7 @@ function App() {
     projects: "Projects",
     all: "All Videos",
     project: manifest?.project.name ?? "Collection",
+    settings: "Settings",
   };
 
   /** Opening a collection is what puts the pipeline on screen. */
@@ -962,6 +1018,56 @@ function App() {
     setView("project");
     setTab("footage");
     setPage(1);
+    try {
+      setTakes(await listTakes(id));
+    } catch {
+      setTakes([]);
+    }
+  }
+
+  /** Put a kept generation back into the editor. */
+  async function onRestoreTake(take: Take) {
+    if (take.kind === "script") {
+      setLines(take.lines.map((l) => ({ ...l })));
+      setWords(
+        take.lines.reduce((n, l) => n + l.text.trim().split(/\s+/).filter(Boolean).length, 0),
+      );
+      setCurrentScriptTake(take.id);
+      // The recording and the cut belong to a different script now.
+      setVoiced(null);
+      setAssembly(null);
+      setFullNarration(null);
+      setDirty(true);
+    } else if (take.kind === "voice") {
+      setLines(take.lines.map((l) => ({ ...l })));
+      setVoiced(take.audio.map((a) => ({ ...a, speechEndMs: a.durationMs, skipped: [] })));
+      setCurrentVoiceTake(take.id);
+      // No stamp: this audio was made in an earlier session, and claiming to
+      // know what voice produced it would be a guess.
+      setVoiceStamp(null);
+      setAssembly(null);
+      setFullNarration(null);
+      setDirty(true);
+    } else if (take.videoPath) {
+      setAssembly((cur) =>
+        cur
+          ? { ...cur, videoPath: take.videoPath!, durationMs: take.durationMs ?? cur.durationMs }
+          : cur,
+      );
+      setCurrentRenderTake(take.id);
+    }
+  }
+
+  async function onDeleteTake(take: Take) {
+    if (!projectId) return;
+    try {
+      setTakes(await deleteTake(projectId, take.id));
+      if (take.id === currentRenderTake) setCurrentRenderTake(null);
+      if (take.id === currentScriptTake) setCurrentScriptTake(null);
+      if (take.id === currentVoiceTake) setCurrentVoiceTake(null);
+    } catch (err) {
+      setError(errorText(err));
+    }
   }
 
   // --- stage derivations (only meaningful with a project open) --------------
@@ -1152,6 +1258,17 @@ function App() {
           />
         ))}
 
+      {stage === "script" && !composing && (
+        <TakeHistory
+          kind="script"
+          takes={takes}
+          currentId={currentScriptTake}
+          busy={composing || ttsBusy}
+          onRestore={onRestoreTake}
+          onDelete={onDeleteTake}
+        />
+      )}
+
       {stage === "voice" &&
         (!lines ? (
           blocked("script")
@@ -1312,6 +1429,15 @@ function App() {
                 </div>
               </div>
             )}
+
+            <TakeHistory
+              kind="voice"
+              takes={takes}
+              currentId={currentVoiceTake}
+              busy={ttsBusy}
+              onRestore={onRestoreTake}
+              onDelete={onDeleteTake}
+            />
           </>
         ))}
 
@@ -1409,6 +1535,16 @@ function App() {
                 </div>
               </AssemblyPanel>
             )}
+
+            <TakeHistory
+              kind="render"
+              takes={takes}
+              currentId={currentRenderTake}
+              busy={assemblyBusy}
+              onRestore={onRestoreTake}
+              onDelete={onDeleteTake}
+              onPlay={onRestoreTake}
+            />
           </>
         ))}
     </>
@@ -1431,11 +1567,19 @@ function App() {
         refreshing={refreshing}
         storage={storage}
         userName={userName}
-        onOpenSettings={() => setView("projects")}
+        onOpenSettings={() => setView("settings")}
       />
 
       <main className="lib-main">
-        {view === "home" ? (
+        {view === "settings" ? (
+          <>
+            <header className="lib-head">
+              <h1>Settings</h1>
+              <span className="lib-head-count">how the script is written</span>
+            </header>
+            <SettingsPanel language={language} />
+          </>
+        ) : view === "home" ? (
           // Left empty on purpose, pending a decision about what belongs here.
           <div className="lib-home-empty" />
         ) : view === "projects" ? (

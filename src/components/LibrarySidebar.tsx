@@ -15,7 +15,7 @@ import { DocIcon, FilmIcon, FolderIcon, HomeIcon, RefreshIcon } from "./Icons";
  * collection rather than by a nav row of its own, because it only means
  * anything with a collection open.
  */
-export type LibraryView = "home" | "projects" | "all" | "project";
+export type LibraryView = "home" | "projects" | "all" | "project" | "settings";
 
 interface Props {
   view: LibraryView;

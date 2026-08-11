@@ -332,6 +332,9 @@ pub async fn assembly_render(
     created_at: String,
     updated_at: String,
     video_id: Option<String>,
+    // Names the output file, so each render is its own take rather than
+    // overwriting the last one.
+    take_id: Option<String>,
     video_title: Option<String>,
     crossfade_ms: Option<u32>,
     music_id: Option<String>,
@@ -438,7 +441,15 @@ pub async fn assembly_render(
         music_path,
         ..RenderSettings::default()
     };
-    let out = dir.join("render").join("rough-cut.mp4");
+    // One file per render. A fixed name meant every render destroyed the
+    // previous one, which is the thing takes exist to stop.
+    let stem: String = take_id
+        .as_deref()
+        .unwrap_or("rough-cut")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+    let out = dir.join("render").join(format!("cut-{stem}.mp4"));
     ffmpeg::render_rough_cut(&info.ffmpeg, &render_items, &settings, &info.caps, &out)?;
 
     // --- manifest -----------------------------------------------------------

@@ -202,3 +202,23 @@ export async function probeSampling(model: string): Promise<{
 }> {
   return invoke("openai_probe_sampling", { model });
 }
+
+// --- writing instructions ---------------------------------------------------
+//
+// The instruction given to the script writer, editable without a rebuild. The
+// Bengali register work was a code change for what is really a piece of
+// writing, and the person best placed to tune it is whoever speaks the
+// language — not whoever can rebuild the app.
+
+/** The stored override, or null when the built-in wording is in use. */
+export async function getWritingInstructions(): Promise<string | null> {
+  try {
+    return (await invoke<string | null>("writing_instructions_get")) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export async function setWritingInstructions(text: string | null): Promise<void> {
+  await invoke("writing_instructions_set", { instructions: text });
+}

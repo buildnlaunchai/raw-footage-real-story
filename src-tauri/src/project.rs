@@ -226,6 +226,40 @@ impl VideoProject {
     }
 }
 
+/// One generation, kept.
+///
+/// Regenerating used to overwrite: a new script replaced the old one, a new
+/// recording wrote over the same files, a new render replaced the mp4. Each is
+/// minutes of work and, for a cloud voice, money — and the only way to compare
+/// two attempts is to still have both.
+///
+/// One list with a `kind` rather than three, because the operations are the
+/// same — keep, restore, delete — and three near-copies would drift apart.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Take {
+    pub id: String,
+    /// "script" | "voice" | "render".
+    pub kind: String,
+    pub created_at: String,
+    /// One line describing this take, for the list.
+    pub label: String,
+    /// The narration as written. Present on script and voice takes.
+    #[serde(default)]
+    pub lines: Vec<ScriptLineRecord>,
+    /// Recorded audio, one entry per line. Present on voice takes.
+    #[serde(default)]
+    pub audio: Vec<AudioLineRecord>,
+    /// The rendered file. Present on render takes.
+    #[serde(default)]
+    pub video_path: Option<String>,
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+    /// What it was made with — voice, language, settings — for the list.
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectFile {
@@ -236,6 +270,10 @@ pub struct ProjectFile {
     pub clips: Vec<ProjectClip>,
     #[serde(default)]
     pub videos: Vec<VideoProject>,
+    /// Every generation, newest last. Additive and defaulted, so projects
+    /// written before takes existed load unchanged.
+    #[serde(default)]
+    pub takes: Vec<Take>,
 }
 
 impl ProjectFile {
@@ -255,6 +293,7 @@ impl ProjectFile {
             },
             clips: Vec::new(),
             videos: Vec::new(),
+            takes: Vec::new(),
         }
     }
 
@@ -367,6 +406,8 @@ fn migrate_v1(value: serde_json::Value) -> Result<ProjectFile, String> {
         project: meta,
         clips: out_clips,
         videos,
+        // A v1 project predates takes entirely; its single video is its history.
+        takes: Vec::new(),
     })
 }
 

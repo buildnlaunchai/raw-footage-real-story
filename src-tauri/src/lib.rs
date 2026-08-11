@@ -76,6 +76,11 @@ pub fn run() {
             store::allow_media,
             tts::narration_concat,
             assembly::save_video_as,
+            store::take_add,
+            store::take_delete,
+            store::take_list,
+            store::writing_instructions_get,
+            store::writing_instructions_set,
             store::machine_user
         ])
         .run(tauri::generate_context!())

@@ -171,6 +171,8 @@ export interface RenderOptions {
   createdAt: string;
   /** Which video within the project this render belongs to. */
   videoId?: string;
+  /** Names the output file, so each render is kept as its own take. */
+  takeId?: string;
   videoTitle?: string;
   /** `clipId#segmentIndex` -> where that segment starts in the clip. */
   segmentStarts?: Map<string, number>;
@@ -200,6 +202,7 @@ export async function renderRoughCut(
       createdAt: opts.createdAt,
       updatedAt: new Date().toISOString(),
       videoId: opts.videoId ?? null,
+      takeId: opts.takeId ?? null,
       videoTitle: opts.videoTitle ?? null,
       crossfadeMs: opts.crossfadeMs ?? 0,
       musicId: opts.musicId ?? null,

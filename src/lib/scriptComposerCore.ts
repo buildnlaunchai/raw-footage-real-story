@@ -205,6 +205,18 @@ const WRITE_SYSTEM_EN =
   "You never use the words beautiful, stunning, breathtaking, amazing or incredible; " +
   "they describe a reaction rather than the footage.";
 
+/**
+ * The instruction the writer is given.
+ *
+ * Exported so Settings can show exactly what will be sent. An override
+ * replaces it wholesale rather than being appended: a box that silently adds
+ * to hidden text cannot be reasoned about, and the point of exposing this is
+ * that what you read is what the model gets.
+ */
+export function defaultWritingInstructions(lang: ScriptLanguage): string {
+  return writeSystemFor(lang);
+}
+
 function writeSystemFor(lang: ScriptLanguage): string {
   if (lang.code === "en") return WRITE_SYSTEM_EN;
   return (
@@ -343,6 +355,8 @@ export interface ComposeOptions {
   critique?: boolean;
   seed?: number;
   onProgress?: (p: ComposeProgress) => void;
+  /** Replaces the built-in writing instruction, from Settings. */
+  instructions?: string;
 }
 
 /**
@@ -447,7 +461,7 @@ export async function writeScript(
 
   const raw = await generate({
     ...base,
-    system: writeSystemFor(lang),
+    system: options.instructions?.trim() || writeSystemFor(lang),
     format: SCRIPT_SCHEMA,
     prompt:
       preamble +
@@ -627,7 +641,7 @@ export async function composeScript(
       .map((l, i) => `${i + 1}. ${l.text}`)
       .join("\n");
     const raw = await generate({
-      system: writeSystemFor(lang),
+      system: options.instructions?.trim() || writeSystemFor(lang),
       temperature: 0.5,
       seed: options.seed,
       numCtx: NUM_CTX,

@@ -638,3 +638,104 @@ mod library_rows {
         assert_eq!(row.description, "");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Takes
+// ---------------------------------------------------------------------------
+
+/// Record a generation, so regenerating no longer destroys the last attempt.
+#[tauri::command]
+pub fn take_add(
+    app: AppHandle,
+    project_id: String,
+    take: project::Take,
+) -> Result<Vec<project::Take>, StoreError> {
+    let path = project_dir(&app, &project_id)?.join("project.json");
+    let mut manifest = load_from(&path)?;
+    manifest.takes.push(take);
+    save_to(&path, &manifest)?;
+    Ok(manifest.takes)
+}
+
+/// Forget a take, and the file it owns.
+///
+/// Only render takes own a file. Script and voice takes point at audio the
+/// current recording may still be using, so deleting one must not touch disk —
+/// that would silence a project to tidy up its history.
+#[tauri::command]
+pub fn take_delete(
+    app: AppHandle,
+    project_id: String,
+    take_id: String,
+) -> Result<Vec<project::Take>, StoreError> {
+    let path = project_dir(&app, &project_id)?.join("project.json");
+    let mut manifest = load_from(&path)?;
+
+    if let Some(t) = manifest.takes.iter().find(|t| t.id == take_id) {
+        if t.kind == "render" {
+            if let Some(v) = t.video_path.as_deref() {
+                let _ = std::fs::remove_file(v);
+            }
+        }
+    }
+    manifest.takes.retain(|t| t.id != take_id);
+    save_to(&path, &manifest)?;
+    Ok(manifest.takes)
+}
+
+#[tauri::command]
+pub fn take_list(app: AppHandle, project_id: String) -> Result<Vec<project::Take>, StoreError> {
+    let path = project_dir(&app, &project_id)?.join("project.json");
+    Ok(load_from(&path)?.takes)
+}
+
+// ---------------------------------------------------------------------------
+// Writing instructions
+// ---------------------------------------------------------------------------
+
+/// The instruction the script writer is given, editable without a rebuild.
+///
+/// The register work on Bengali was a code change for what is really a piece of
+/// writing. Keeping it in the source means every adjustment needs a developer,
+/// which is the wrong shape for the part of the app most likely to need
+/// tuning by whoever speaks the language.
+#[tauri::command]
+pub fn writing_instructions_get(app: AppHandle) -> Option<String> {
+    settings_file(&app)
+        .and_then(|p| std::fs::read(p).ok())
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .and_then(|v| v["scriptInstructions"].as_str().map(str::to_string))
+        .filter(|s| !s.trim().is_empty())
+}
+
+/// Store, or clear with `None` to go back to the built-in wording.
+#[tauri::command]
+pub fn writing_instructions_set(
+    app: AppHandle,
+    instructions: Option<String>,
+) -> Result<(), StoreError> {
+    let path = settings_file(&app)
+        .ok_or_else(|| StoreError::new("NO_APP_DIR", "No settings location."))?;
+    // Read-modify-write the whole file: the ffmpeg paths live here too, and
+    // replacing it wholesale would forget them.
+    let mut doc: serde_json::Value = std::fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    match instructions.filter(|s| !s.trim().is_empty()) {
+        Some(v) => doc["scriptInstructions"] = serde_json::json!(v),
+        None => {
+            if let Some(o) = doc.as_object_mut() {
+                o.remove("scriptInstructions");
+            }
+        }
+    }
+    std::fs::write(&path, serde_json::to_vec_pretty(&doc).unwrap_or_default())
+        .map_err(|e| StoreError::new("SAVE_FAILED", e.to_string()))
+}
+
+fn settings_file(app: &AppHandle) -> Option<PathBuf> {
+    let dir = app.path().app_data_dir().ok()?;
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.join("settings.json"))
+}
