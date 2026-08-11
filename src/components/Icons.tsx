@@ -231,6 +231,15 @@ export function DocIcon({ size = 18 }: IconProps) {
   );
 }
 
+export function RefreshIcon({ size = 16 }: IconProps) {
+  return (
+    <Svg size={size}>
+      <path d="M20 11a8 8 0 1 0-.9 4.7" {...stroke} />
+      <path d="M20 5v6h-6" {...stroke} />
+    </Svg>
+  );
+}
+
 /** The stage icons, in pipeline order. */
 export const STAGE_ICONS = {
   footage: FilmIcon,

@@ -6,7 +6,7 @@
  */
 import { formatBytes, tagHue, type StorageUsage } from "../lib/library";
 import type { ProjectSummary } from "../lib/project";
-import { DocIcon, FilmIcon, FolderIcon, HomeIcon } from "./Icons";
+import { DocIcon, FilmIcon, FolderIcon, HomeIcon, RefreshIcon } from "./Icons";
 
 /**
  * Sidebar destinations.
@@ -25,6 +25,9 @@ interface Props {
   openProjectId: string | null;
   onOpenProject: (id: string) => void;
   onNewProject: () => void;
+  /** Re-read projects and storage from disk. */
+  onRefresh: () => void;
+  refreshing: boolean;
   storage: StorageUsage | null;
   /** Whose machine this is. There are no accounts; this is the OS user. */
   userName: string;
@@ -45,6 +48,8 @@ export function LibrarySidebar({
   openProjectId,
   onOpenProject,
   onNewProject,
+  onRefresh,
+  refreshing,
   storage,
   userName,
   onOpenSettings,
@@ -84,15 +89,29 @@ export function LibrarySidebar({
 
       <div className="lib-side-head">
         <span>Collections</span>
-        <button
-          type="button"
-          className="lib-add"
-          onClick={onNewProject}
-          title="New project"
-          aria-label="New project"
-        >
-          +
-        </button>
+        <span className="lib-side-tools">
+          <button
+            type="button"
+            className="lib-add"
+            onClick={onRefresh}
+            disabled={refreshing}
+            title="Re-read projects from disk"
+            aria-label="Refresh collections"
+          >
+            <span className={refreshing ? "is-spinning" : undefined}>
+              <RefreshIcon size={13} />
+            </span>
+          </button>
+          <button
+            type="button"
+            className="lib-add"
+            onClick={onNewProject}
+            title="New project"
+            aria-label="New project"
+          >
+            +
+          </button>
+        </span>
       </div>
 
       <ul className="lib-nav">

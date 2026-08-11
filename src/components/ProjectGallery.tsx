@@ -12,7 +12,6 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   clearPoster,
   deleteProject,
-  listProjects,
   setPosterFromFrame,
   setPosterFromImage,
   type ProjectSummary,
@@ -21,6 +20,16 @@ import { audioUrl } from "../lib/voiceover";
 import { PlayIcon, SearchIcon } from "./Icons";
 
 interface Props {
+  /**
+   * Owned by the app, not by this screen.
+   *
+   * The gallery used to load and delete from its own copy, which is how
+   * deleting a project here left it listed in the sidebar: two lists of the
+   * same fact, and only one of them was told.
+   */
+  projects: ProjectSummary[];
+  /** Re-read projects, storage and the clip library after a change here. */
+  onRefresh: () => void | Promise<void>;
   onCreate: (name: string) => void;
   onOpen: (id: string) => void;
   busy: boolean;
@@ -37,10 +46,15 @@ function when(iso: string): string {
   return new Date(t).toLocaleDateString();
 }
 
-export function ProjectGallery({ onCreate, onOpen, busy, error }: Props) {
-  const [projects, setProjects] = useState<ProjectSummary[]>([]);
+export function ProjectGallery({
+  projects,
+  onRefresh,
+  onCreate,
+  onOpen,
+  busy,
+  error,
+}: Props) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [listError, setListError] = useState<string | null>(null);
   const [posterError, setPosterError] = useState<string | null>(null);
   const [naming, setNaming] = useState(false);
   const [name, setName] = useState("");
@@ -52,18 +66,17 @@ export function ProjectGallery({ onCreate, onOpen, busy, error }: Props) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
   async function refresh(keep?: string) {
-    try {
-      const list = await listProjects();
-      setProjects(list);
-      setSelectedId((cur) => keep ?? cur ?? list[0]?.id ?? null);
-    } catch (err) {
-      setListError(err instanceof Error ? err.message : String(err));
-    }
+    await onRefresh();
+    if (keep) setSelectedId(keep);
   }
 
+  // Follow the list: a selection that was deleted elsewhere should not linger,
+  // and an empty selection should land on something.
   useEffect(() => {
-    void refresh();
-  }, []);
+    setSelectedId((cur) =>
+      cur && projects.some((p) => p.id === cur) ? cur : (projects[0]?.id ?? null),
+    );
+  }, [projects]);
 
   const shown = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -272,9 +285,9 @@ export function ProjectGallery({ onCreate, onOpen, busy, error }: Props) {
             </>
           )}
 
-          {(error || listError) && (
+          {error && (
             <p className="gallery-error" role="alert">
-              {error ?? listError}
+              {error}
             </p>
           )}
         </div>
@@ -367,7 +380,7 @@ export function ProjectGallery({ onCreate, onOpen, busy, error }: Props) {
                     onClick={async () => {
                       await deleteProject(p.id);
                       if (selectedId === p.id) setSelectedId(null);
-                      void refresh();
+                      void onRefresh();
                     }}
                   >
                     ×

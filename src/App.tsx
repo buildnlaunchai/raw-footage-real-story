@@ -161,6 +161,7 @@ function App() {
   const [storage, setStorage] = useState<StorageUsage | null>(null);
   const [userName, setUserName] = useState("");
   const [savingRows, setSavingRows] = useState<Set<string>>(new Set());
+  const [refreshing, setRefreshing] = useState(false);
   const [page, setPage] = useState(1);
   const [sortBy, setSortBy] = useState<"added" | "name" | "duration" | "described">("added");
   const [filterProject, setFilterProject] = useState<string>("");
@@ -354,10 +355,17 @@ function App() {
     setBusy(true);
     setError(null);
     try {
-      setManifest(await createProject(name));
+      const created = await createProject(name);
+      setManifest(created);
       setSplitting(null);
       resetVideoState();
       setDirty(false);
+      // The sidebar reads the project list, so a new collection has to be
+      // announced or it will not appear until something else refreshes.
+      await refreshLibraryRef.current?.();
+      // A new collection is empty; opening it lands where footage is added.
+      setView("project");
+      setTab("footage");
     } catch (err) {
       setError(errorText(err));
     } finally {
@@ -831,6 +839,7 @@ function App() {
   // --- library -------------------------------------------------------------
 
   const refreshLibrary = useCallback(async () => {
+    setRefreshing(true);
     try {
       const [clips, list, usage] = await Promise.all([
         listLibrary(),
@@ -840,8 +849,14 @@ function App() {
       setLibrary(clips);
       setProjects(list);
       setStorage(usage);
+
+      // A project deleted from disk — here or in Finder — must not stay open,
+      // or the stages keep working on something that is no longer there.
+      setManifest((m) => (m && !list.some((p) => p.id === m.project.id) ? null : m));
     } catch (err) {
       setError(errorText(err));
+    } finally {
+      setRefreshing(false);
     }
   }, []);
 
@@ -1364,6 +1379,8 @@ function App() {
         openProjectId={manifest?.project.id ?? null}
         onOpenProject={openProjectById}
         onNewProject={() => setView("projects")}
+        onRefresh={() => void refreshLibrary()}
+        refreshing={refreshing}
         storage={storage}
         userName={userName}
         onOpenSettings={() => setView("projects")}
@@ -1375,6 +1392,8 @@ function App() {
           <div className="lib-home-empty" />
         ) : view === "projects" ? (
           <ProjectGallery
+            projects={projects}
+            onRefresh={refreshLibrary}
             onCreate={onCreate}
             onOpen={async (id) => {
               await onOpen(id);

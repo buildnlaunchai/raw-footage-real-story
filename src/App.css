@@ -2505,3 +2505,30 @@ kbd {
 .lib-home-empty {
   min-height: 60vh;
 }
+
+.lib-side-tools {
+  display: flex;
+  gap: 0.3rem;
+}
+
+.lib-add:disabled {
+  opacity: 0.45;
+  cursor: progress;
+}
+
+.lib-add .is-spinning {
+  display: flex;
+  animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lib-add .is-spinning {
+    animation: none;
+  }
+}
