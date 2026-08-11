@@ -739,3 +739,69 @@ fn settings_file(app: &AppHandle) -> Option<PathBuf> {
     std::fs::create_dir_all(&dir).ok()?;
     Some(dir.join("settings.json"))
 }
+
+#[cfg(test)]
+mod take_payloads {
+    use super::*;
+
+    /// The take payloads the frontend sends must deserialize.
+    ///
+    /// These are copied from `src/lib/takes.ts`. The field names are Rust's —
+    /// `path`, not `audioPath`; `skippedWords`, which has no default — and
+    /// guessing them meant serde rejected the whole payload at the moment a
+    /// recording finished, so the recording appeared to fail. A command called
+    /// across a language boundary has a contract, and this is where it is
+    /// checked rather than in a manual run.
+    #[test]
+    fn a_voice_take_from_the_frontend_deserializes() {
+        let json = serde_json::json!({
+            "id": "3f1c",
+            "kind": "voice",
+            "createdAt": "2026-08-12T00:00:00Z",
+            "label": "11 lines · 61.4s",
+            "detail": "ElevenLabs (cloud) · CwhR · Bengali",
+            "lines": [
+                { "clipId": "c1", "segmentIndex": 0, "text": "eta holo amader hotel", "edited": false }
+            ],
+            "audio": [
+                {
+                    "clipId": "c1",
+                    "segmentIndex": 0,
+                    "path": "/tmp/line-01.wav",
+                    "durationMs": 4200,
+                    "skippedWords": []
+                }
+            ],
+            "videoPath": serde_json::Value::Null,
+            "durationMs": serde_json::Value::Null
+        });
+        let take: project::Take = serde_json::from_value(json).expect("voice take");
+        assert_eq!(take.audio.len(), 1);
+        assert_eq!(take.audio[0].path, "/tmp/line-01.wav");
+        assert_eq!(take.lines[0].text, "eta holo amader hotel");
+    }
+
+    #[test]
+    fn script_and_render_takes_deserialize() {
+        let script = serde_json::json!({
+            "id": "a", "kind": "script", "createdAt": "2026-08-12T00:00:00Z",
+            "label": "11 lines · 151 words", "detail": "Bengali · emotional",
+            "lines": [{ "clipId": "c1", "segmentIndex": 0, "text": "hi", "edited": false }],
+            "audio": [], "videoPath": serde_json::Value::Null,
+            "durationMs": serde_json::Value::Null
+        });
+        let t: project::Take = serde_json::from_value(script).expect("script take");
+        assert_eq!(t.kind, "script");
+        assert!(t.audio.is_empty());
+
+        let render = serde_json::json!({
+            "id": "b", "kind": "render", "createdAt": "2026-08-12T00:00:00Z",
+            "label": "117.7s cut", "detail": "hard cuts · no music",
+            "lines": [], "audio": [],
+            "videoPath": "/tmp/cut-b.mp4", "durationMs": 117_700
+        });
+        let t: project::Take = serde_json::from_value(render).expect("render take");
+        assert_eq!(t.video_path.as_deref(), Some("/tmp/cut-b.mp4"));
+        assert_eq!(t.duration_ms, Some(117_700));
+    }
+}

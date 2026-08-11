@@ -1040,7 +1040,22 @@ function App() {
       setDirty(true);
     } else if (take.kind === "voice") {
       setLines(take.lines.map((l) => ({ ...l })));
-      setVoiced(take.audio.map((a) => ({ ...a, speechEndMs: a.durationMs, skipped: [] })));
+      // The spoken words live on `lines`; `audio` carries only the files. A
+      // recording restored without its script is audio nothing can address.
+      const said = new Map(
+        take.lines.map((l) => [`${l.clipId}#${l.segmentIndex}`, l.text]),
+      );
+      setVoiced(
+        take.audio.map((a) => ({
+          clipId: a.clipId,
+          segmentIndex: a.segmentIndex,
+          text: said.get(`${a.clipId}#${a.segmentIndex}`) ?? "",
+          audioPath: a.path,
+          durationMs: a.durationMs,
+          speechEndMs: a.durationMs,
+          skipped: a.skippedWords ?? [],
+        })),
+      );
       setCurrentVoiceTake(take.id);
       // No stamp: this audio was made in an earlier session, and claiming to
       // know what voice produced it would be a guess.

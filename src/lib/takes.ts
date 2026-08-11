@@ -16,13 +16,21 @@ export interface Take {
   kind: TakeKind;
   createdAt: string;
   label: string;
-  lines: { clipId: string; segmentIndex: number; text: string }[];
+  /** Mirrors Rust's ScriptLineRecord exactly; the names are not ours to pick. */
+  lines: { clipId: string; segmentIndex: number; text: string; edited: boolean }[];
+  /**
+   * Mirrors Rust's AudioLineRecord.
+   *
+   * Note `path`, not `audioPath`, and `skippedWords` is required. Guessing
+   * these was the bug: serde rejected the payload and the whole recording
+   * failed at the point it was being saved.
+   */
   audio: {
     clipId: string;
     segmentIndex: number;
-    text: string;
-    audioPath: string;
+    path: string;
     durationMs: number;
+    skippedWords: string[];
   }[];
   videoPath: string | null;
   durationMs: number | null;
@@ -66,6 +74,7 @@ export function scriptTake(lines: ScriptLineDraft[], detail: string): Take {
       clipId: l.clipId,
       segmentIndex: l.segmentIndex,
       text: l.text,
+      edited: false,
     })),
   };
 }
@@ -80,13 +89,14 @@ export function voiceTake(voiced: VoicedLine[], detail: string): Take {
       clipId: v.clipId,
       segmentIndex: v.segmentIndex,
       text: v.text,
+      edited: false,
     })),
     audio: voiced.map((v) => ({
       clipId: v.clipId,
       segmentIndex: v.segmentIndex,
-      text: v.text,
-      audioPath: v.audioPath,
+      path: v.audioPath,
       durationMs: v.durationMs,
+      skippedWords: v.skipped ?? [],
     })),
   };
 }
