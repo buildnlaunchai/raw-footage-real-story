@@ -173,6 +173,12 @@ mod tests {
         })
     }
 
+    /// Needs a running Ollama with the model pulled.
+    ///
+    /// `#[ignore]` for the same reason the OpenAI and ElevenLabs tests are: it
+    /// asserts against a service, so on a machine without one it reports the
+    /// machine rather than the code. Run with `--ignored` when Ollama is up.
+    #[ignore = "needs a running Ollama"]
     #[tokio::test]
     async fn generates_one_sentence_per_clip() {
         let clips = [
@@ -223,6 +229,7 @@ mod tests {
         }
     }
 
+    #[ignore = "needs a running Ollama"]
     #[tokio::test]
     async fn missing_model_is_reported_as_model_not_found() {
         let err = ollama_generate(
