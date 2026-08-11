@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 
@@ -108,40 +108,6 @@ function errorText(err: unknown): string {
   return String(err);
 }
 
-/**
- * Re-derive a table row from a clip edit.
- *
- * The row is a flattened view of a clip, so an edit made in memory has to be
- * flattened the same way rather than waiting for a re-read from disk.
- */
-function libraryFrom(row: LibraryClip, edit: (c: ProjectClip) => ProjectClip): LibraryClip {
-  const asClip: ProjectClip = {
-    id: row.clipId,
-    sourcePath: row.sourcePath,
-    sha256: null,
-    sourceDurationMs: row.durationMs,
-    isPlaceholder: row.isPlaceholder,
-    fileName: row.fileName,
-    thumbnailPath: row.thumbnailPath,
-    isHdr: row.isHdr,
-    width: row.width,
-    height: row.height,
-    codec: row.codec,
-    favorite: row.favorite,
-    deletedAt: row.deletedAt,
-    segments: [],
-  };
-  const next = edit(asClip);
-  return {
-    ...row,
-    favorite: next.favorite ?? row.favorite,
-    deletedAt: next.deletedAt ?? null,
-    description: next.segments.map((sg) => sg.text.trim()).filter(Boolean).join(" ") ||
-      (next.segments.length === 0 ? "" : row.description),
-    segmentCount: next.segments.length || row.segmentCount,
-  };
-}
-
 function App() {
   // --- shell ---------------------------------------------------------------
   const [stage, setStage] = useState<StageId>("footage");
@@ -173,6 +139,8 @@ function App() {
    * reordering them would put the loader above the state it reads.
    */
   const refreshLibraryRef = useRef<(() => Promise<void>) | null>(null);
+  /** Latest manifest, for callbacks that must not close over a stale one. */
+  const manifestRef = useRef<ProjectFile | null>(null);
 
   /**
    * What the current narration was recorded with, and what the current cut was
@@ -481,55 +449,61 @@ function App() {
 
   // --- import --------------------------------------------------------------
 
-  const applyImport = useCallback((results: ImportedMedia[]) => {
-    setRejected(results.filter((r) => r.verdict === "rejected"));
-    const usable = results.filter((r) => r.verdict !== "rejected");
-    if (usable.length === 0) return;
-    setManifest((m) => {
-      if (!m) return m;
-      // Grown as the batch is walked, not just seeded from the manifest: the
-      // same file picked twice in one import used to pass this filter twice,
-      // because `existing` never learned about the first copy.
-      const existing = new Set(m.clips.map((c) => c.sourcePath));
-      const added: ProjectClip[] = usable
-        .filter((r) => !existing.has(r.sourcePath) && existing.add(r.sourcePath) !== null)
-        .map((r) => ({
-          id: crypto.randomUUID(),
-          sourcePath: r.sourcePath,
-          sha256: null,
-          sourceDurationMs: r.info?.durationMs ?? null,
-          isPlaceholder: false,
-          fileName: r.fileName,
-          thumbnailPath: r.thumbnailPath,
-          isHdr: r.info?.isHdr ?? false,
-          width: r.info?.width ?? null,
-          height: r.info?.height ?? null,
-          codec: r.info?.codec ?? null,
-          favorite: false,
-          deletedAt: null,
-          segments: [],
-        }));
-      return added.length === 0 ? m : { ...m, clips: [...m.clips, ...added] };
-    });
-    setDirty(true);
-  }, []);
-
   const runImport = useCallback(
     async (paths: string[]) => {
       if (paths.length === 0 || !projectId) return;
       setImporting(true);
       setError(null);
       try {
-        applyImport(await importMedia(paths, projectId));
-        // The table reads the library, not the manifest, so it has to be told.
-        void refreshLibraryRef.current?.();
+        const results = await importMedia(paths, projectId);
+        setRejected(results.filter((r) => r.verdict === "rejected"));
+        const usable = results.filter((r) => r.verdict !== "rejected");
+
+        const current = manifestRef.current;
+        if (!current || usable.length === 0) return;
+
+        // Grown as the batch is walked, not just seeded from the manifest: the
+        // same file picked twice in one import used to pass this filter twice,
+        // because the set never learned about the first copy.
+        const seen = new Set(current.clips.map((c) => c.sourcePath));
+        const added: ProjectClip[] = usable
+          .filter((r) => !seen.has(r.sourcePath) && seen.add(r.sourcePath) !== null)
+          .map((r) => ({
+            id: crypto.randomUUID(),
+            sourcePath: r.sourcePath,
+            sha256: null,
+            sourceDurationMs: r.info?.durationMs ?? null,
+            isPlaceholder: false,
+            fileName: r.fileName,
+            thumbnailPath: r.thumbnailPath,
+            isHdr: r.info?.isHdr ?? false,
+            width: r.info?.width ?? null,
+            height: r.info?.height ?? null,
+            codec: r.info?.codec ?? null,
+            favorite: false,
+            deletedAt: null,
+            segments: [],
+          }));
+        if (added.length === 0) return;
+
+        const next = { ...current, clips: [...current.clips, ...added] };
+        setManifest(next);
+
+        // Written straight away rather than left dirty. Importing already put
+        // thumbnails in the project folder, and the sidebar's clip counts come
+        // from disk — leaving this unsaved meant the table showed footage the
+        // collection beside it still counted as zero.
+        await saveProject(next);
+        setDirty(false);
+        setSavedAt(new Date().toLocaleTimeString());
+        await refreshLibraryRef.current?.();
       } catch (err) {
         setError(errorText(err));
       } finally {
         setImporting(false);
       }
     },
-    [projectId, applyImport],
+    [projectId],
   );
 
   async function pickFiles(): Promise<string[]> {
@@ -861,6 +835,7 @@ function App() {
   }, []);
 
   refreshLibraryRef.current = refreshLibrary;
+  manifestRef.current = manifest;
 
   useEffect(() => {
     void refreshLibrary();
@@ -893,14 +868,6 @@ function App() {
             : m,
         );
         setDirty(true);
-        // Reflect it in the table without a round trip to disk.
-        setLibrary((ls) =>
-          ls.map((l) =>
-            l.projectId === clip.projectId && l.clipId === clip.clipId
-              ? libraryFrom(l, inMemory)
-              : l,
-          ),
-        );
       } else {
         await onDisk();
         await refreshLibrary();
@@ -926,10 +893,47 @@ function App() {
   // component rather than two: describing a clip is the same act whether you
   // arrived at it from the library or from inside a project, and a second
   // editor would be a second place for the two to disagree.
+  /**
+   * The library, with the open collection served from memory.
+   *
+   * `library` is read from disk. The open collection's clips live in the
+   * manifest until they are saved, so a freshly imported clip existed in state
+   * and not in the table — the import worked and looked like it had not. One
+   * derived list rather than a mirror kept in step by hand: whichever copy is
+   * newer is the one the table shows, by construction.
+   */
+  const liveLibrary = useMemo(() => {
+    if (!manifest) return library;
+    const others = library.filter((c) => c.projectId !== manifest.project.id);
+    const mine: LibraryClip[] = manifest.clips.map((c) => ({
+      projectId: manifest.project.id,
+      projectName: manifest.project.name,
+      clipId: c.id,
+      fileName: c.fileName ?? c.sourcePath?.split("/").pop() ?? "Untitled clip",
+      sourcePath: c.sourcePath,
+      thumbnailPath: c.thumbnailPath,
+      durationMs: c.sourceDurationMs,
+      width: c.width ?? null,
+      height: c.height ?? null,
+      codec: c.codec ?? null,
+      isPlaceholder: c.isPlaceholder,
+      isHdr: c.isHdr,
+      favorite: c.favorite ?? false,
+      deletedAt: c.deletedAt ?? null,
+      description: c.segments
+        .map((sg) => sg.text.trim())
+        .filter(Boolean)
+        .join(" "),
+      segmentCount: c.segments.length,
+      addedAt: manifest.project.createdAt,
+    }));
+    return [...others, ...mine];
+  }, [library, manifest]);
+
   const onFootageTab = view === "project" && tab === "footage";
   const baseRows = onFootageTab
-    ? library.filter((c) => c.projectId === manifest?.project.id && !c.deletedAt)
-    : library
+    ? liveLibrary.filter((c) => c.projectId === manifest?.project.id && !c.deletedAt)
+    : liveLibrary
         .filter((c) => !c.deletedAt)
         .filter((c) => !filterProject || c.projectId === filterProject);
 
@@ -960,7 +964,7 @@ function App() {
   const safePage = Math.min(page, pageCount);
   const pageRows = tableRows.slice((safePage - 1) * PER_PAGE, safePage * PER_PAGE);
 
-  const counts = { all: library.filter((c) => !c.deletedAt).length };
+  const counts = { all: liveLibrary.filter((c) => !c.deletedAt).length };
 
   const VIEW_TITLE: Record<LibraryView, string> = {
     home: "Home",
@@ -1544,9 +1548,13 @@ function App() {
               <div className="lib-table-wrap">
                 {pageRows.length === 0 ? (
                   <p className="lib-empty">
-                    {library.length === 0
-                      ? "No footage yet. Open a collection to import some."
-                      : "Nothing matches that."}
+                    {onFootageTab
+                      ? baseRows.length === 0
+                        ? "Nothing in this collection yet. Use “+ Add footage”."
+                        : "Nothing matches that."
+                      : liveLibrary.length === 0
+                        ? "No footage yet. Open a collection and add some."
+                        : "Nothing matches that."}
                   </p>
                 ) : (
                   <>
