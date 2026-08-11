@@ -162,6 +162,13 @@ jobs:
           lipo -archs "$app/Contents/MacOS/raw-footage-real-story" | grep -q x86_64
           lipo -archs "$app/Contents/MacOS/raw-footage-real-story" | grep -q arm64
 
+          # Ad-hoc, but well-formed. Without an explicit signing identity the
+          # linker's own signature covers the binary and not the bundle, and
+          # Gatekeeper reports malformed code rather than an untrusted
+          # developer — a different dialog with no "Open Anyway" in it.
+          codesign --verify --deep --strict "$app"
+          codesign -dv "$app" 2>&1 | grep -q "Sealed Resources"
+
           "$app/Contents/MacOS/raw-footage-real-story" --selftest
 
       - name: Verify the installer — Windows
