@@ -28,33 +28,21 @@ jobs:
       # build tells you half of what the run was for.
       fail-fast: false
       matrix:
-        include:
-          - os: macos-14
-            label: macOS
-            # Apple Silicon only, not by choice:
-            #
-            #   ort-sys@2.0.0-rc.13: no prebuilt binaries available for
-            #   target x86_64-apple-darwin
-            #
-            # A universal build needs an Intel slice, and ONNX Runtime does not
-            # publish one for this version. Building it from source is the only
-            # way to an Intel Mac and is a bigger job than this pipeline.
-            target: aarch64-apple-darwin
-            args: ""
-          - os: windows-latest
-            label: Windows
-            target: ""
-            args: ""
+        # Built from the dispatch input rather than filtered by a job-level
+        # `if`, which cannot see `matrix` — that expression is evaluated before
+        # the matrix exists. Chasing a Windows-only fault should not rebuild
+        # macOS each time, since those runners bill at ten times the rate.
+        include: >-
+          ${{ fromJSON(
+            (github.event_name != 'workflow_dispatch' || inputs.platforms == 'both')
+              && '[{"os":"macos-14","label":"macOS","target":"aarch64-apple-darwin","args":""},{"os":"windows-latest","label":"Windows","target":"","args":""}]'
+            || inputs.platforms == 'macos'
+              && '[{"os":"macos-14","label":"macOS","target":"aarch64-apple-darwin","args":""}]'
+            || '[{"os":"windows-latest","label":"Windows","target":"","args":""}]'
+          ) }}
 
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.label }}
-    # Chasing a Windows-only fault should not rebuild macOS each time — those
-    # runners bill at ten times the rate. A tag build always does both.
-    if: >-
-      github.event_name != 'workflow_dispatch'
-      || inputs.platforms == 'both'
-      || (inputs.platforms == 'macos' && matrix.os == 'macos-14')
-      || (inputs.platforms == 'windows' && matrix.os == 'windows-latest')
 
     steps:
       - uses: actions/checkout@v4
