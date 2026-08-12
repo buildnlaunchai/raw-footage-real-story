@@ -34,8 +34,32 @@ const REQUIRED: &[(&str, u64)] = &[
 /// glob matched something and stopped.
 const VOICE_COUNT: usize = 55;
 
+/// Print and flush.
+///
+/// A segfault discards whatever is sitting in the stdout buffer, so an
+/// un-flushed log of the step that crashed is exactly the log you do not get.
+macro_rules! step {
+    ($($arg:tt)*) => {{
+        println!($($arg)*);
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+    }};
+}
+
 pub fn run() -> i32 {
     let mut failures: Vec<String> = Vec::new();
+
+    // Reported first, and never fatal. It is the only external-tool answer we
+    // get if something later takes the process down — which on Windows it does.
+    step!("external tools:");
+    match crate::ffmpeg::detect(&crate::ffmpeg::FfmpegSettings::default()) {
+        Ok(info) => {
+            step!("  ffmpeg   {}", info.ffmpeg);
+            step!("  ffprobe  {}", info.ffprobe);
+            step!("  zscale   {}", if info.caps.zscale { "yes" } else { "no" });
+        }
+        Err(e) => step!("  ffmpeg   not found ({}) — assembly unavailable", e.code),
+    }
+    step!("");
 
     // --- 1. are the files there, and are they real files? -------------------
     //
@@ -97,41 +121,75 @@ pub fn run() -> i32 {
     // missing or the wrong architecture — which on Windows is the open
     // question, since the macOS build links it statically and nobody has
     // checked whether that holds there.
-    println!("\nsynthesising a line…");
-    match crate::tts::synthesise_for_selftest("The harbour was still frozen.") {
-        Ok(samples) => {
-            let seconds = samples.len() as f64 / crate::tts::SAMPLE_RATE as f64;
-            if samples.is_empty() || seconds < 0.3 {
-                println!("FAIL  produced {seconds:.2}s of audio, which is not a spoken sentence");
-                return 1;
-            }
-            let peak = samples.iter().fold(0f32, |a, s| a.max(s.abs()));
-            if peak < 0.01 {
-                println!("FAIL  produced {seconds:.2}s of silence (peak {peak:.4})");
-                return 1;
-            }
-            println!("  ok    {seconds:.2}s of audio, peak {peak:.3}");
-        }
+    // --- 3. does it actually run? -------------------------------------------
+    //
+    // Announced step by step and flushed, because the Windows failure is a
+    // segfault: the process vanishes, and the last line printed is the only
+    // evidence of how far it got.
+    step!("synthesis, stage by stage:");
+
+    step!("  1/5 phonemising…");
+    let short = match crate::tts::stages::phonemise("Hello.") {
+        Ok(p) => p,
         Err(e) => {
-            println!("FAIL  synthesis failed: {e}");
+            step!("  FAIL  {e}");
             return 1;
         }
-    }
+    };
+    step!("      short phonemes: {short:?}");
 
-    // --- 3. what did we find of the outside world? --------------------------
-    //
-    // Reported, never fatal. ffmpeg is not bundled and the app is built to work
-    // without it — but on Windows nobody had checked whether discovery looks
-    // where winget and scoop actually install, and a log line is how that stops
-    // being a guess.
-    println!("\nexternal tools:");
-    match crate::ffmpeg::detect(&crate::ffmpeg::FfmpegSettings::default()) {
-        Ok(info) => {
-            println!("  ffmpeg   {}", info.ffmpeg);
-            println!("  ffprobe  {}", info.ffprobe);
-            println!("  zscale   {}", if info.caps.zscale { "yes" } else { "no — HDR cannot be tone-mapped" });
+    let long = match crate::tts::stages::phonemise("The harbour was still frozen.") {
+        Ok(p) => p,
+        Err(e) => {
+            step!("  FAIL  {e}");
+            return 1;
         }
-        Err(e) => println!("  ffmpeg   not found ({}) — assembly will be unavailable", e.code),
+    };
+    step!("      long phonemes:  {long:?}");
+
+    step!("  2/5 building the ONNX session (loads 82MB)…");
+    let mut session = match crate::tts::stages::session() {
+        Ok(s) => s,
+        Err(e) => {
+            step!("  FAIL  {e}");
+            return 1;
+        }
+    };
+    step!("      session built");
+
+    // Shortest possible input first. If this survives and the longer one does
+    // not, the fault is length- or shape-dependent rather than the runtime
+    // being broken outright — a different problem with a different fix.
+    step!("  3/5 inference on a two-word input…");
+    let brief = match crate::tts::stages::infer(&mut session, &short, "af_kore") {
+        Ok(s) => s,
+        Err(e) => {
+            step!("  FAIL  {e}");
+            return 1;
+        }
+    };
+    step!("      {} samples", brief.len());
+
+    step!("  4/5 inference on a full sentence…");
+    let samples = match crate::tts::stages::infer(&mut session, &long, "af_kore") {
+        Ok(s) => s,
+        Err(e) => {
+            step!("  FAIL  {e}");
+            return 1;
+        }
+    };
+
+    step!("  5/5 checking the audio…");
+    let seconds = samples.len() as f64 / crate::tts::SAMPLE_RATE as f64;
+    let peak = samples.iter().fold(0f32, |a, s| a.max(s.abs()));
+    step!("      {seconds:.2}s, peak {peak:.3}");
+    if samples.is_empty() || seconds < 0.3 {
+        step!("FAIL  {seconds:.2}s is not a spoken sentence");
+        return 1;
+    }
+    if peak < 0.01 {
+        step!("FAIL  {seconds:.2}s of silence (peak {peak:.4})");
+        return 1;
     }
 
     println!("\nPASS  this build can find its resources and speak.");

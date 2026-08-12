@@ -721,3 +721,32 @@ pub fn synthesise_for_selftest(text: &str) -> Result<Vec<f32>, String> {
     let mut session = load_session()?;
     synthesize_with(&mut session, &ph.phonemes, "af_kore", 1.0)
 }
+
+/// The pieces of a synthesis, separately callable.
+///
+/// A segfault takes the process with it and prints nothing, so the only way to
+/// learn *where* it died is to announce each step before taking it and flush.
+/// The Windows crash sits somewhere in here and the whole question is where.
+pub mod stages {
+    use super::*;
+
+    pub fn phonemise(text: &str) -> Result<String, String> {
+        let ph = crate::g2p::text_to_phonemes(text);
+        if ph.phonemes.is_empty() {
+            return Err("phonemiser produced nothing".into());
+        }
+        Ok(ph.phonemes)
+    }
+
+    pub fn session() -> Result<ort::session::Session, String> {
+        load_session()
+    }
+
+    pub fn infer(
+        session: &mut ort::session::Session,
+        phonemes: &str,
+        voice: &str,
+    ) -> Result<Vec<f32>, String> {
+        synthesize_with(session, phonemes, voice, 1.0)
+    }
+}

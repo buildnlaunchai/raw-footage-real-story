@@ -10,6 +10,12 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      platforms:
+        description: "Which platforms to build"
+        type: choice
+        default: both
+        options: [both, macos, windows]
 
 concurrency:
   group: build-${{ github.ref }}
@@ -42,6 +48,13 @@ jobs:
 
     runs-on: ${{ matrix.os }}
     name: ${{ matrix.label }}
+    # Chasing a Windows-only fault should not rebuild macOS each time — those
+    # runners bill at ten times the rate. A tag build always does both.
+    if: >-
+      github.event_name != 'workflow_dispatch'
+      || inputs.platforms == 'both'
+      || (inputs.platforms == 'macos' && matrix.os == 'macos-14')
+      || (inputs.platforms == 'windows' && matrix.os == 'windows-latest')
 
     steps:
       - uses: actions/checkout@v4
