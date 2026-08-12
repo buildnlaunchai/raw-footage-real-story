@@ -14,6 +14,7 @@
     "src/lib/scriptParsing.ts",
     "src/lib/segments.ts",
     "src/lib/pipeline.ts",
-    "src/lib/readiness.ts"
+    "src/lib/readiness.ts",
+    "src/lib/intro.ts"
   ]
 }
