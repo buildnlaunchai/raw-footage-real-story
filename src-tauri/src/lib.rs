@@ -22,8 +22,15 @@ use tauri::Manager;
 pub fn run() {
     // Before any window: a build that cannot find its own resources should say
     // so on a CI runner, not on a stranger's laptop.
-    if std::env::args().any(|a| a == "--selftest") {
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--selftest") {
         std::process::exit(selftest::run());
+    }
+    // `--probe-model <path>`: does ONNX Runtime survive this file?
+    if let Some(i) = args.iter().position(|a| a == "--probe-model") {
+        let path = args.get(i + 1).cloned().unwrap_or_default();
+        let _ = resources::init_from_exe();
+        std::process::exit(selftest::probe_model(&path));
     }
 
 

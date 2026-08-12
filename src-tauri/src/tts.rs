@@ -764,6 +764,17 @@ pub mod stages {
         builder.commit_from_file(&model).map_err(|e| format!("load model: {e}"))
     }
 
+    /// Build a session from an explicit model path, for probing variants.
+    pub fn session_at(model: &std::path::Path) -> Result<ort::session::Session, String> {
+        use ort::ep::CPU;
+        ort::session::Session::builder()
+            .map_err(|e| format!("session builder: {e}"))?
+            .with_execution_providers([CPU::default().build()])
+            .map_err(|e| format!("select CPU provider: {e}"))?
+            .commit_from_file(model)
+            .map_err(|e| format!("load model: {e}"))
+    }
+
     pub fn session() -> Result<ort::session::Session, String> {
         load_session()
     }

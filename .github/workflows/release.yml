@@ -236,6 +236,25 @@ jobs:
           echo "--- DLLs beside the exe ---"
           ls "$(dirname "$exe")"/*.dll 2>/dev/null || echo "(none — statically linked)"
 
+          # Which model variants can this platform's ONNX Runtime actually
+          # load? One subprocess each, because the failure is a segfault and a
+          # single process would only ever report the first one to die.
+          #
+          # Diagnostic, and deliberately not fatal: the selftest below is what
+          # decides the job.
+          echo "=== model variant probe ==="
+          REV=1939ad2a8e416c0acfeecc08a694d14ef25f2231
+          for m in model_quantized model_fp16 model_uint8f16 model; do
+            f="$RUNNER_TEMP/$m.onnx"
+            echo "--- $m ---"
+            curl --fail --location --silent --retry 2 --output "$f" \
+              "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/$REV/onnx/$m.onnx" \
+              || { echo "  (download failed)"; continue; }
+            "$exe" --probe-model "$f" || echo "  -> $m did NOT survive (exit $?)"
+            rm -f "$f"
+          done
+          echo "=== end probe ==="
+
           "$exe" --selftest
 
       - uses: actions/upload-artifact@v4

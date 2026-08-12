@@ -45,6 +45,47 @@ macro_rules! step {
     }};
 }
 
+/// Try to load one model and say whether it survived.
+///
+/// A separate process per model on purpose: the Windows failure is a segfault,
+/// which takes the whole process down, so probing several in one run would only
+/// ever report the first. The caller loops and each crash is contained.
+///
+/// Invoked as `--probe-model <path>`; exits 0 if the session builds.
+pub fn probe_model(path: &str) -> i32 {
+    use std::io::Write;
+    let p = std::path::Path::new(path);
+    let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+    println!("probing {} ({:.1} MB)", p.display(), size as f64 / 1_048_576.0);
+    let _ = std::io::stdout().flush();
+
+    match crate::tts::stages::session_at(p) {
+        Ok(mut session) => {
+            println!("  session built");
+            let _ = std::io::stdout().flush();
+            // Loading is not speaking. A model that opens and then produces
+            // nothing is the macOS failure in a different coat, so the probe
+            // runs one inference too.
+            match crate::tts::stages::infer(&mut session, "həlˈO.", "af_kore") {
+                Ok(s) => {
+                    let peak = s.iter().fold(0f32, |a, x| a.max(x.abs()));
+                    println!("  OK  {} samples, peak {peak:.3}", s.len());
+                    if peak < 0.01 { println!("  but silent"); return 1; }
+                    0
+                }
+                Err(e) => {
+                    println!("  FAIL inference: {e}");
+                    1
+                }
+            }
+        }
+        Err(e) => {
+            println!("  FAIL load: {e}");
+            1
+        }
+    }
+}
+
 pub fn run() -> i32 {
     let mut failures: Vec<String> = Vec::new();
 
