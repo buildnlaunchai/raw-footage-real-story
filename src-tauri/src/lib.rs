@@ -1,3 +1,4 @@
+mod readiness;
 mod selftest;
 mod assembly;
 mod elevenlabs;
@@ -101,7 +102,10 @@ pub fn run() {
             store::take_list,
             store::writing_instructions_get,
             store::writing_instructions_set,
-            store::machine_user
+            store::machine_user,
+            readiness::readiness_probe,
+            readiness::run_installer,
+            readiness::ollama_pull
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -11,6 +11,13 @@ import { LibrarySidebar, type LibraryView } from "./components/LibrarySidebar";
 import { VideoTable } from "./components/VideoTable";
 import { ClipDescriber } from "./components/ClipDescriber";
 import { SettingsPanel } from "./components/SettingsPanel";
+import { ReadinessPanel } from "./components/ReadinessPanel";
+import {
+  attention as attentionCount,
+  capabilities as capabilitiesOf,
+  usable as isUsable,
+  type Probe,
+} from "./lib/readiness";
 import { TakeHistory } from "./components/TakeHistory";
 import {
   addTake,
@@ -26,6 +33,7 @@ import { FilterIcon, SaveIcon, SearchIcon, SortIcon } from "./components/Icons";
 import {
   allowMedia,
   listLibrary,
+  purgeClip,
   setSegments,
   storageUsage,
   type LibraryClip,
@@ -47,7 +55,7 @@ import {
   type VoiceStamp,
 } from "./lib/pipeline";
 import { FfmpegSetup } from "./components/FfmpegSetup";
-import { OLLAMA_MODEL } from "./config/ollama";
+import { OLLAMA_HOST, OLLAMA_MODEL, OLLAMA_MODEL_QUALITY } from "./config/ollama";
 import {
   createProject,
   describedCount,
@@ -73,6 +81,7 @@ import {
 import { audioUrl, concatNarration } from "./lib/voiceover";
 import {
   characterCount,
+  hasApiKey,
   providerFor,
   PROVIDERS,
   type LineFailure,
@@ -142,6 +151,22 @@ function App() {
   const [storage, setStorage] = useState<StorageUsage | null>(null);
   const [userName, setUserName] = useState("");
   const [refreshing, setRefreshing] = useState(false);
+
+  /** What this machine has. Null until the first probe returns. */
+  const [probe, setProbe] = useState<Probe | null>(null);
+  const [probing, setProbing] = useState(false);
+  const [hasOpenAiKey, setHasOpenAiKey] = useState(false);
+  const [hasElevenLabsKey, setHasElevenLabsKey] = useState(false);
+  /** Only ever auto-opened once per launch; after that it is the user's call. */
+  const nudged = useRef(false);
+  /** Latest probe and requirements, for callbacks that must not close over stale ones. */
+  const probeRef = useRef<Probe | null>(null);
+  const requirementsRef = useRef({
+    fastModel: OLLAMA_MODEL,
+    qualityModel: OLLAMA_MODEL_QUALITY,
+    hasOpenAiKey: false,
+    hasElevenLabsKey: false,
+  });
   /** The recorded lines joined end to end, for hearing the script whole. */
   const [fullNarration, setFullNarration] = useState<string | null>(null);
   const [joining, setJoining] = useState(false);
@@ -157,6 +182,8 @@ function App() {
   const [sortBy, setSortBy] = useState<"added" | "name" | "duration" | "described">("added");
   const [filterProject, setFilterProject] = useState<string>("");
   const [preview, setPreview] = useState<LibraryClip | null>(null);
+  /** Clips awaiting a delete confirmation. */
+  const [pendingDelete, setPendingDelete] = useState<LibraryClip[] | null>(null);
   /** Clip whose timings are being edited; the table's one box cannot hold them. */
   const [splitting, setSplitting] = useState<string | null>(null);
   /**
@@ -477,6 +504,17 @@ function App() {
   const runImport = useCallback(
     async (paths: string[]) => {
       if (paths.length === 0 || !projectId) return;
+      // ffmpeg is needed to import, not only to render: thumbnails and
+      // durations both come from it. Refusing here with a reason beats the raw
+      // FFMPEG_NOT_FOUND that used to surface from the command layer.
+      if (probeRef.current && !isUsable(capabilitiesOf(probeRef.current, requirementsRef.current))) {
+        setError(
+          "ffmpeg is needed to import clips — it makes the thumbnails and reads " +
+            "how long each one is. Open Setup in the sidebar to install it.",
+        );
+        setView("readiness");
+        return;
+      }
       setImporting(true);
       setError(null);
       try {
@@ -911,6 +949,39 @@ function App() {
     }
   }, []);
 
+  /**
+   * Ask the machine what it has.
+   *
+   * Cheap enough to run on demand: an ffmpeg lookup and one HTTP call to
+   * localhost. Re-run after anything that could change the answer — an install,
+   * a model pull, a key being saved — so the screen never has to be reopened
+   * to be believed.
+   */
+  const checkReadiness = useCallback(async () => {
+    setProbing(true);
+    try {
+      const [p, openai, eleven] = await Promise.all([
+        invoke<Probe>("readiness_probe", { ollamaHost: OLLAMA_HOST }),
+        hasApiKey("openai"),
+        hasApiKey("elevenlabs"),
+      ]);
+      setProbe(p);
+      setHasOpenAiKey(openai);
+      setHasElevenLabsKey(eleven);
+      probeRef.current = p;
+      requirementsRef.current = {
+        fastModel: OLLAMA_MODEL,
+        qualityModel: OLLAMA_MODEL_QUALITY,
+        hasOpenAiKey: openai,
+        hasElevenLabsKey: eleven,
+      };
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setProbing(false);
+    }
+  }, []);
+
   refreshLibraryRef.current = refreshLibrary;
   manifestRef.current = manifest;
 
@@ -918,7 +989,73 @@ function App() {
     void refreshLibrary();
     void invoke<string>("machine_user").then(setUserName).catch(() => setUserName(""));
     void getWritingInstructions().then(setInstructions);
+    void checkReadiness();
   }, [refreshLibrary]);
+
+  /**
+   * Remove clips from the library.
+   *
+   * A hard removal, not the soft one the Trash view used to back — that view is
+   * gone, and a delete that hides things with nowhere to look for them is worse
+   * than one that says plainly what it does. What it destroys is the clip entry
+   * and the descriptions written about it; the video file is referenced rather
+   * than copied, so it stays exactly where it was and can be imported again.
+   */
+  async function onDeleteClips(clips: LibraryClip[]) {
+    if (clips.length === 0) return;
+    setError(null);
+    try {
+      const mine = manifest?.project.id;
+      const here = clips.filter((c) => c.projectId === mine).map((c) => c.clipId);
+      if (here.length > 0) {
+        // The open collection is edited in memory and saved, so the copy on
+        // screen and the copy on disk cannot disagree.
+        setManifest((m) =>
+          m ? { ...m, clips: m.clips.filter((c) => !here.includes(c.id)) } : m,
+        );
+        setDirty(true);
+      }
+      for (const c of clips.filter((c) => c.projectId !== mine)) {
+        await purgeClip(c.projectId, c.clipId);
+      }
+      // A removed clip may have been in the script, the recording or the cut.
+      if (here.length > 0) {
+        setSplitting((cur) => (here.includes(cur ?? "") ? null : cur));
+      }
+      await refreshLibrary();
+    } catch (err) {
+      setError(errorText(err));
+    }
+  }
+
+  // --- readiness ------------------------------------------------------------
+
+  const caps = probe
+    ? capabilitiesOf(probe, {
+        fastModel: OLLAMA_MODEL,
+        qualityModel: OLLAMA_MODEL_QUALITY,
+        hasOpenAiKey,
+        hasElevenLabsKey,
+      })
+    : [];
+  const needsAttention = probe ? attentionCount(caps) : 0;
+  const canImport = probe ? isUsable(caps) : true;
+
+  // Opened once, on the first probe that finds something missing. Not on every
+  // probe: a re-check that still shows a caveat should not throw the user back
+  // to this screen while they are working.
+  useEffect(() => {
+    if (!probe || nudged.current) return;
+    nudged.current = true;
+    if (attentionCount(capabilitiesOf(probe, {
+      fastModel: OLLAMA_MODEL,
+      qualityModel: OLLAMA_MODEL_QUALITY,
+      hasOpenAiKey,
+      hasElevenLabsKey,
+    })) > 0) {
+      setView("readiness");
+    }
+  }, [probe, hasOpenAiKey, hasElevenLabsKey]);
 
   // --- render --------------------------------------------------------------
 
@@ -1010,6 +1147,7 @@ function App() {
     all: "All Videos",
     project: manifest?.project.name ?? "Collection",
     settings: "Settings",
+    readiness: "Setup",
   };
 
   /** Opening a collection is what puts the pipeline on screen. */
@@ -1583,10 +1721,47 @@ function App() {
         storage={storage}
         userName={userName}
         onOpenSettings={() => setView("settings")}
+        attention={needsAttention}
+        usable={canImport}
+        onOpenReadiness={() => setView("readiness")}
       />
 
       <main className="lib-main">
-        {view === "settings" ? (
+        {view === "readiness" ? (
+          <>
+            <header className="lib-head">
+              <h1>Setup</h1>
+              <span className="lib-head-count">what this machine can do</span>
+            </header>
+            <ReadinessPanel
+              probe={probe}
+              requirements={{
+                fastModel: OLLAMA_MODEL,
+                qualityModel: OLLAMA_MODEL_QUALITY,
+                hasOpenAiKey,
+                hasElevenLabsKey,
+              }}
+              platform={
+                navigator.userAgent.includes("Mac")
+                  ? "macos"
+                  : navigator.userAgent.includes("Win")
+                    ? "windows"
+                    : "other"
+              }
+              ollamaHost={OLLAMA_HOST}
+              checking={probing}
+              onRecheck={() => void checkReadiness()}
+              onOpenProviders={() => {
+                if (manifest) {
+                  setView("project");
+                  setTab("voice");
+                } else {
+                  setView("projects");
+                }
+              }}
+            />
+          </>
+        ) : view === "settings" ? (
           <>
             <header className="lib-head">
               <h1>Settings</h1>
@@ -1672,10 +1847,17 @@ function App() {
                 <button
                   type="button"
                   className="lib-new"
-                  onClick={async () => runImport(await pickFiles())}
+                  onClick={async () => {
+                    if (!canImport) {
+                      setView("readiness");
+                      return;
+                    }
+                    runImport(await pickFiles());
+                  }}
                   disabled={importing}
+                  title={canImport ? undefined : "ffmpeg is needed to import clips"}
                 >
-                  {importing ? "Importing…" : "+ Add footage"}
+                  {importing ? "Importing…" : canImport ? "+ Add footage" : "Set up ffmpeg first"}
                 </button>
               )}
 
@@ -1765,6 +1947,7 @@ function App() {
                       onPlay={setPreview}
                       onOpenProject={openProjectById}
                       onDescribe={(c) => setPreview(c)}
+                      onDelete={(cs) => setPendingDelete(cs)}
                     />
 
                     <div className="lib-foot">
@@ -1848,6 +2031,59 @@ function App() {
           </>
         )}
       </main>
+
+      {pendingDelete && (
+        <div
+          className="describer"
+          role="dialog"
+          aria-label="Confirm removal"
+          onClick={() => setPendingDelete(null)}
+        >
+          <div className="confirm-panel" onClick={(e) => e.stopPropagation()}>
+            <h2>
+              Remove {pendingDelete.length} clip{pendingDelete.length === 1 ? "" : "s"} from the
+              library?
+            </h2>
+            <p className="hint">
+              {pendingDelete.length === 1
+                ? pendingDelete[0].fileName
+                : `${pendingDelete[0].fileName} and ${pendingDelete.length - 1} other${
+                    pendingDelete.length === 2 ? "" : "s"
+                  }`}
+            </p>
+            <p>
+              This forgets the clip and everything written about it. The video
+              file itself is left where it is — footage is referenced, not
+              copied — so you can import it again, but the descriptions are gone.
+            </p>
+            {pendingDelete.some((c) => c.description.trim()) && (
+              <p className="warning" style={{ margin: "0.75rem 0 0" }}>
+                {pendingDelete.filter((c) => c.description.trim()).length} of these
+                {pendingDelete.length === 1 ? " is" : " are"} described.
+              </p>
+            )}
+            <div className="actions" style={{ marginTop: "1.25rem" }}>
+              <button
+                type="button"
+                className="primary-button bulk-delete"
+                onClick={() => {
+                  void onDeleteClips(pendingDelete);
+                  setPendingDelete(null);
+                }}
+              >
+                Remove
+              </button>
+              <button
+                type="button"
+                className="ghost-button"
+                onClick={() => setPendingDelete(null)}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {preview && (
         <ClipDescriber

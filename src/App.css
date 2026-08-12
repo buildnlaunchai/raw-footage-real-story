@@ -2846,3 +2846,213 @@ kbd {
   overflow-x: auto;
   color: var(--ink-2);
 }
+
+/* ── selection and removal ─────────────────────────────────────────────── */
+
+.lib-pick {
+  width: 2.6rem;
+  text-align: center;
+}
+
+.lib-pick input {
+  width: 1rem;
+  height: 1rem;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+
+.lib-table tbody tr[data-picked="true"] {
+  background: var(--accent-soft);
+}
+
+.lib-act-danger:hover {
+  background: var(--danger);
+  color: #fff;
+}
+
+.bulk-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1.1rem;
+  background: var(--card-2);
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+
+.bulk-bar .bulk-delete {
+  margin-left: auto;
+}
+
+.bulk-delete {
+  background: var(--danger);
+  box-shadow: none;
+}
+
+.bulk-delete:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.confirm-panel {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  padding: clamp(1.25rem, 3vw, 2rem);
+  max-width: 32rem;
+  width: 100%;
+  box-shadow: var(--shadow-card);
+}
+
+.confirm-panel h2 {
+  margin: 0 0 0.4rem;
+  font-size: 1.25rem;
+}
+
+.confirm-panel p {
+  margin: 0.5rem 0 0;
+  line-height: 1.55;
+  color: var(--ink-2);
+}
+
+/* ── readiness ─────────────────────────────────────────────────────────── */
+
+.ready-chip {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  width: 100%;
+  margin-top: auto;
+  margin-bottom: 0.7rem;
+  padding: 0.6rem 0.8rem;
+  border-radius: var(--r-md);
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--ink-2);
+  font-size: 0.85rem;
+  cursor: pointer;
+  text-align: left;
+}
+
+.ready-chip:hover {
+  background: var(--card-2);
+}
+
+.ready-chip-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--ok);
+}
+
+.ready-chip[data-state="warn"] .ready-chip-dot { background: var(--warn); }
+.ready-chip[data-state="bad"] .ready-chip-dot { background: var(--danger); }
+.ready-chip[data-state="bad"] { border-color: var(--danger); color: var(--ink); }
+
+.ready-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+.ready-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.85rem;
+  background: var(--card-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: 0.85rem 1rem;
+}
+
+.ready-row strong {
+  font-size: 0.98rem;
+}
+
+.ready-row p {
+  margin: 0.2rem 0 0;
+}
+
+.ready-dot {
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: 50%;
+  flex: none;
+  display: grid;
+  place-items: center;
+  background: var(--ok);
+  color: #fff;
+  margin-top: 0.1rem;
+}
+
+.ready-dot[data-ok="false"] { background: var(--danger); }
+.ready-dot[data-warn="true"] { background: var(--warn); }
+
+.ready-caveat {
+  margin: 0.35rem 0 0;
+  font-size: 0.85rem;
+  color: var(--warn);
+}
+
+.ready-choice {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr));
+  gap: 1rem;
+}
+
+.ready-option {
+  background: var(--card-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: 1.1rem;
+}
+
+.ready-option h3 {
+  margin: 0 0 0.5rem;
+  font-size: 1.05rem;
+}
+
+.ready-option p {
+  margin: 0 0 0.9rem;
+  font-size: 0.9rem;
+  line-height: 1.55;
+  color: var(--ink-2);
+}
+
+.setup-cmd {
+  background: var(--card-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: 0.9rem 1rem;
+}
+
+.setup-cmd code {
+  display: block;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.88rem;
+  color: var(--ink);
+  margin-bottom: 0.75rem;
+  overflow-x: auto;
+}
+
+.setup-log {
+  margin: 0;
+  max-height: 16rem;
+  overflow: auto;
+  background: #0a0a0b;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: 0.85rem 1rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.78rem;
+  line-height: 1.55;
+  color: var(--ink-2);
+  white-space: pre-wrap;
+}
+
+.setup-log div[data-bad="true"] {
+  color: var(--danger);
+}

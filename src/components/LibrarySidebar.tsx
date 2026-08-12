@@ -15,7 +15,7 @@ import { DocIcon, FilmIcon, FolderIcon, HomeIcon, RefreshIcon } from "./Icons";
  * collection rather than by a nav row of its own, because it only means
  * anything with a collection open.
  */
-export type LibraryView = "home" | "projects" | "all" | "project" | "settings";
+export type LibraryView = "home" | "projects" | "all" | "project" | "settings" | "readiness";
 
 interface Props {
   view: LibraryView;
@@ -32,6 +32,11 @@ interface Props {
   /** Whose machine this is. There are no accounts; this is the OS user. */
   userName: string;
   onOpenSettings: () => void;
+  /** How many things need attention, for the always-visible chip. */
+  attention: number;
+  /** False when a blocking dependency is missing. */
+  usable: boolean;
+  onOpenReadiness: () => void;
 }
 
 const NAV: { id: LibraryView; label: string; Icon: typeof HomeIcon }[] = [
@@ -53,6 +58,9 @@ export function LibrarySidebar({
   storage,
   userName,
   onOpenSettings,
+  attention,
+  usable,
+  onOpenReadiness,
 }: Props) {
   const countFor = (id: LibraryView) => (id === "all" ? counts.all : null);
 
@@ -140,6 +148,22 @@ export function LibrarySidebar({
           </li>
         ))}
       </ul>
+
+      {/* Always visible, so a dependency that breaks later is noticed without
+          the user having to go looking for a setup screen. */}
+      <button
+        type="button"
+        className="ready-chip"
+        data-state={!usable ? "bad" : attention > 0 ? "warn" : "ok"}
+        onClick={onOpenReadiness}
+      >
+        <span className="ready-chip-dot" />
+        {!usable
+          ? "ffmpeg missing"
+          : attention > 0
+            ? `${attention} need${attention === 1 ? "s" : ""} attention`
+            : "Everything ready"}
+      </button>
 
       <div className="lib-storage">
         <p className="lib-storage-label">Storage</p>

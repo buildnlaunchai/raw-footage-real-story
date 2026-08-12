@@ -13,13 +13,20 @@ import {
   type LibraryClip,
 } from "../lib/library";
 import { audioUrl } from "../lib/voiceover";
-import { PencilIcon, PlayCircleIcon } from "./Icons";
+import { useState } from "react";
+import { PencilIcon, PlayCircleIcon, TrashIcon } from "./Icons";
 
 interface Props {
   clips: LibraryClip[];
   onPlay: (clip: LibraryClip) => void;
   /** Open the describe view, which handles both whole clips and split ones. */
   onDescribe: (clip: LibraryClip) => void;
+  /**
+   * Remove clips from the library. One or many — the same call, because
+   * deleting forty is the same act as deleting one and a separate path for
+   * each is a second place to get it wrong.
+   */
+  onDelete: (clips: LibraryClip[]) => void;
   onOpenProject: (projectId: string) => void;
 }
 
@@ -27,15 +34,75 @@ export function VideoTable({
   clips,
   onPlay,
   onDescribe,
+  onDelete,
   onOpenProject,
 }: Props) {
+  const [selected, setSelected] = useState<Set<string>>(new Set());
   const key = (c: LibraryClip) => `${c.projectId}/${c.clipId}`;
 
+  // Selection is scoped to what is on screen. Carrying it across a page or a
+  // filter change means "delete 40" could include rows the user never saw.
+  const shown = clips.map(key);
+  const picked = clips.filter((c) => selected.has(key(c)));
+  const allShown = shown.length > 0 && shown.every((k) => selected.has(k));
+
+  function toggle(k: string) {
+    setSelected((cur) => {
+      const next = new Set(cur);
+      if (next.has(k)) next.delete(k);
+      else next.add(k);
+      return next;
+    });
+  }
+
+  function toggleAll() {
+    setSelected((cur) => {
+      const next = new Set(cur);
+      if (allShown) shown.forEach((k) => next.delete(k));
+      else shown.forEach((k) => next.add(k));
+      return next;
+    });
+  }
+
   return (
-    <div className="lib-scroll">
+    <div>
+      {picked.length > 0 && (
+        <div className="bulk-bar" role="status">
+          <strong>
+            {picked.length} selected
+          </strong>
+          <button
+            type="button"
+            className="ghost-button small"
+            onClick={() => setSelected(new Set())}
+          >
+            Clear
+          </button>
+          <button
+            type="button"
+            className="primary-button small bulk-delete"
+            onClick={() => {
+              onDelete(picked);
+              setSelected(new Set());
+            }}
+          >
+            <TrashIcon size={15} /> Remove {picked.length} from library
+          </button>
+        </div>
+      )}
+
+      <div className="lib-scroll">
       <table className="lib-table">
         <thead>
           <tr>
+            <th className="lib-pick">
+              <input
+                type="checkbox"
+                checked={allShown}
+                onChange={toggleAll}
+                aria-label={allShown ? "Deselect all on this page" : "Select all on this page"}
+              />
+            </th>
             <th>Video</th>
             <th>Description</th>
             <th>Duration</th>
@@ -58,7 +125,15 @@ export function VideoTable({
               .join(" • ");
 
             return (
-              <tr key={k}>
+              <tr key={k} data-picked={selected.has(k) || undefined}>
+                <td className="lib-pick">
+                  <input
+                    type="checkbox"
+                    checked={selected.has(k)}
+                    onChange={() => toggle(k)}
+                    aria-label={`Select ${c.fileName}`}
+                  />
+                </td>
                 <td>
                   <div className="lib-video-cell">
                     <button
@@ -149,6 +224,15 @@ export function VideoTable({
                     >
                       <PencilIcon />
                     </button>
+                    <button
+                      type="button"
+                      className="lib-act lib-act-danger"
+                      onClick={() => onDelete([c])}
+                      title="Remove from the library (the video file itself is left alone)"
+                      aria-label={`Remove ${c.fileName}`}
+                    >
+                      <TrashIcon />
+                    </button>
                   </div>
                 </td>
               </tr>
@@ -156,6 +240,7 @@ export function VideoTable({
           })}
         </tbody>
       </table>
+      </div>
     </div>
   );
 }

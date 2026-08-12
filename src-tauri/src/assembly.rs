@@ -25,6 +25,11 @@ fn settings_path(app: &AppHandle) -> Result<PathBuf, FfmpegError> {
     Ok(dir.join("settings.json"))
 }
 
+/// The saved ffmpeg settings, for callers outside this module.
+pub fn settings_for(app: &AppHandle) -> FfmpegSettings {
+    load_settings(app)
+}
+
 fn load_settings(app: &AppHandle) -> FfmpegSettings {
     settings_path(app)
         .ok()

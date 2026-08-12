@@ -117,6 +117,14 @@ pub async fn ollama_generate(
 /// user waits through a generation.
 #[tauri::command]
 pub async fn ollama_health(host: String) -> Result<Vec<String>, OllamaError> {
+    list_models(&host).await
+}
+
+/// The installed model tags, or why they could not be read.
+///
+/// Split out from the command so the readiness probe can ask the same question
+/// without going back through the command layer.
+pub async fn list_models(host: &str) -> Result<Vec<String>, OllamaError> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()

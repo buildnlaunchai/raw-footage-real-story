@@ -13,6 +13,7 @@
     "src/lib/languages.ts",
     "src/lib/scriptParsing.ts",
     "src/lib/segments.ts",
-    "src/lib/pipeline.ts"
+    "src/lib/pipeline.ts",
+    "src/lib/readiness.ts"
   ]
 }
