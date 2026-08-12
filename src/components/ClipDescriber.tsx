@@ -18,7 +18,7 @@ import {
 } from "../lib/segments";
 import { formatDuration, type LibraryClip } from "../lib/library";
 import { audioUrl } from "../lib/voiceover";
-import { PlayIcon } from "./Icons";
+import { PlayIcon, TrashIcon } from "./Icons";
 
 interface Props {
   /** The clips this view steps through, in the order the table showed them. */
@@ -27,6 +27,14 @@ interface Props {
   /** Segments as they stand for a clip, so edits survive stepping away and back. */
   segmentsFor: (clip: LibraryClip) => Segment[];
   onCommit: (clip: LibraryClip, segments: Segment[]) => void;
+  /**
+   * Remove this clip, then run `after`.
+   *
+   * The confirmation lives in the app so there is one of it, and the follow-up
+   * is passed in because only this view knows where the user was: mid-browse at
+   * "8 of 103", which is a position to keep rather than a dialog to close.
+   */
+  onDelete: (clip: LibraryClip, after: () => void) => void;
   onClose: () => void;
 }
 
@@ -39,7 +47,14 @@ function clock(sec: number): string {
 
 const key = (c: LibraryClip) => `${c.projectId}/${c.clipId}`;
 
-export function ClipDescriber({ clips, startAt, segmentsFor, onCommit, onClose }: Props) {
+export function ClipDescriber({
+  clips,
+  startAt,
+  segmentsFor,
+  onCommit,
+  onDelete,
+  onClose,
+}: Props) {
   const [onlyUndescribed, setOnlyUndescribed] = useState(false);
   const [currentKey, setCurrentKey] = useState(startAt);
   const [segments, setSegments] = useState<Segment[]>([]);
@@ -113,6 +128,23 @@ export function ClipDescriber({ clips, startAt, segmentsFor, onCommit, onClose }
   function close() {
     commit(clip, segments);
     onClose();
+  }
+
+  /**
+   * Remove the clip on screen and carry on down the list.
+   *
+   * The next clip is chosen *before* the removal, because afterwards this one
+   * is gone from `clips` and the index that pointed at it resolves to the top
+   * of the list — which would silently throw somebody at position 8 of 103 back
+   * to the beginning.
+   */
+  function removeCurrent() {
+    if (!clip) return;
+    const next = walk[index + 1] ?? walk[index - 1] ?? null;
+    onDelete(clip, () => {
+      if (next) setCurrentKey(key(next));
+      else onClose();
+    });
   }
 
   // Keyboard: the point of this screen is not reaching for the mouse.
@@ -189,9 +221,20 @@ export function ClipDescriber({ clips, startAt, segmentsFor, onCommit, onClose }
               {spec && ` · ${spec}`} · {formatDuration(clip.durationMs)}
             </span>
           </div>
+          <div className="describer-head-actions">
+          <button
+            type="button"
+            className="lib-act lib-act-danger"
+            onClick={removeCurrent}
+            title="Remove this clip from the library"
+            aria-label={`Remove ${clip.fileName} from the library`}
+          >
+            <TrashIcon />
+          </button>
           <button type="button" className="lib-act" onClick={close} aria-label="Close">
             ✕
           </button>
+          </div>
         </div>
 
         <div className="describer-body">

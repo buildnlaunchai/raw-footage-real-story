@@ -193,6 +193,13 @@ export async function concatNarration(
   projectId: string,
   paths: string[],
   gapMs = 350,
+  /** File stem; pass a take id so an old recording does not overwrite the current join. */
+  name?: string,
 ): Promise<string> {
-  return await invoke<string>("narration_concat", { projectId, paths, gapMs });
+  return await invoke<string>("narration_concat", {
+    projectId,
+    paths,
+    gapMs,
+    name: name ?? null,
+  });
 }

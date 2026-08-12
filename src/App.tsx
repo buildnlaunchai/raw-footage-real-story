@@ -185,7 +185,11 @@ function App() {
   const [filterProject, setFilterProject] = useState<string>("");
   const [preview, setPreview] = useState<LibraryClip | null>(null);
   /** Clips awaiting a delete confirmation. */
-  const [pendingDelete, setPendingDelete] = useState<LibraryClip[] | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<{
+    clips: LibraryClip[];
+    /** Run once the removal has happened — the describer uses it to move on. */
+    after?: () => void;
+  } | null>(null);
   /** Clip whose timings are being edited; the table's one box cannot hold them. */
   const [splitting, setSplitting] = useState<string | null>(null);
   /**
@@ -1640,6 +1644,23 @@ function App() {
               busy={ttsBusy}
               onRestore={onRestoreTake}
               onDelete={onDeleteTake}
+              onPlay={async (t) => {
+                if (!projectId || t.audio.length === 0) return;
+                setTtsError(null);
+                try {
+                  // Named after the take, so listening back does not overwrite
+                  // the joined copy of the current recording.
+                  const path = await concatNarration(
+                    projectId,
+                    t.audio.map((a) => a.path),
+                    350,
+                    `take-${t.id}`,
+                  );
+                  await new Audio(audioUrl(path) + `?t=${Date.now()}`).play();
+                } catch (err) {
+                  setTtsError(errorText(err));
+                }
+              }}
             />
           </>
         ))}
@@ -1997,7 +2018,7 @@ function App() {
                       onPlay={setPreview}
                       onOpenProject={openProjectById}
                       onDescribe={(c) => setPreview(c)}
-                      onDelete={(cs) => setPendingDelete(cs)}
+                      onDelete={(cs) => setPendingDelete({ clips: cs })}
                     />
 
                     <div className="lib-foot">
@@ -2091,25 +2112,25 @@ function App() {
         >
           <div className="confirm-panel" onClick={(e) => e.stopPropagation()}>
             <h2>
-              Remove {pendingDelete.length} clip{pendingDelete.length === 1 ? "" : "s"} from the
-              library?
+              Remove {pendingDelete.clips.length} clip
+              {pendingDelete.clips.length === 1 ? "" : "s"} from the library?
             </h2>
             <p className="hint">
-              {pendingDelete.length === 1
-                ? pendingDelete[0].fileName
-                : `${pendingDelete[0].fileName} and ${pendingDelete.length - 1} other${
-                    pendingDelete.length === 2 ? "" : "s"
-                  }`}
+              {pendingDelete.clips.length === 1
+                ? pendingDelete.clips[0].fileName
+                : `${pendingDelete.clips[0].fileName} and ${
+                    pendingDelete.clips.length - 1
+                  } other${pendingDelete.clips.length === 2 ? "" : "s"}`}
             </p>
             <p>
               This forgets the clip and everything written about it. The video
               file itself is left where it is — footage is referenced, not
               copied — so you can import it again, but the descriptions are gone.
             </p>
-            {pendingDelete.some((c) => c.description.trim()) && (
+            {pendingDelete.clips.some((c) => c.description.trim()) && (
               <p className="warning" style={{ margin: "0.75rem 0 0" }}>
-                {pendingDelete.filter((c) => c.description.trim()).length} of these
-                {pendingDelete.length === 1 ? " is" : " are"} described.
+                {pendingDelete.clips.filter((c) => c.description.trim()).length} of
+                these{pendingDelete.clips.length === 1 ? " is" : " are"} described.
               </p>
             )}
             <div className="actions" style={{ marginTop: "1.25rem" }}>
@@ -2117,7 +2138,8 @@ function App() {
                 type="button"
                 className="primary-button bulk-delete"
                 onClick={() => {
-                  void onDeleteClips(pendingDelete);
+                  const { clips: doomed, after } = pendingDelete;
+                  void onDeleteClips(doomed).then(() => after?.());
                   setPendingDelete(null);
                 }}
               >
@@ -2147,6 +2169,7 @@ function App() {
               void setSegments(c.projectId, c.clipId, segs).then(() => refreshLibrary());
             }
           }}
+          onDelete={(clip, after) => setPendingDelete({ clips: [clip], after })}
           onClose={() => setPreview(null)}
         />
       )}

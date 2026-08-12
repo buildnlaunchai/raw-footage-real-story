@@ -61,13 +61,13 @@ export function TakeHistory({
               </div>
 
               <div className="actions">
-                {kind === "render" && onPlay && t.videoPath && (
+                {onPlay && ((kind === "render" && t.videoPath) || (kind === "voice" && t.audio.length > 0)) && (
                   <button
                     type="button"
                     className="ghost-button small"
                     onClick={() => onPlay(t)}
                   >
-                    ▶ Watch
+                    {kind === "render" ? "▶ Watch" : "▶ Listen"}
                   </button>
                 )}
                 {!current && (

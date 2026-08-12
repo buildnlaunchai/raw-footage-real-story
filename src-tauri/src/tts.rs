@@ -664,6 +664,8 @@ pub fn narration_concat(
     project_id: String,
     paths: Vec<String>,
     gap_ms: u64,
+    // File stem, so joining an old take does not overwrite the current one.
+    name: Option<String>,
 ) -> Result<String, TtsError> {
     if paths.is_empty() {
         return Err(TtsError::new("EMPTY_TEXT", "There is no narration to join yet."));
@@ -703,7 +705,12 @@ pub fn narration_concat(
         all.extend_from_slice(&samples);
     }
 
-    let out = dir.join("narration-full.wav");
+    let stem: String = name
+        .unwrap_or_else(|| "narration-full".into())
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    let out = dir.join(format!("{}.wav", if stem.is_empty() { "narration-full".into() } else { stem }));
     write_wav(&out, &all).map_err(|e| TtsError::new("WAV_WRITE_FAILED", e))?;
     Ok(out.to_string_lossy().to_string())
 }
