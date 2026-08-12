@@ -50,7 +50,49 @@ export const NUM_CTX = 8192;
 export const BATCH_SIZE = 120;
 
 /** Roughly how many words of narration one segment tends to carry. */
-export const WORDS_PER_SEGMENT = 18;
+/**
+ * How many words one moment carries.
+ *
+ * Lowered from 18: at 18 a 110-word script used six moments however much
+ * footage existed, so a forty-clip library got fifteen percent of an airing.
+ * Fourteen cuts about a third more often, which still reads as pacing rather
+ * than a slideshow — below roughly ten it starts to strobe.
+ */
+export const WORDS_PER_SEGMENT = 14;
+
+/**
+ * A length that would actually use the footage.
+ *
+ * The mismatch this fixes is not that the app picks too few moments — it is
+ * that nobody told you 110 words could only ever be six of them. Offered, never
+ * imposed: a short film from a large library is a legitimate choice, just not
+ * one anybody should make by accident.
+ */
+export function suggestedWordCount(availableMoments: number): number {
+  const raw = Math.max(1, availableMoments) * WORDS_PER_SEGMENT;
+  // Rounded to something a person would have typed, and capped: past about six
+  // minutes of narration this stops being a rough cut.
+  const capped = Math.min(raw, 900);
+  return Math.max(60, Math.round(capped / 10) * 10);
+}
+
+export interface Coverage {
+  /** Moments this length can carry. */
+  used: number;
+  /** Moments the library could offer. */
+  available: number;
+  percent: number;
+}
+
+/** What a given length does with the footage on hand. */
+export function coverageFor(wordCount: number, availableMoments: number): Coverage {
+  const used = momentsToRequest(wordCount, availableMoments);
+  return {
+    used,
+    available: availableMoments,
+    percent: availableMoments === 0 ? 0 : Math.round((used / availableMoments) * 100),
+  };
+}
 
 /** Narration styles the user can pick before generating. */
 export type ScriptStyle = "cinematic" | "casual" | "emotional" | "fast";

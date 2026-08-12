@@ -3152,3 +3152,17 @@ kbd {
 .describer-head .lib-act {
   margin-left: 0;
 }
+
+.coverage-line {
+  margin: 0.6rem 0 0;
+  font-size: 0.88rem;
+  display: flex;
+  align-items: baseline;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
+.coverage-line .is-good {
+  color: var(--ok);
+  font-weight: 600;
+}

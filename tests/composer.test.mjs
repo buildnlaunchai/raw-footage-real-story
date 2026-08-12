@@ -9,6 +9,7 @@ import {
   composeScript,
   momentsToRequest,
   targetSegmentCount,
+  WORDS_PER_SEGMENT,
   writeScript,
 } from "../.test-build/lib/scriptComposerCore.js";
 
@@ -50,7 +51,9 @@ function doublingModel() {
 }
 
 test("a 110-word target over 3 clips wants more segments than exist", () => {
-  assert.equal(targetSegmentCount(110), 6);
+  // Derived rather than hardcoded: the words-per-moment figure is a tuning
+  // knob, and the property being tested is the shortfall, not the constant.
+  assert.equal(targetSegmentCount(110), Math.round(110 / WORDS_PER_SEGMENT));
   assert.ok(targetSegmentCount(110) > CLIPS.length, "this is the condition that triggers the bug");
 });
 
@@ -96,7 +99,40 @@ test("collapsing keeps every word rather than dropping the extra lines", async (
 
 test("more clips than the target needs still yields the target", () => {
   // The clamp must not cut a large library down to the word-derived count.
-  assert.equal(momentsToRequest(110, 40), 6);
-  assert.equal(momentsToRequest(110, 3), 3);
-  assert.equal(momentsToRequest(600, 40), 33);
+  assert.equal(momentsToRequest(110, 40), Math.round(110 / WORDS_PER_SEGMENT));
+  assert.equal(momentsToRequest(110, 3), 3, "and never more than exist");
+  assert.equal(momentsToRequest(600, 40), 40, "a long script uses the whole library");
+});
+
+// --- coverage ---------------------------------------------------------------
+
+test("a length is measured against the footage that exists", async () => {
+  const { coverageFor, suggestedWordCount, WORDS_PER_SEGMENT } = await import(
+    "../.test-build/lib/scriptComposerCore.js"
+  );
+  // The complaint that started this: 110 words over a 40-clip library.
+  const thin = coverageFor(110, 40);
+  assert.equal(thin.used, 8, "110 words carries eight moments at 14 words each");
+  assert.equal(thin.percent, 20);
+
+  // And what it would take to use most of it.
+  assert.equal(suggestedWordCount(40), 560);
+  const full = coverageFor(560, 40);
+  assert.equal(full.used, 40, "the suggestion covers the library");
+  assert.equal(full.percent, 100);
+  assert.equal(WORDS_PER_SEGMENT, 14);
+});
+
+test("coverage never claims more moments than exist", async () => {
+  const { coverageFor } = await import("../.test-build/lib/scriptComposerCore.js");
+  const c = coverageFor(2000, 3);
+  assert.equal(c.used, 3, "a long script over three clips still has three");
+  assert.equal(c.percent, 100);
+});
+
+test("the suggestion stays in a range a person would choose", async () => {
+  const { suggestedWordCount } = await import("../.test-build/lib/scriptComposerCore.js");
+  assert.equal(suggestedWordCount(1), 60, "a floor, so one clip is not a 14-word film");
+  assert.ok(suggestedWordCount(300) <= 900, "and a ceiling, past which this is not a rough cut");
+  assert.equal(suggestedWordCount(40) % 10, 0, "rounded to something typeable");
 });

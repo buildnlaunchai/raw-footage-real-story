@@ -21,6 +21,10 @@ interface Props {
   totalSegments: number;
   chosenTitle: string;
   wordCount: number;
+  /** What the chosen length does with the described footage. */
+  coverage: { used: number; available: number; percent: number };
+  /** A length that would use most of the library. */
+  suggested: number;
   style: ScriptStyle;
   onStyle: (s: ScriptStyle) => void;
   language: string;
@@ -53,6 +57,8 @@ export function StoryPanel({
   totalSegments,
   chosenTitle,
   wordCount,
+  coverage,
+  suggested,
   style,
   onStyle,
   language,
@@ -103,6 +109,26 @@ export function StoryPanel({
             words · roughly {Math.round((wordCount / 150) * 60)}s of narration
           </span>
         </div>
+
+        {/* What this length does with the footage. The old default used six
+            moments however large the library was, and nothing said so. */}
+        <p className="coverage-line">
+          <span className={coverage.percent >= 60 ? "is-good" : undefined}>
+            {coverage.used} of {coverage.available} described moment
+            {coverage.available === 1 ? "" : "s"}
+          </span>{" "}
+          <span className="hint">({coverage.percent}% of your footage)</span>
+          {suggested !== wordCount && coverage.percent < 60 && (
+            <button
+              type="button"
+              className="link-button"
+              onClick={() => onWordCount(suggested)}
+              title={`About ${Math.round((suggested / 150) * 60)}s of narration`}
+            >
+              use {suggested} words to cover most of it
+            </button>
+          )}
+        </p>
       </div>
 
       <div className="field-row">

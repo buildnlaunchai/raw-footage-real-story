@@ -78,6 +78,7 @@ import {
   type ScriptLineDraft,
   type ScriptStyle,
 } from "./lib/scriptComposer";
+import { coverageFor, suggestedWordCount } from "./lib/scriptComposerCore";
 import { audioUrl, concatNarration } from "./lib/voiceover";
 import {
   characterCount,
@@ -1364,6 +1365,8 @@ function App() {
             totalSegments={segments}
             chosenTitle={title}
             wordCount={wordCount}
+            coverage={coverageFor(wordCount, segments)}
+            suggested={suggestedWordCount(segments)}
             style={style}
             onStyle={setStyle}
             language={language}
