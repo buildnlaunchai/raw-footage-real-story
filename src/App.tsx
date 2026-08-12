@@ -28,7 +28,12 @@ import {
   voiceTake,
   type Take,
 } from "./lib/takes";
-import { getWritingInstructions, SCRIPT_PROVIDERS } from "./lib/scriptProviders";
+import {
+  getIntroEnabled,
+  getWritingInstructions,
+  setIntroEnabled as storeIntroEnabled,
+  SCRIPT_PROVIDERS,
+} from "./lib/scriptProviders";
 import { CheckIcon, FilterIcon, SaveIcon, SearchIcon, SortIcon } from "./components/Icons";
 import {
   allowMedia,
@@ -73,11 +78,13 @@ import {
 } from "./lib/scriptProviders";
 import { suggestStoryIdeas, type IdeaProgress, type StoryIdea } from "./lib/storyIdeas";
 import {
+  generateHookForScript,
   generateScriptForTitle,
   type ComposeProgress,
   type ScriptLineDraft,
   type ScriptStyle,
 } from "./lib/scriptComposer";
+import { INTRO_FADE_MS, pickShots, type ShotCandidate } from "./lib/intro";
 import { coverageFor, suggestedWordCount } from "./lib/scriptComposerCore";
 import { audioUrl, concatNarration } from "./lib/voiceover";
 import {
@@ -94,12 +101,14 @@ import {
 import {
   detectFfmpeg,
   importMedia,
+  INTRO_CLIP_ID,
   MUSIC_BEDS,
   renderRoughCut,
   VIDEO_EXTENSIONS,
   type AssembleResult,
   type FfmpegInfo,
   type ImportedMedia,
+  type IntroSpec,
   type RenderProgress,
 } from "./lib/assembly";
 import "./App.css";
@@ -243,6 +252,13 @@ function App() {
   // --- script (C/D) --------------------------------------------------------
   const [lines, setLines] = useState<ScriptLineDraft[] | null>(null);
   const [words, setWords] = useState(0);
+  // The opening: one written line, its recording, and whether to make one at
+  // all. Kept beside the script rather than inside it because it belongs to no
+  // moment — see `ScriptSection.hook`.
+  const [hook, setHook] = useState<string | null>(null);
+  const [hookAudio, setHookAudio] = useState<VoicedLine | null>(null);
+  const [introEnabled, setIntroEnabled] = useState(true);
+  const [hookBusy, setHookBusy] = useState(false);
   const [composing, setComposing] = useState(false);
   const [composeProgress, setComposeProgress] = useState<ComposeProgress | null>(null);
   const [composeError, setComposeError] = useState<string | null>(null);
@@ -279,7 +295,10 @@ function App() {
         const key = `${l.clipId}#${l.segmentIndex}`;
         return stale.has(key) || missing.has(key);
       });
-    if (targets.length === 0) return;
+    // The opening is not one of the numbered lines, so it has to be asked
+    // about separately — and it is exactly what someone means by "record what
+    // changed" after rewriting it.
+    if (targets.length === 0 && !introPending) return;
 
     setTtsBusy(true);
     setTtsError(null);
@@ -306,6 +325,7 @@ function App() {
             (rank.get(`${b.clipId}#${b.segmentIndex}`) ?? 0),
         );
       });
+      if (introPending && hook) await recordHook(hook);
       // Everything now matches the current voice, so the stamp moves with it.
       setVoiceStamp(stamp);
       setAssembly(null);
@@ -327,6 +347,77 @@ function App() {
   const [musicId, setMusicId] = useState<string | null>(null);
 
   const projectId = manifest?.project.id ?? null;
+
+  // --- the opening ---------------------------------------------------------
+  //
+  // Derived rather than stored: which shots the montage uses depends on the
+  // hook's length, on what the story already shows and on which clip the film
+  // opens on, all of which move while the user works. Recomputing means the
+  // opening cannot quietly describe a version of the project that no longer
+  // exists.
+  const introShots = useMemo(() => {
+    if (!introEnabled || !hookAudio || !manifest) return [];
+    const candidates: ShotCandidate[] = manifest.clips.flatMap((c) =>
+      c.segments.map((s, i) => ({
+        clipId: c.id,
+        segmentIndex: i,
+        startMs: Math.round(s.startSec * 1000),
+        endMs: Math.round(s.endSec * 1000),
+        sourcePath: c.sourcePath,
+      })),
+    );
+    return pickShots(hookAudio.durationMs, candidates, {
+      storyClipIds: (lines ?? []).map((l) => l.clipId),
+      firstLineClipId: lines?.[0]?.clipId ?? null,
+    });
+  }, [introEnabled, hookAudio, manifest, lines]);
+
+  const introSpec: IntroSpec | null = useMemo(() => {
+    if (!hookAudio || introShots.length === 0) return null;
+    const hdr = new Map(manifest?.clips.map((c) => [c.id, c.isHdr]) ?? []);
+    return {
+      shots: introShots.map((s) => ({
+        sourcePath: s.sourcePath,
+        sourceInMs: s.sourceInMs,
+        durationMs: s.durationMs,
+        isHdr: hdr.get(s.clipId) ?? false,
+      })),
+      audioPath: hookAudio.audioPath,
+      fadeMs: INTRO_FADE_MS,
+    };
+  }, [introShots, hookAudio, manifest]);
+
+  /** What the cut's opening was made from, for the staleness check. */
+  const introSignature = introSpec
+    ? `${introSpec.audioPath}:${hookAudio?.durationMs ?? 0}|` +
+      introShots.map((s) => `${s.clipId}#${s.segmentIndex}@${s.sourceInMs}+${s.durationMs}`).join(",")
+    : "";
+
+  /** The recording no longer says what the written hook says. */
+  const hookStale =
+    hookAudio !== null && hook !== null && hookAudio.text.trim() !== hook.trim();
+
+  /**
+   * There is an opening the film cannot currently open with.
+   *
+   * Never spoken, or spoken with different words. Both mean the same thing to
+   * everything downstream: a render now would either drop the montage or open
+   * on a line nobody is saying.
+   */
+  const introPending = introEnabled && hook !== null && (hookAudio === null || hookStale);
+
+  const introProps = {
+    enabled: introEnabled,
+    hook,
+    audio: hookAudio,
+    stale: hookStale,
+    busy: hookBusy,
+    shots: introShots.length,
+    language,
+    onEdit: onEditHook,
+    onRegenerate: () => void onRegenerateHook(),
+    onRecord: () => void onRecordHook(),
+  };
 
   const scriptLanguage = languageFor(language);
 
@@ -373,6 +464,8 @@ function App() {
     setIdeas(null);
     setTitle("");
     setLines(null);
+    setHook(null);
+    setHookAudio(null);
     setVoiced(null);
     setAssembly(null);
     setPronunciations({});
@@ -417,6 +510,9 @@ function App() {
           setLines(last.script.lines.map((l) => ({ ...l })));
           setWords(last.script.lines.reduce((n, l) => n + l.text.split(/\s+/).length, 0));
           if (last.script.wordCountTarget) setWordCount(last.script.wordCountTarget);
+          // The words survive a restart; the recording of them does not, the
+          // same as every other line.
+          setHook(last.script.hook ?? null);
         }
       }
       setDirty(false);
@@ -449,6 +545,7 @@ function App() {
               generatedAt: now,
               lines: lines.map((l) => ({ ...l, edited: true })),
               wordCountTarget: wordCount,
+              hook,
             }
           : (existing?.script ?? null),
         audio: voiced
@@ -475,7 +572,7 @@ function App() {
           : [...m.videos, video],
       };
     },
-    [title, lines, wordCount, voiced, voice, pronunciations],
+    [title, lines, wordCount, hook, voiced, voice, pronunciations],
   );
 
   const onSave = useCallback(async () => {
@@ -633,6 +730,7 @@ function App() {
         style,
         language,
         critique,
+        hook: introEnabled,
         provider: scriptProvider,
         qualityTier,
         instructions: instructions ?? undefined,
@@ -641,8 +739,10 @@ function App() {
       setLines(draft.lines);
       setWords(draft.words);
       setScriptUsage(draft.usage ?? null);
+      setHook(draft.hook ?? null);
       // A new script invalidates the audio and the cut made from the old one.
       setVoiced(null);
+      setHookAudio(null);
       setAssembly(null);
       setDirty(true);
 
@@ -684,6 +784,85 @@ function App() {
     setDirty(true);
   }
 
+  /**
+   * Write a new opening line and nothing else.
+   *
+   * The first thing anyone hears, and short enough that trying three costs
+   * seconds — but only if trying one does not also rewrite the narration
+   * underneath it.
+   */
+  async function onRegenerateHook() {
+    if (!manifest || !lines || !title) return;
+    setHookBusy(true);
+    setComposeError(null);
+    try {
+      const written = await generateHookForScript(
+        {
+          title,
+          moments: manifest.clips.flatMap((c) => c.segments.map((s) => s.text)),
+          lines: lines.map((l) => l.text),
+        },
+        { language, style, provider: scriptProvider, qualityTier },
+      );
+      if (written) {
+        setHook(written);
+        // The old recording says the old words.
+        setHookAudio(null);
+        setDirty(true);
+      } else {
+        setComposeError(
+          "The model didn't return an opening line of a usable length. Try again.",
+        );
+      }
+    } catch (err) {
+      setComposeError(errorText(err));
+    } finally {
+      setHookBusy(false);
+    }
+  }
+
+  function onEditHook(text: string) {
+    setHook(text);
+    setDirty(true);
+  }
+
+  /**
+   * Speak the opening line.
+   *
+   * The same provider, voice and pronunciations as the rest, through the
+   * single-line path — so a hook rewritten twice does not re-record the film.
+   * Line number 0 keeps it out of the way of the numbered lines, which start
+   * at 1.
+   */
+  const recordHook = useCallback(
+    async (text: string): Promise<VoicedLine | null> => {
+      if (!projectId || !text.trim()) return null;
+      const spoken = await provider.synthesizeLine(
+        { clipId: INTRO_CLIP_ID, segmentIndex: 0, text },
+        0,
+        { voiceId: voice, projectId, language, pronunciations },
+      );
+      setHookAudio(spoken);
+      return spoken;
+    },
+    [projectId, provider, voice, language, pronunciations],
+  );
+
+  async function onRecordHook() {
+    if (!hook) return;
+    setHookBusy(true);
+    setTtsError(null);
+    try {
+      await recordHook(hook);
+      setAssembly(null);
+      setDirty(true);
+    } catch (err) {
+      setTtsError(errorText(err));
+    } finally {
+      setHookBusy(false);
+    }
+  }
+
   // --- voiceover + stage D -------------------------------------------------
 
   async function onGenerateVoiceover() {
@@ -705,6 +884,21 @@ function App() {
       setVoiced(result.lines.length > 0 ? result.lines : null);
       setVoiceStamp({ providerId, voiceId: voice, language, pronunciations });
       setFullNarration(null);
+
+      // The opening, in the same voice, as part of the same run. Its own
+      // failure: no opening is a film that starts on its first line, and
+      // throwing here would discard narration that is already recorded and,
+      // on a cloud voice, already billed.
+      if (introEnabled && hook) {
+        try {
+          await recordHook(hook);
+        } catch (err) {
+          setTtsError(
+            `The narration recorded, but the opening line did not: ${errorText(err)}`,
+          );
+          setHookAudio(null);
+        }
+      }
       if (result.lines.length > 0 && projectId) {
         const take = voiceTake(
           result.lines,
@@ -902,11 +1096,17 @@ function App() {
         segmentStarts,
         crossfadeMs,
         musicId,
+        intro: introSpec,
         onProgress: setRenderProgress,
       });
       setAssembly(result);
+      if (result.introError) {
+        setAssemblyError(
+          `The cut rendered, but without its opening: ${result.introError}`,
+        );
+      }
       // Stamp what this cut was made from, so a later edit can be seen.
-      setRenderedSig(renderSignature(voiced, crossfadeMs, musicId));
+      setRenderedSig(renderSignature(voiced, crossfadeMs, musicId, introSignature));
 
       const take = renderTake(
         takeId,
@@ -1009,6 +1209,7 @@ function App() {
     void refreshLibrary();
     void invoke<string>("machine_user").then(setUserName).catch(() => setUserName(""));
     void getWritingInstructions().then(setInstructions);
+    void getIntroEnabled().then(setIntroEnabled);
     void checkReadiness();
   }, [refreshLibrary]);
 
@@ -1255,7 +1456,7 @@ function App() {
   const assemblyCurrent =
     !assembly ||
     renderedSig === "" ||
-    renderedSig === renderSignature(voiced, crossfadeMs, musicId);
+    renderedSig === renderSignature(voiced, crossfadeMs, musicId, introSignature);
 
   const busyStage: StageId | null = importing
     ? "footage"
@@ -1279,6 +1480,7 @@ function App() {
     unrecordedLines: unrecorded,
     hasAssembly: assembly !== null,
     assemblyCurrent,
+    introPending,
     busy: busyStage,
   };
   const statuses = stageStatuses(pipeline);
@@ -1427,6 +1629,7 @@ function App() {
             showPronunciationFixes={provider.capabilities.reportsUnpronounceableWords}
             busy={ttsBusy}
             resynthesizing={resynthesizing}
+            intro={introProps}
             onEditLine={onEditLine}
             onHearLine={onHearLine}
             onCorrectWord={onCorrectWord}
@@ -1574,6 +1777,7 @@ function App() {
               showPronunciationFixes={provider.capabilities.reportsUnpronounceableWords}
               busy={ttsBusy}
               resynthesizing={resynthesizing}
+              intro={introProps}
               onEditLine={onEditLine}
               onHearLine={onHearLine}
               onCorrectWord={onCorrectWord}
@@ -1713,6 +1917,7 @@ function App() {
                 makingPlaceholders={false}
                 onMakePlaceholders={() => {}}
                 onRender={onRender}
+                intro={introSpec ? { hook, shots: introShots.length } : null}
                 hasExternalMedia={manifest.clips.some((c) => c.sourcePath && !c.isPlaceholder)}
               >
                 <div className="field-row">
@@ -1841,7 +2046,14 @@ function App() {
               <h1>Settings</h1>
               <span className="lib-head-count">how the script is written</span>
             </header>
-            <SettingsPanel language={language} />
+            <SettingsPanel
+              language={language}
+              introEnabled={introEnabled}
+              onIntroEnabledChange={(on) => {
+                setIntroEnabled(on);
+                void storeIntroEnabled(on);
+              }}
+            />
           </>
         ) : view === "home" ? (
           // Left empty on purpose, pending a decision about what belongs here.

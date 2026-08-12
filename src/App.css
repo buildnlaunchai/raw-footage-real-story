@@ -1154,6 +1154,28 @@ select {
   align-items: center;
 }
 
+/* The opening line — set apart from the numbered script because it belongs to
+   no moment and is not counted in the word target. */
+.opening-block {
+  background: var(--card-2);
+  border: 1px dashed var(--line);
+  border-radius: var(--r-md);
+  padding: 0.9rem 1rem;
+  margin-bottom: 0.9rem;
+}
+
+.opening-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.55rem;
+}
+
+.opening-head strong {
+  font-size: 0.9rem;
+}
+
 /* ── segments / clips ──────────────────────────────────────────────────── */
 
 .segment-layout {

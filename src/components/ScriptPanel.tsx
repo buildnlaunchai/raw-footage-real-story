@@ -14,7 +14,7 @@
 import { useEffect, useState } from "react";
 import { audioUrl, type VoicedLine } from "../lib/voiceover";
 import type { ProjectClip } from "../lib/project";
-import type { ScriptLineDraft } from "../lib/scriptComposer";
+import { HOOK_MAX_WORDS, HOOK_MIN_WORDS, hookLengthOk, type ScriptLineDraft } from "../lib/scriptComposer";
 
 interface Props {
   clips: ProjectClip[];
@@ -30,6 +30,20 @@ interface Props {
   showPronunciationFixes: boolean;
   busy: boolean;
   resynthesizing: string | null;
+  /** The opening line, and everything about the state it is in. */
+  intro: {
+    enabled: boolean;
+    hook: string | null;
+    audio: VoicedLine | null;
+    stale: boolean;
+    busy: boolean;
+    /** How many shots the montage would cut, once there is a recording. */
+    shots: number;
+    language: string;
+    onEdit: (text: string) => void;
+    onRegenerate: () => void;
+    onRecord: () => void;
+  };
   onEditLine: (index: number, text: string) => void;
   /** Record and play a single line, before the whole script is recorded. */
   onHearLine: (index: number) => void;
@@ -53,6 +67,7 @@ export function ScriptPanel({
   showPronunciationFixes,
   busy,
   resynthesizing,
+  intro,
   onEditLine,
   onHearLine,
   onCorrectWord,
@@ -103,6 +118,8 @@ export function ScriptPanel({
           )}
         </p>
       </div>
+
+      {intro.enabled && <Opening intro={intro} busy={busy} />}
 
       <ol className="script-list">
         {lines.map((line, i) => {
@@ -295,5 +312,125 @@ export function ScriptPanel({
         </div>
       )}
     </section>
+  );
+}
+
+/**
+ * The opening line.
+ *
+ * Above the numbered lines and outside the list, because it is not one of them:
+ * it narrates no moment, it plays over a montage rather than a clip, and it is
+ * counted against no word target. Showing it as line zero would say the
+ * opposite of all three.
+ */
+function Opening({
+  intro,
+  busy,
+}: {
+  intro: Props["intro"];
+  busy: boolean;
+}) {
+  const [playing, setPlaying] = useState(false);
+  const text = intro.hook ?? "";
+  const words = text.trim() ? text.trim().split(/\s+/).length : 0;
+  const lengthOk = !text.trim() || hookLengthOk(text, intro.language);
+
+  function play() {
+    if (!intro.audio) return;
+    const el = new Audio(audioUrl(intro.audio.audioPath) + `?t=${Date.now()}`);
+    setPlaying(true);
+    el.onended = () => setPlaying(false);
+    el.onerror = () => setPlaying(false);
+    void el.play();
+  }
+
+  return (
+    <div className="opening-block">
+      <div className="opening-head">
+        <strong>Opening line</strong>
+        <span className="hint">
+          {intro.audio
+            ? `spoken over ${intro.shots} shot${intro.shots === 1 ? "" : "s"} before the film starts`
+            : "spoken over a short montage before the film starts"}
+        </span>
+      </div>
+
+      {intro.hook === null ? (
+        <div className="voiced-controls">
+          <p className="hint" style={{ margin: 0 }}>
+            This video has no opening line yet.
+          </p>
+          <button
+            type="button"
+            className="ghost-button small"
+            disabled={busy || intro.busy}
+            onClick={intro.onRegenerate}
+          >
+            {intro.busy ? "Writing…" : "Write one"}
+          </button>
+        </div>
+      ) : (
+        <>
+          <textarea
+            className="clip-input"
+            rows={2}
+            value={text}
+            disabled={busy || intro.busy}
+            aria-label="Opening line"
+            onChange={(e) => intro.onEdit(e.currentTarget.value)}
+          />
+          <div className="voiced-controls">
+            <button
+              type="button"
+              className="ghost-button small"
+              disabled={busy || intro.busy}
+              onClick={intro.onRegenerate}
+              title="Write a different opening line, leaving the script alone"
+            >
+              {intro.busy ? "Working…" : "↻ Rewrite"}
+            </button>
+            {intro.audio && !intro.stale && (
+              <button
+                type="button"
+                className="ghost-button small"
+                disabled={intro.busy}
+                onClick={play}
+              >
+                {playing ? "▶ Playing" : "▶ Play"}
+              </button>
+            )}
+            <button
+              type="button"
+              className="ghost-button small"
+              disabled={busy || intro.busy || !text.trim()}
+              onClick={intro.onRecord}
+            >
+              {intro.audio ? "↻ Re-record" : "▶ Hear it"}
+            </button>
+            {intro.audio && (
+              <span className="hint">{(intro.audio.durationMs / 1000).toFixed(1)}s</span>
+            )}
+            {intro.stale && (
+              <span className="skip-chip" title="The opening changed after it was recorded">
+                out of date
+              </span>
+            )}
+            {!lengthOk && (
+              <span className="hint">
+                {words} words — an opening reads best between {HOOK_MIN_WORDS} and{" "}
+                {HOOK_MAX_WORDS}
+              </span>
+            )}
+          </div>
+          {!intro.audio && (
+            <p className="hint" style={{ marginBottom: 0 }}>
+              Recorded with the rest of the narration, or on its own from here.
+              Without a recording there is no montage and the film starts on its
+              first line.
+            </p>
+          )}
+        </>
+      )}
+    </div>
   );
 }

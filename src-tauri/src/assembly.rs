@@ -119,6 +119,26 @@ pub struct VoicedSpec {
     pub source_start_ms: Option<u64>,
 }
 
+/// The opening montage, as the frontend asks for it.
+///
+/// The shots are chosen in TypeScript (`lib/intro.ts`) and the hook is spoken
+/// through the ordinary voice pipeline, so by the time it arrives here there is
+/// nothing left to decide — only a montage to render and a dissolve to place.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IntroSpec {
+    pub shots: Vec<crate::ffmpeg::IntroShot>,
+    /// The spoken hook. Its length is the montage's length.
+    pub audio_path: String,
+    /// Dissolve from the montage into the first narrated line.
+    #[serde(default = "default_intro_fade")]
+    pub fade_ms: u32,
+}
+
+fn default_intro_fade() -> u32 {
+    600
+}
+
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct GeneratedClip {
@@ -323,6 +343,12 @@ pub struct AssembleResult {
     pub project_path: String,
     pub duration_ms: u64,
     pub timeline: Vec<crate::timeline::TimelineItem>,
+    /// Why the opening is missing, when one was asked for and could not be made.
+    ///
+    /// Present rather than thrown: the cut itself rendered, and a silent
+    /// omission would leave the user staring at a film that starts where they
+    /// did not expect it to with nothing to explain why.
+    pub intro_error: Option<String>,
 }
 
 #[tauri::command]
@@ -343,6 +369,7 @@ pub async fn assembly_render(
     video_title: Option<String>,
     crossfade_ms: Option<u32>,
     music_id: Option<String>,
+    intro: Option<IntroSpec>,
 ) -> Result<AssembleResult, FfmpegError> {
     let info = ffmpeg::detect(&load_settings(&app))?;
     let dir = project_dir(&app, &project_id)?;
@@ -441,7 +468,7 @@ pub async fn assembly_render(
         let p = crate::resources::root().join("music").join(format!("{safe}.m4a"));
         p.is_file().then(|| p.to_string_lossy().to_string())
     });
-    let settings = RenderSettings {
+    let mut settings = RenderSettings {
         crossfade_ms: crossfade_ms.unwrap_or(0),
         music_path,
         ..RenderSettings::default()
@@ -454,6 +481,48 @@ pub async fn assembly_render(
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
         .collect();
+
+    // --- opening montage ------------------------------------------------------
+    //
+    // Rendered first, to its own file, then prepended as an ordinary item. A
+    // montage that fails to render loses the opening and nothing else: the cut
+    // is the work, the opening is an addition to it, and swapping that around
+    // would mean a bad first frame costs somebody their whole film.
+    let mut items = items;
+    let mut intro_error: Option<String> = None;
+    if let Some(spec) = intro.as_ref().filter(|i| !i.shots.is_empty()) {
+        let intro_path = dir.join("render").join(format!("intro-{stem}.mp4"));
+        match ffmpeg::render_intro(
+            &info.ffmpeg,
+            &spec.shots,
+            Path::new(&spec.audio_path),
+            &settings,
+            &info.caps,
+            &intro_path,
+        ) {
+            Ok(intro_ms) => {
+                // Placed with a fade of zero first, only so the clamp can see
+                // the montage's own length alongside every other slot.
+                let placed = timeline::with_intro(&items, intro_ms, 0);
+                render_items.insert(
+                    0,
+                    RenderItem {
+                        video: intro_path,
+                        audio: PathBuf::from(&spec.audio_path),
+                        item: placed[0].clone(),
+                        // Already tone-mapped by `render_intro` if it needed to be.
+                        is_hdr: false,
+                    },
+                );
+                // Clamped against the assembled list, so a one-second first line
+                // cannot be swallowed whole by the dissolve into it.
+                settings.intro_fade_ms = ffmpeg::clamp_crossfade(spec.fade_ms, &render_items);
+                items = timeline::with_intro(&items, intro_ms, settings.intro_fade_ms);
+            }
+            Err(e) => intro_error = Some(e.message.clone()),
+        }
+    }
+
     let out = dir.join("render").join(format!("cut-{stem}.mp4"));
     ffmpeg::render_rough_cut(&info.ffmpeg, &render_items, &settings, &info.caps, &out)?;
 
@@ -527,6 +596,12 @@ pub async fn assembly_render(
         .video(&video_id)
         .and_then(|v| v.script.as_ref())
         .and_then(|s| s.word_count_target);
+    // The render knows the montage but not the words spoken over it, so the
+    // hook is carried through rather than rewritten from nothing.
+    let existing_hook = manifest
+        .video(&video_id)
+        .and_then(|v| v.script.as_ref())
+        .and_then(|s| s.hook.clone());
     let video = manifest.video_mut(&video_id).expect("just inserted");
     if let Some(t) = video_title {
         video.title = t;
@@ -549,6 +624,7 @@ pub async fn assembly_render(
             })
             .collect(),
         word_count_target: existing_target,
+        hook: existing_hook,
     });
     video.audio = Some(AudioSection {
         voice,
@@ -580,6 +656,7 @@ pub async fn assembly_render(
         project_path: manifest_path.to_string_lossy().into(),
         duration_ms: timeline::total_duration_ms(&items),
         timeline: items,
+        intro_error,
     })
 }
 

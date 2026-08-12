@@ -53,6 +53,24 @@ export interface AssembleResult {
   projectPath: string;
   durationMs: number;
   timeline: TimelineItem[];
+  /** Set when an opening was asked for and could not be rendered. */
+  introError: string | null;
+}
+
+/**
+ * The clip id the opening montage occupies on the timeline.
+ *
+ * It is not a clip and never will be; the montage is rendered to one file and
+ * enters the cut as an ordinary item, so everything downstream only has to
+ * recognise the name.
+ */
+export const INTRO_CLIP_ID = "__intro__";
+
+/** What the montage is made of, once the shots are chosen and the hook spoken. */
+export interface IntroSpec {
+  shots: { sourcePath: string; sourceInMs: number; durationMs: number; isHdr: boolean }[];
+  audioPath: string;
+  fadeMs: number;
 }
 
 export interface GeneratedClip {
@@ -186,6 +204,8 @@ export interface RenderOptions {
   crossfadeMs?: number;
   /** Bundled bed id, or null for silence under the narration. */
   musicId?: string | null;
+  /** The opening montage, or null for a film that starts on its first line. */
+  intro?: IntroSpec | null;
   onProgress?: (p: RenderProgress) => void;
 }
 
@@ -212,6 +232,7 @@ export async function renderRoughCut(
       videoTitle: opts.videoTitle ?? null,
       crossfadeMs: opts.crossfadeMs ?? 0,
       musicId: opts.musicId ?? null,
+      intro: opts.intro ?? null,
     });
   } catch (err) {
     throw asError(err);

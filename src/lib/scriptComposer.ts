@@ -10,11 +10,20 @@ import {
   type QualityTier,
   type ScriptProviderId,
 } from "./scriptProviders";
-import { composeScript, type ComposeOptions, type ScriptDraft } from "./scriptComposerCore";
+import {
+  composeScript,
+  writeHook,
+  type ComposeOptions,
+  type ScriptDraft,
+  type ScriptStyle,
+} from "./scriptComposerCore";
 
 export {
   SCRIPT_STYLES,
   ScriptComposeError,
+  HOOK_MIN_WORDS,
+  HOOK_MAX_WORDS,
+  hookLengthOk,
   introducedNames,
   properNouns,
   targetSegmentCount,
@@ -51,4 +60,30 @@ export async function generateScriptForTitle(
   return provider === "openai"
     ? { ...draft, usage: { inputTokens: meter.input, outputTokens: meter.output, calls: meter.calls } }
     : draft;
+}
+
+/**
+ * Rewrite only the opening line.
+ *
+ * The hook is the one line most likely to be tried a few times — it is short,
+ * it is the first thing anyone hears, and taste decides it. Regenerating the
+ * whole script to change it would throw away narration the user has already
+ * approved and, on a paid provider, bill for it again.
+ */
+export async function generateHookForScript(
+  material: { title: string; moments: string[]; lines: string[] },
+  options: {
+    language?: string;
+    style?: ScriptStyle;
+    seed?: number;
+    provider?: ScriptProviderId;
+    qualityTier?: QualityTier;
+  } = {},
+): Promise<string | null> {
+  const provider = options.provider ?? "local";
+  return await writeHook(
+    makeGenerateFn(provider, options.qualityTier ?? "balanced", new UsageMeter()),
+    material,
+    options,
+  );
 }

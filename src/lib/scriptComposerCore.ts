@@ -171,10 +171,17 @@ export interface ScriptDraft {
   words: number;
   /** How many segments were considered before narrowing. */
   consideredSegments: number;
+  /**
+   * The opening line, spoken over the montage before the film starts.
+   *
+   * Null when it was turned off, or when the model could not write one the
+   * right length — an opening is an addition, never a precondition.
+   */
+  hook?: string | null;
 }
 
 export interface ComposeProgress {
-  stage: "selecting" | "writing" | "critiquing" | "adjusting";
+  stage: "selecting" | "writing" | "critiquing" | "adjusting" | "hook";
   done: number;
   total: number;
 }
@@ -287,6 +294,280 @@ function writeSystemFor(lang: ScriptLanguage): string {
     `breath. Not literary, not archaic, not formal written prose. ` +
     (lang.registerHint ? `${lang.registerHint} ` : "")
   );
+}
+
+// --- the opening hook -----------------------------------------------------
+//
+// One spoken line that runs over the opening montage, before the film proper
+// begins. It is not part of the script the rest of the app reasons about: it
+// maps to no moment, it is written after the body rather than with it, and it
+// is left out of the word target and the critique pass.
+//
+// Left out on purpose. The word target is a promise about how long the film
+// is, and twenty words of opening would silently eat into it. The critique
+// pass judges lines against the moment they narrate, and the hook narrates
+// none — asked to check it, the model reliably "fixes" it into a description
+// of the first clip, which is exactly what an opening must not be.
+
+/**
+ * The length a hook is asked for. A montage is short and cuts fast, so this is
+ * what the prompt names and what the UI describes.
+ */
+export const HOOK_MIN_WORDS = 12;
+export const HOOK_MAX_WORDS = 25;
+
+/**
+ * The length a hook is *refused* below — which is not the same number.
+ *
+ * Measured against a live 7B writing Bengali: natural openings came back at
+ * five to nine words, because Bengali carries in one whitespace token what
+ * English spreads over three. Enforcing the English floor rejected two hooks
+ * in three and left the feature effectively broken outside English.
+ *
+ * The ceiling is the one that protects anything — a paragraph read over a
+ * montage is a paragraph read over a montage in any language. A short opening
+ * is just a short opening, and "The road ran forty miles" is a fine one.
+ */
+export const HOOK_FLOOR_WORDS = 5;
+
+const HOOK_SYSTEM_BASE =
+  "You write the opening line of a short travel film — the sentence that plays " +
+  "over the first few seconds before the film proper starts. " +
+  "One or two sentences, spoken aloud, and nothing else. " +
+  // Every failure mode here is a form of announcing rather than opening.
+  "You never say the title, never say 'welcome to', 'join us', 'in this video', " +
+  "'today we', or name the film. You do not summarise what is coming. " +
+  "You do not describe the first shot; the pictures are doing that already. " +
+  "You say the thing that makes someone stay — a fact, a contradiction, a " +
+  "question the footage answers — and you take it only from the trip below.";
+
+/**
+ * Openings that work, and the ones a small model reaches for instead.
+ *
+ * Measured: with the instruction alone, a 7B returned "the harbour held its
+ * breath", "ice sealing the dreams of boats still dreaming" and "frost clung
+ * like forgotten dreams" — the same interchangeable-poetry failure the body's
+ * examples exist to prevent, concentrated into the one line everybody hears.
+ * Showing the standard moves output far more than describing it does.
+ *
+ * English only, for the same reason the body's are: shown to a model writing
+ * Bengali they would teach the rhythm of translated English.
+ */
+const HOOK_FEW_SHOT = `Openings that work:
+
+- The road ran forty miles without meeting another car, and we met the sheep instead.
+- Nobody told us the harbour freezes with the boats still in it.
+- We came for the lights and spent four nights looking at cloud.
+- It is minus eleven and a man is scraping his deck with a shovel.
+
+What they have in common: one concrete fact, said plainly, that the footage
+then delivers on. None of them says beautiful, stunning or breathtaking, none
+of them personifies the weather, and none of them could be the opening of a
+film about somewhere else.
+
+Openings to avoid, and why:
+- "The harbour held its breath, frozen in time." — personification and a cliché; says nothing.
+- "Join us as we journey through the frozen north." — announces the film instead of starting it.
+- "A breathtaking landscape of ice and beauty awaits." — could open any travel film ever made.`;
+
+function hookSystemFor(lang: ScriptLanguage): string {
+  if (lang.code === "en") {
+    return (
+      `${HOOK_SYSTEM_BASE} ` +
+      "You never use the words beautiful, stunning, breathtaking, amazing or incredible."
+    );
+  }
+  return (
+    `${HOOK_SYSTEM_BASE} ` +
+    `You write entirely in ${lang.label} (${lang.nativeLabel}), in the contemporary ` +
+    `spoken register — this is said aloud, not read. Not literary, not archaic. ` +
+    (lang.registerHint ? `${lang.registerHint} ` : "")
+  );
+}
+
+/**
+ * The band in this language's own counting unit.
+ *
+ * The same ratios the length correction uses: a Chinese character carries more
+ * than an English word, a Thai one far less.
+ */
+function hookBand(lang: ScriptLanguage): { min: number; max: number; floor: number } {
+  const scale =
+    lang.counting !== "characters"
+      ? 1
+      : lang.code === "th"
+        ? 4.0
+        : lang.code === "ja"
+          ? 2.0
+          : 1.6;
+  return {
+    min: Math.round(HOOK_MIN_WORDS * scale),
+    max: Math.round(HOOK_MAX_WORDS * scale),
+    floor: Math.round(HOOK_FLOOR_WORDS * scale),
+  };
+}
+
+/**
+ * Whether a hook can run under a montage.
+ *
+ * Judged against the floor, not against what the prompt asked for: the ask
+ * shapes the writing, this refuses the unusable. Anything under the floor is
+ * not a sentence, and anything over the cap is not an opening.
+ */
+export function hookLengthOk(text: string, language = "en"): boolean {
+  const lang = languageFor(language);
+  const { max, floor } = hookBand(lang);
+  const n = countUnits(text, lang);
+  return n >= floor && n <= max;
+}
+
+/**
+ * Whether the hook is really the film's first line wearing a hat.
+ *
+ * Measured against a live 7B: asked for an opening and shown the lines it
+ * comes before, two of five attempts returned line one *verbatim*. The
+ * instruction not to is in the prompt and the model agrees with it and then
+ * does it anyway — a hook that repeats the first line makes the film start
+ * twice, which is worse than having no opening at all.
+ *
+ * Six consecutive words is the threshold: long enough that ordinary shared
+ * phrasing about the same trip ("across the valley", "the only road") passes,
+ * short enough that a rewritten copy of a line does not.
+ */
+export function echoesScript(hook: string, lines: string[], language = "en"): boolean {
+  const lang = languageFor(language);
+  const norm = (s: string) =>
+    s.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, " ").replace(/\s+/g, " ").trim();
+
+  const h = norm(hook);
+  if (!h) return false;
+
+  for (const raw of lines) {
+    const l = norm(raw);
+    if (!l) continue;
+    if (h.includes(l) || l.includes(h)) return true;
+
+    if (lang.counting === "characters") {
+      // No word boundaries to count, so a run of characters stands in.
+      const run = 12;
+      const bare = h.replace(/\s/g, "");
+      const other = l.replace(/\s/g, "");
+      for (let i = 0; i + run <= bare.length; i++) {
+        if (other.includes(bare.slice(i, i + run))) return true;
+      }
+      continue;
+    }
+
+    const words = h.split(" ");
+    const run = 6;
+    for (let i = 0; i + run <= words.length; i++) {
+      if (l.includes(words.slice(i, i + run).join(" "))) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Strip what a model adds when asked for one line: quotes, a leading number,
+ * a stray "Narration:" label. Cheaper and more reliable than another call.
+ */
+function cleanHook(raw: string): string {
+  let text = raw.trim();
+  try {
+    const parsed = JSON.parse(text) as { hook?: unknown };
+    if (typeof parsed.hook === "string") text = parsed.hook;
+  } catch {
+    /* not JSON; the model answered in plain text, which is also fine */
+  }
+  return text
+    .trim()
+    .replace(/^\s*\d+[.)]\s*/, "")
+    .replace(/^["“”'']+|["“”'']+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+const HOOK_SCHEMA = {
+  type: "object",
+  properties: { hook: { type: "string" } },
+  required: ["hook"],
+};
+
+/**
+ * Write the opening line for a finished script.
+ *
+ * The fast model, deliberately: this is one short sentence chosen from material
+ * already written, not the piece of writing the film rests on, and it is the
+ * thing most likely to be regenerated a few times until it sounds right.
+ *
+ * Returns null rather than something unusable — a film with no opening is a
+ * normal film, and a twelve-second hook over a three-shot montage is not.
+ */
+export async function writeHook(
+  generate: GenerateFn,
+  material: { title: string; moments: string[]; lines: string[] },
+  options: { language?: string; style?: ScriptStyle; seed?: number } = {},
+): Promise<string | null> {
+  const lang = languageFor(options.language ?? "en");
+  const { min, max, floor } = hookBand(lang);
+  const unit = lang.counting === "characters" ? "characters" : "words";
+  const style = STYLE_DIRECTION[options.style ?? "cinematic"];
+
+  const trip = material.moments.slice(0, 40).map((m) => `- ${m}`).join("\n");
+  const opening = material.lines.slice(0, 3).join(" ");
+
+  const ask = (extra: string) =>
+    generate({
+      system: hookSystemFor(lang),
+      temperature: 0.9, // one short line; the safe answer here is the dull one
+      seed: options.seed,
+      numCtx: NUM_CTX,
+      tier: "fast",
+      format: HOOK_SCHEMA,
+      prompt:
+        (lang.code === "en" ? `${HOOK_FEW_SHOT}\n\n---\n\n` : "") +
+        `The film is called "${material.title}".\n\n${style}\n\n` +
+        `What the trip contains:\n${trip}\n\n` +
+        (opening ? `The film's first lines, which yours comes before:\n${opening}\n\n` : "") +
+        `Write the opening line. Between ${min} and ${max} ${unit}. ` +
+        `It must not repeat or paraphrase the first lines above — it comes ` +
+        `before them and the viewer hears both. ${extra}` +
+        `Return JSON with a "hook" string.`,
+    });
+
+  // Up to three attempts, each told exactly what was wrong with the last.
+  // Naming the specific miss works far better than rerolling the same prompt,
+  // and both failures are cheap: this is the fast model writing one sentence.
+  let extra = "";
+  for (let attempt = 0; attempt < 3; attempt++) {
+    let text: string;
+    try {
+      text = cleanHook(await ask(extra));
+    } catch {
+      return null; // the model or the network failed; the caller has no hook
+    }
+    if (!text) {
+      extra = "";
+      continue;
+    }
+    if (!hookLengthOk(text, lang.code)) {
+      // Named against what is actually refused, so a model that keeps landing
+      // just under the ask is not told to fix something that is already fine.
+      extra =
+        countUnits(text, lang) > max
+          ? `Your last attempt was too long. Hard limit: ${max} ${unit}. `
+          : `Your last attempt was too short — under ${floor} ${unit} is not a sentence. `;
+      continue;
+    }
+    if (echoesScript(text, material.lines, lang.code)) {
+      extra =
+        "Your last attempt repeated a line the film already has. Say something " +
+        "those lines do not say — a different moment, or the thing they leave out. ";
+      continue;
+    }
+    return text;
+  }
+  return null;
 }
 
 /**
@@ -411,6 +692,12 @@ export interface ComposeOptions {
   onProgress?: (p: ComposeProgress) => void;
   /** Replaces the built-in writing instruction, from Settings. */
   instructions?: string;
+  /**
+   * Write an opening line for the montage. On unless turned off in settings.
+   * Its own extra call, and its own failure — a hook that does not come back
+   * leaves the rest of the script untouched.
+   */
+  hook?: boolean;
 }
 
 /**
@@ -739,10 +1026,28 @@ export async function composeScript(
     options.onProgress?.({ stage: "adjusting", done: 1, total: 1 });
   }
 
+  // Last, and after the word count is settled, so the hook cannot be counted
+  // against a target it was never part of.
+  let hook: string | null = null;
+  if (options.hook !== false) {
+    options.onProgress?.({ stage: "hook", done: 0, total: 1 });
+    hook = await writeHook(
+      generate,
+      {
+        title: options.title,
+        moments: selected.map((c) => c.text),
+        lines: lines.map((l) => l.text),
+      },
+      { language: options.language, style: options.style, seed: options.seed },
+    );
+    options.onProgress?.({ stage: "hook", done: 1, total: 1 });
+  }
+
   return {
     title: options.title,
     lines,
     words,
     consideredSegments: candidates.length,
+    hook,
   };
 }

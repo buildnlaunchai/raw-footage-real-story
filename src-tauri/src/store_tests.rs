@@ -263,6 +263,7 @@ fn project_with_video() -> ProjectFile {
             edited: false,
         }],
         word_count_target: Some(150),
+        hook: None,
     });
     v.audio = Some(AudioSection {
         voice: "af_heart".into(),
@@ -470,4 +471,99 @@ fn an_exported_bundle_contains_no_credentials_or_settings() {
         assert!(!text.contains("sk_should_never_ship"), "key material found in {name}");
         assert!(!text.contains("apikey"), "an apiKey field appeared in {name}");
     }
+}
+
+// --- what the frontend actually sends --------------------------------------
+//
+// These check the wire shape rather than the behaviour behind it. The reason
+// is a specific failure: `take_add` rejected every recording for a week
+// because the payload's field names were guessed rather than read, and the
+// symptom was a successful, billed synthesis reported to the user as an error.
+// A serde struct that does not match its caller fails at exactly that distance
+// from the mistake.
+
+#[test]
+fn the_intro_payload_matches_what_assembly_ts_sends() {
+    use crate::assembly::IntroSpec;
+
+    // Copied from the object built in `src/App.tsx` — camelCase, `isHdr` on
+    // each shot, `fadeMs` alongside the audio.
+    let raw = serde_json::json!({
+        "shots": [
+            {
+                "sourcePath": "/Users/me/Movies/IMG_0001.MOV",
+                "sourceInMs": 3200,
+                "durationMs": 1000,
+                "isHdr": false
+            },
+            {
+                "sourcePath": "/Users/me/Movies/IMG_0002.MOV",
+                "sourceInMs": 500,
+                "durationMs": 1000,
+                "isHdr": true
+            }
+        ],
+        "audioPath": "/Users/me/Library/.../audio/line-00.wav",
+        "fadeMs": 600
+    });
+
+    let spec: IntroSpec = serde_json::from_value(raw).expect("the intro payload parses");
+    assert_eq!(spec.shots.len(), 2);
+    assert_eq!(spec.shots[0].source_in_ms, 3_200);
+    assert!(spec.shots[1].is_hdr, "HDR travels per shot, not per montage");
+    assert_eq!(spec.fade_ms, 600);
+}
+
+#[test]
+fn an_intro_with_no_fade_named_still_gets_one() {
+    use crate::assembly::IntroSpec;
+
+    // A missing `fadeMs` must not mean a hard cut into the film: the dissolve
+    // is what makes the montage read as an opening rather than as a first
+    // clip nobody narrates.
+    let spec: IntroSpec = serde_json::from_value(serde_json::json!({
+        "shots": [{ "sourcePath": "/a.mov", "sourceInMs": 0, "durationMs": 900 }],
+        "audioPath": "/hook.wav"
+    }))
+    .expect("parses without the optional fields");
+    assert!(spec.fade_ms > 0);
+    assert!(!spec.shots[0].is_hdr, "absent means not HDR, not a parse failure");
+}
+
+#[test]
+fn a_script_saved_before_openings_existed_still_loads() {
+    // The hook was added to an existing section. Without a default, every
+    // script already on disk would fail to parse and come back empty.
+    let raw = serde_json::json!({
+        "model": "qwen2.5:7b",
+        "generatedAt": NOW,
+        "lines": [{ "clipId": "c0", "segmentIndex": 0, "text": "The harbour.", "edited": false }],
+        "wordCountTarget": 150
+    });
+    let section: project::ScriptSection = serde_json::from_value(raw).expect("old script parses");
+    assert_eq!(section.hook, None);
+    assert_eq!(section.lines.len(), 1);
+}
+
+#[test]
+fn deleting_a_take_takes_its_opening_with_it() {
+    // The montage is rendered to its own file beside the cut and referenced by
+    // nothing else, so a take deletion that only removed the cut would leave a
+    // few megabytes behind on every render the user threw away.
+    let dir = tmp("take-intro").join("render");
+    std::fs::create_dir_all(&dir).unwrap();
+    let cut = dir.join("cut-abc123.mp4");
+    let intro = dir.join("intro-abc123.mp4");
+    std::fs::write(&cut, b"cut").unwrap();
+    std::fs::write(&intro, b"intro").unwrap();
+    // A cut from a project that never had an opening: nothing beside it.
+    let lone = dir.join("cut-def456.mp4");
+    std::fs::write(&lone, b"cut").unwrap();
+
+    crate::store::remove_render_files(&cut);
+    assert!(!cut.exists(), "the cut is gone");
+    assert!(!intro.exists(), "and so is its opening");
+
+    crate::store::remove_render_files(&lone);
+    assert!(!lone.exists(), "a cut with no opening still deletes cleanly");
 }

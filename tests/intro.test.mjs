@@ -4,6 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   MAX_SHOTS,
+  MIN_SHOT_MS,
   MIN_SHOTS,
   montageMs,
   pickShots,
@@ -23,8 +24,20 @@ const LIBRARY = ["a", "b", "c", "d", "e", "f"].map((id) => candidate(id));
 test("shot count is bounded at both ends", () => {
   // Two shots is not a montage; nine in eight seconds is a strobe.
   assert.equal(shotCount(6_000), 6);
-  assert.equal(shotCount(1_000), MIN_SHOTS, "a very short hook still gets a montage");
+  assert.equal(shotCount(4_000), MIN_SHOTS + 1);
   assert.equal(shotCount(30_000), MAX_SHOTS, "a long one does not become a slideshow");
+});
+
+test("a very short hook gets fewer shots rather than faster ones", () => {
+  // Three shots under a two-second hook is 660ms each, which reads as a
+  // glitch. Short openings are ordinary outside English, where five words is
+  // a whole sentence.
+  assert.equal(shotCount(2_000), 2);
+  assert.equal(shotCount(1_000), 1);
+  for (const hook of [800, 1_500, 2_400, 3_000]) {
+    const n = shotCount(hook);
+    assert.ok(hook / n >= MIN_SHOT_MS, `${hook}ms over ${n} shots is too fast`);
+  }
 });
 
 test("the montage is exactly as long as the hook", () => {

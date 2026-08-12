@@ -102,6 +102,8 @@ pub fn run() {
             store::take_list,
             store::writing_instructions_get,
             store::writing_instructions_set,
+            store::intro_enabled_get,
+            store::intro_enabled_set,
             store::machine_user,
             readiness::readiness_probe,
             readiness::run_installer,

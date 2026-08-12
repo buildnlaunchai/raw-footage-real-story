@@ -85,6 +85,23 @@ test("the cut's own settings are part of its signature", () => {
   assert.equal(renderSignature(v, 250, "calm"), renderSignature(v, 250, "calm"));
 });
 
+test("the opening is part of the cut's signature", () => {
+  // The montage is rendered inside the cut, not beside it. A rewritten and
+  // re-recorded hook, or footage that changes which shots get picked, leaves
+  // the existing file opening on words nobody is saying — and without this the
+  // app would call that cut current.
+  const v = [{ audioPath: "line-01.wav", durationMs: 4000 }];
+  const intro = "line-00.wav:3000|b#0@2000+1500,c#0@2000+1500";
+  const other = "line-00.wav:3000|b#0@2000+1500,d#0@2000+1500";
+  assert.notEqual(renderSignature(v, 0, null, intro), renderSignature(v, 0, null, other));
+  assert.notEqual(
+    renderSignature(v, 0, null, intro),
+    renderSignature(v, 0, null, ""),
+    "removing the opening is a change like any other",
+  );
+  assert.equal(renderSignature(v, 0, null, intro), renderSignature(v, 0, null, intro));
+});
+
 // --- the rail ------------------------------------------------------------
 
 const base = {
@@ -97,6 +114,7 @@ const base = {
   unrecordedLines: new Set(),
   hasAssembly: true,
   assemblyCurrent: true,
+  introPending: false,
   busy: null,
 };
 
@@ -161,4 +179,32 @@ test("staleness explains itself in words, not just colour", () => {
 test("a cut is stale when its settings changed even if the words did not", () => {
   const reason = stalenessReason("assembly", { ...base, assemblyCurrent: false });
   assert.match(reason, /settings changed/);
+});
+
+// --- the opening ---------------------------------------------------------
+
+test("an unspoken opening holds the voice stage open", () => {
+  // Otherwise the rail reads done, the user renders, and the film quietly has
+  // no opening at all — a montage cannot be cut without the hook's length.
+  const s = stageStatuses({ ...base, introPending: true });
+  assert.equal(s.voice, "stale");
+  assert.equal(s.assembly, "stale");
+});
+
+test("the opening is named rather than counted among the lines", () => {
+  // "1 line never recorded" would send the user hunting through a script that
+  // does not contain it.
+  const why = stalenessReason("voice", { ...base, introPending: true });
+  assert.match(why, /opening line/);
+  assert.doesNotMatch(why, /1 line never recorded/);
+});
+
+test("an opening and reworded lines are both reported", () => {
+  const why = stalenessReason("voice", {
+    ...base,
+    staleLines: new Set(["c1#0"]),
+    introPending: true,
+  });
+  assert.match(why, /1 line changed/);
+  assert.match(why, /opening line/);
 });

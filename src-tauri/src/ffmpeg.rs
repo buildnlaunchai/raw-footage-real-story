@@ -586,6 +586,16 @@ pub struct RenderSettings {
     /// dissolve is a stylistic choice rather than an improvement.
     #[serde(default)]
     pub crossfade_ms: u32,
+    /// Crossfade from the opening montage into the first narrated line.
+    ///
+    /// Separate from `crossfade_ms` because the montage is cut hard inside
+    /// itself whatever the rest of the film does; this is the one dissolve that
+    /// is part of the opening rather than a style choice.
+    ///
+    /// Non-zero only when item zero really is an intro. Setting it otherwise
+    /// dissolves the first two clips of an ordinary cut.
+    #[serde(default)]
+    pub intro_fade_ms: u32,
     /// Optional music bed mixed under the narration.
     #[serde(default)]
     pub music_path: Option<String>,
@@ -606,6 +616,12 @@ impl Default for RenderSettings {
             height: 1080,
             fps: 30,
             crossfade_ms: 0,
+            // Zero by default, and set only when an intro has actually been
+            // prepended. Defaulting it to a real duration made every hard-cut
+            // render take the intro path and swallow half a second at the first
+            // boundary — "there is an intro" and "fade at boundary zero" have
+            // to be the same fact, or they drift apart.
+            intro_fade_ms: 0,
             music_path: None,
             music_gain: default_music_gain(),
         }
@@ -691,7 +707,14 @@ pub fn render_rough_cut(
         ));
 
         // Guarantee the exact slot length regardless of rounding in the filters.
-        filter.push_str(&format!(",trim=duration={total_s:.3},setpts=PTS-STARTPTS[v{i}];"));
+        // `settb` matters even when nothing fades: the intro path joins a
+        // concat output (microsecond timebase) to a raw stream at an xfade, and
+        // ffmpeg refuses unless both agree —
+        //   "First input link main timebase (1/30) do not match the
+        //    corresponding second input link xfade timebase (1/1000000)"
+        filter.push_str(&format!(
+            ",trim=duration={total_s:.3},setpts=PTS-STARTPTS,settb=1/{fps}[v{i}];"
+        ));
 
         // Narration, resampled and padded with silence to fill the same slot.
         filter.push_str(&format!(
@@ -701,7 +724,31 @@ pub fn render_rough_cut(
     }
 
     let fade_ms = clamp_crossfade(settings.crossfade_ms, items);
-    let (vout, aout) = if fade_ms == 0 {
+
+    // Three shapes, not two. The third exists because the opening montage wants
+    // hard cuts everywhere except the one boundary where it dissolves into the
+    // first narrated line.
+    let intro_fade_ms = clamp_crossfade(settings.intro_fade_ms, items);
+    let intro_only_fade = fade_ms == 0 && intro_fade_ms > 0 && items.len() > 1;
+
+    let (vout, aout) = if intro_only_fade {
+        // Body concatenated as one stream, then crossfaded with the intro.
+        // Verified against real ffmpeg before it was written: duration exact,
+        // and sampled pixels mid-transition are a genuine blend rather than a
+        // cut.
+        let d = intro_fade_ms as f64 / 1000.0;
+        for i in 1..items.len() {
+            filter.push_str(&format!("[v{i}][a{i}]"));
+        }
+        filter.push_str(&format!("concat=n={}:v=1:a=1[bodyv][bodya];", items.len() - 1));
+        filter.push_str(&format!("[bodyv]settb=1/{fps}[bodyv2];"));
+        let offset = items[0].item.timeline_duration_ms as f64 / 1000.0 - d;
+        filter.push_str(&format!(
+            "[v0][bodyv2]xfade=transition=fade:duration={d:.3}:offset={offset:.3}[outv];"
+        ));
+        filter.push_str(&format!("[a0][bodya]acrossfade=d={d:.3}[outa];"));
+        ("[outv]".to_string(), "[outa]".to_string())
+    } else if fade_ms == 0 {
         // Hard cuts: one concat handles both streams and keeps them locked.
         for i in 0..items.len() {
             filter.push_str(&format!("[v{i}][a{i}]"));
@@ -712,11 +759,16 @@ pub fn render_rough_cut(
         // Crossfade: chain xfade/acrossfade pairwise. Both streams get the same
         // fade so audio and video stay locked; the overlap lands in the tail
         // after the last word, which is why the tail exists.
-        let d = fade_ms as f64 / 1000.0;
         let mut offset = 0f64;
         let mut vprev = "v0".to_string();
         let mut aprev = "a0".to_string();
         for i in 1..items.len() {
+            // The first boundary is the intro's own dissolve when there is an
+            // intro. Without this it would silently take the body's crossfade
+            // setting, which makes the opening a style choice — and the whole
+            // reason `intro_fade_ms` is a separate field is that it is not.
+            let d = if i == 1 && intro_fade_ms > 0 { intro_fade_ms } else { fade_ms } as f64
+                / 1000.0;
             // Each fade overlaps the streams, so every subsequent offset is
             // reduced by all the overlap consumed so far.
             offset += items[i - 1].item.timeline_duration_ms as f64 / 1000.0 - d;
@@ -819,4 +871,88 @@ fn frame_rgb_filter(
         n += 1;
     }
     Ok(((r / n) as u8, (g / n) as u8, (b / n) as u8))
+}
+
+/// One shot of the opening montage.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IntroShot {
+    pub source_path: String,
+    pub source_in_ms: u64,
+    pub duration_ms: u64,
+    #[serde(default)]
+    pub is_hdr: bool,
+}
+
+/// Render the opening montage to its own file.
+///
+/// Its own pass on purpose. The montage wants hard cuts between shots — that is
+/// what makes it a montage — but the main graph applies one crossfade setting to
+/// every boundary, and `acrossfade` across a cut inside a spoken line would
+/// dissolve the middle of a word. Rendering it separately makes the montage
+/// immune to that setting, and it enters the main timeline as one ordinary item
+/// with one video and one audio track, exactly like a placeholder does.
+///
+/// The hook narration plays over the whole thing, so the audio here is the hook
+/// file trimmed to the montage's length rather than anything per-shot.
+pub fn render_intro(
+    ffmpeg: &str,
+    shots: &[IntroShot],
+    hook_audio: &Path,
+    settings: &RenderSettings,
+    caps: &FfmpegCaps,
+    out: &Path,
+) -> Result<u64, FfmpegError> {
+    if shots.is_empty() {
+        return Err(FfmpegError::new("NO_SHOTS", "The intro has no shots to show."));
+    }
+    if let Some(parent) = out.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| FfmpegError::new("MKDIR_FAILED", e.to_string()))?;
+    }
+
+    let RenderSettings { width, height, fps, .. } = *settings;
+    let total_ms: u64 = shots.iter().map(|s| s.duration_ms).sum();
+    let total_s = total_ms as f64 / 1000.0;
+
+    let mut cmd = Command::new(ffmpeg);
+    cmd.args(["-y", "-v", "error"]);
+    for s in shots {
+        cmd.arg("-i").arg(&s.source_path);
+    }
+    cmd.arg("-i").arg(hook_audio);
+
+    let mut filter = String::new();
+    for (i, s) in shots.iter().enumerate() {
+        filter.push_str(&format!(
+            "[{i}:v]trim=start={:.3}:duration={:.3},setpts=PTS-STARTPTS{}\
+             ,scale={width}:{height}:force_original_aspect_ratio=decrease,\
+             pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={fps},settb=1/{fps}[v{i}];",
+            s.source_in_ms as f64 / 1000.0,
+            s.duration_ms as f64 / 1000.0,
+            if s.is_hdr { tonemap_chain(caps) } else { "" },
+        ));
+    }
+    for i in 0..shots.len() {
+        filter.push_str(&format!("[v{i}]"));
+    }
+    filter.push_str(&format!("concat=n={}:v=1:a=0[mv];", shots.len()));
+    // A shot shorter than its slot (a clip that ends early) would leave the
+    // montage short, so the whole thing is trimmed to the length the hook needs.
+    filter.push_str(&format!("[mv]trim=duration={total_s:.3},setpts=PTS-STARTPTS[outv];"));
+
+    let hook_idx = shots.len();
+    filter.push_str(&format!(
+        "[{hook_idx}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,\
+         apad,atrim=duration={total_s:.3},asetpts=PTS-STARTPTS[outa]"
+    ));
+
+    cmd.args(["-filter_complex", &filter]);
+    cmd.args(["-map", "[outv]", "-map", "[outa]"]);
+    cmd.args(["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p"]);
+    cmd.args(["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"]);
+    cmd.arg(out);
+
+    run(&mut cmd, "render intro")?;
+    Ok(total_ms)
 }

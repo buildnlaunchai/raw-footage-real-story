@@ -2,6 +2,7 @@
 import { useRef, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import {
+  INTRO_CLIP_ID,
   saveVideoAs,
   type AssembleResult,
   type FfmpegInfo,
@@ -28,6 +29,8 @@ interface Props {
   makingPlaceholders: boolean;
   onMakePlaceholders: () => void;
   onRender: () => void;
+  /** The opening this cut will get, or has: its words and how many shots. */
+  intro: { hook: string | null; shots: number } | null;
   hasExternalMedia: boolean;
   children?: React.ReactNode;
 }
@@ -55,6 +58,7 @@ export function AssemblyPanel({
   makingPlaceholders,
   onMakePlaceholders,
   onRender,
+  intro,
   hasExternalMedia,
   children,
 }: Props) {
@@ -155,21 +159,37 @@ export function AssemblyPanel({
           />
 
           <ol className="script-list timeline-list">
-            {result.timeline.map((item, i) => (
+            {result.timeline.map((item, i) => {
+              const isIntro = item.clipId === INTRO_CLIP_ID;
+              // The opening is numbered out of the sequence, so line one of the
+              // script is still row one of the cut.
+              const number = i + (result.timeline[0].clipId === INTRO_CLIP_ID ? 0 : 1);
+              return (
               <li key={`${item.clipId}#${item.segmentIndex}`} className="script-row">
                 <span className="clip-index" aria-hidden="true">
-                  {String(i + 1).padStart(2, "0")}
+                  {isIntro ? "▶" : String(number).padStart(2, "0")}
                 </span>
                 <div className="voiced-body">
-                  <p className="script-clip">{byId.get(item.clipId)?.description}</p>
+                  <p className="script-clip">
+                    {isIntro
+                      ? `Opening montage · ${intro?.shots ?? 0} shot${
+                          (intro?.shots ?? 0) === 1 ? "" : "s"
+                        }`
+                      : byId.get(item.clipId)?.description}
+                  </p>
                   <p className="script-text">
-                    {narrationFor.get(`${item.clipId}#${item.segmentIndex}`)}
+                    {isIntro
+                      ? intro?.hook
+                      : narrationFor.get(`${item.clipId}#${item.segmentIndex}`)}
                   </p>
                   <div className="voiced-controls">
                     <span className="hint">
                       {secs(item.timelineStartMs)} → {secs(item.timelineStartMs + item.timelineDurationMs)}
                     </span>
-                    <span className={`fit-chip fit-${item.fit}`}>{FIT_LABEL[item.fit]}</span>
+                    {!isIntro && (
+                      <span className={`fit-chip fit-${item.fit}`}>{FIT_LABEL[item.fit]}</span>
+                    )}
+                    {isIntro && <span className="fit-chip fit-exact">montage</span>}
                     {item.stretch > 1.01 && (
                       <span
                         className={item.stretch > 2 ? "skip-chip" : "hint"}
@@ -186,7 +206,8 @@ export function AssemblyPanel({
                   </div>
                 </div>
               </li>
-            ))}
+              );
+            })}
           </ol>
 
           <div className="actions">
@@ -195,6 +216,8 @@ export function AssemblyPanel({
             </button>
             <span className="hint">
               {secs(result.durationMs)} · {result.timeline.length} shots
+              {result.timeline.some((t) => t.clipId === INTRO_CLIP_ID) &&
+                ` (including the opening)`}
             </span>
           </div>
 

@@ -222,3 +222,16 @@ export async function getWritingInstructions(): Promise<string | null> {
 export async function setWritingInstructions(text: string | null): Promise<void> {
   await invoke("writing_instructions_set", { instructions: text });
 }
+
+/** Whether new scripts get an opening line. On unless the user turned it off. */
+export async function getIntroEnabled(): Promise<boolean> {
+  try {
+    return await invoke<boolean>("intro_enabled_get");
+  } catch {
+    return true;
+  }
+}
+
+export async function setIntroEnabled(enabled: boolean): Promise<void> {
+  await invoke("intro_enabled_set", { enabled });
+}

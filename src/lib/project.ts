@@ -54,6 +54,13 @@ export interface ScriptSection {
   generatedAt: string;
   lines: ScriptLineRecord[];
   wordCountTarget: number | null;
+  /**
+   * The opening line, spoken over the montage before the film starts.
+   *
+   * Not one of `lines`: it narrates no moment, so it has no clip and no
+   * segment index, which is the pair everything else addresses a line by.
+   */
+  hook?: string | null;
 }
 
 export interface AudioLineRecord {

@@ -243,6 +243,42 @@ pub fn total_duration_ms(items: &[TimelineItem]) -> u64 {
     items.last().map_or(0, |i| i.timeline_start_ms + i.timeline_duration_ms)
 }
 
+/// Put the opening montage in front of a planned timeline.
+///
+/// The montage is one rendered file, so it enters as an ordinary item under a
+/// reserved clip id rather than as a new kind of thing. The only arithmetic
+/// that matters is the shift: the dissolve overlaps the montage and the first
+/// line, so the film starts `fade_ms` *before* the montage ends, and every
+/// following item moves by the difference. Shift by the full montage length and
+/// the reported timeline drifts a fade further from the file with each render
+/// anybody compares it to.
+pub fn with_intro(items: &[TimelineItem], intro_ms: u64, fade_ms: u32) -> Vec<TimelineItem> {
+    let shift = intro_ms.saturating_sub(fade_ms as u64);
+    let mut out = Vec::with_capacity(items.len() + 1);
+    out.push(TimelineItem {
+        clip_id: INTRO_CLIP_ID.into(),
+        segment_index: 0,
+        source_in_ms: 0,
+        source_out_ms: intro_ms,
+        timeline_start_ms: 0,
+        timeline_duration_ms: intro_ms,
+        stretch: 1.0,
+        fit: Fit::Exact,
+    });
+    out.extend(items.iter().cloned().map(|mut i| {
+        i.timeline_start_ms += shift;
+        i
+    }));
+    out
+}
+
+/// The clip id the opening montage occupies.
+///
+/// A reserved name rather than a new timeline concept: everything downstream —
+/// the assembly list, the durations, the takes — needs no special case beyond
+/// recognising it.
+pub const INTRO_CLIP_ID: &str = "__intro__";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -494,6 +530,63 @@ mod tests {
     fn lines_without_measurements_behave_exactly_as_before() {
         let items = plan(&[clip("a", Some(60_000))], &[line("a", 4_400)]);
         assert_eq!(items[0].timeline_duration_ms, 4_400 + TAIL_MS);
+    }
+
+    // --- the opening montage ---------------------------------------------
+
+    #[test]
+    fn the_opening_pushes_the_film_back_by_all_but_the_dissolve() {
+        // The dissolve overlaps the montage and the first line, so the film
+        // starts before the montage ends. Shifting by the full montage length
+        // would report a timeline a fade longer than the file it describes.
+        let body = plan(&[clip("a", Some(60_000)), clip("b", Some(60_000))],
+                        &[line("a", 4_000), line("b", 3_000)]);
+        let with = with_intro(&body, 3_000, 600);
+
+        assert_eq!(with.len(), body.len() + 1);
+        assert_eq!(with[0].clip_id, INTRO_CLIP_ID);
+        assert_eq!(with[0].timeline_start_ms, 0);
+        assert_eq!(with[0].timeline_duration_ms, 3_000);
+        assert_eq!(with[1].timeline_start_ms, body[0].timeline_start_ms + 2_400);
+        assert_eq!(with[2].timeline_start_ms, body[1].timeline_start_ms + 2_400);
+        assert_eq!(
+            total_duration_ms(&with),
+            total_duration_ms(&body) + 2_400,
+            "the film is longer by the montage less the overlap",
+        );
+    }
+
+    #[test]
+    fn the_opening_never_stretches_or_trims() {
+        // It is rendered at exactly the hook's length, so any other fit would
+        // be a claim about footage that no longer exists as separate clips.
+        let body = plan(&[clip("a", Some(60_000))], &[line("a", 4_000)]);
+        let with = with_intro(&body, 2_500, 600);
+        assert_eq!(with[0].fit, Fit::Exact);
+        assert_eq!(with[0].stretch, 1.0);
+        assert_eq!(with[0].source_in_ms, 0);
+        assert_eq!(with[0].source_out_ms, 2_500);
+    }
+
+    #[test]
+    fn a_dissolve_longer_than_the_montage_cannot_move_the_film_backwards() {
+        // The clamp should never let this happen, but a negative shift would
+        // wrap a u64 and put the first line hours into the film.
+        let body = plan(&[clip("a", Some(60_000))], &[line("a", 4_000)]);
+        let with = with_intro(&body, 500, 5_000);
+        assert_eq!(with[1].timeline_start_ms, body[0].timeline_start_ms);
+    }
+
+    #[test]
+    fn the_body_keeps_its_own_shape() {
+        // Only the start times move. A line slowed to cover its narration is
+        // still slowed by the same amount once there is an opening in front.
+        let body = plan(&[clip("a", Some(1_000))], &[line("a", 4_000)]);
+        let with = with_intro(&body, 3_000, 600);
+        assert_eq!(with[1].fit, body[0].fit);
+        assert_eq!(with[1].stretch, body[0].stretch);
+        assert_eq!(with[1].timeline_duration_ms, body[0].timeline_duration_ms);
+        assert_eq!(with[1].clip_id, "a");
     }
 
     #[test]

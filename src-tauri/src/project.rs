@@ -155,6 +155,15 @@ pub struct ScriptSection {
     pub lines: Vec<ScriptLineRecord>,
     #[serde(default)]
     pub word_count_target: Option<u32>,
+    /// The opening line, spoken over the montage before the film starts.
+    ///
+    /// Here rather than in `lines` because it narrates no moment: it has no
+    /// clip and no segment, and everything that walks `lines` — the timeline,
+    /// the voice stage, the per-line staleness check — addresses them by
+    /// exactly that pair. Optional and defaulted, so scripts written before
+    /// openings existed still load.
+    #[serde(default)]
+    pub hook: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -833,3 +833,188 @@ fn music_bed_is_mixed_under_the_narration() {
     assert!(mean > -70.0, "the bed should be audible, got {mean} dB");
     assert!(mean < -20.0, "the bed should sit low under the voice, got {mean} dB");
 }
+
+/// The opening montage, rendered for real and inspected frame by frame.
+///
+/// Duration alone would pass for a hard cut, and "it did not crash" would pass
+/// for a black screen. So this checks three separate things: that each shot
+/// actually appears in order, that the montage is exactly as long as the hook
+/// narration, and — at the join into the first narrated line — that the picture
+/// is a *blend* of two colours rather than either one of them.
+#[test]
+fn intro_montage_cuts_hard_inside_and_dissolves_into_the_film() {
+    let Some(fx) = Fixture::new("intro") else {
+        eprintln!("ffmpeg not available; skipping");
+        return;
+    };
+
+    let settings = RenderSettings { width: 320, height: 180, fps: 30, ..Default::default() };
+
+    // Three montage shots, each a flat colour, plus the clip the film opens on.
+    let mut shots = Vec::new();
+    for i in 0..3 {
+        let (_, hex, _) = PALETTE[i];
+        let src = fx.dir.join(format!("shot{i}.mp4"));
+        ffmpeg::make_placeholder(&fx.ffmpeg, &src, hex, 4_000, 320, 180, 30).expect("shot");
+        shots.push(ffmpeg::IntroShot {
+            source_path: src.to_string_lossy().to_string(),
+            source_in_ms: 500,
+            duration_ms: 1_000,
+            is_hdr: false,
+        });
+    }
+
+    // 3s of hook narration over three 1s shots.
+    let hook = fx.dir.join("hook.wav");
+    tts::write_wav(&hook, &vec![0f32; 3 * 24_000]).expect("hook wav");
+
+    let intro = fx.dir.join("intro.mp4");
+    let intro_ms =
+        ffmpeg::render_intro(&fx.ffmpeg, &shots, &hook, &settings, &ffmpeg::FfmpegCaps::default(), &intro)
+            .expect("intro renders");
+    assert_eq!(intro_ms, 3_000, "the montage is as long as the hook");
+
+    let probed = ffmpeg::probe_duration_ms(&fx.ffprobe, &intro).expect("probe intro");
+    assert!(
+        probed.abs_diff(3_000) < 150,
+        "intro should be 3s, measured {probed}ms",
+    );
+
+    // Each shot in order, sampled mid-shot so a boundary cannot be mistaken
+    // for the shot itself.
+    for (i, at) in [500u64, 1_500, 2_500].iter().enumerate() {
+        let rgb = ffmpeg::frame_rgb(&fx.ffmpeg, &intro, *at).expect("frame");
+        assert_eq!(
+            nearest(rgb),
+            PALETTE[i].0,
+            "at {at}ms the montage should show {}, saw {rgb:?}",
+            PALETTE[i].0,
+        );
+    }
+
+    // --- and now the join into the film -----------------------------------
+    let body = fx.dir.join("body.mp4");
+    ffmpeg::make_placeholder(&fx.ffmpeg, &body, PALETTE[3].1, 4_000, 320, 180, 30).expect("body");
+    let silence = fx.dir.join("line.wav");
+    tts::write_wav(&silence, &vec![0f32; 2 * 24_000]).expect("line wav");
+
+    let items = vec![
+        ffmpeg::RenderItem {
+            video: intro.clone(),
+            audio: hook.clone(),
+            item: timeline::TimelineItem {
+                clip_id: "intro".into(),
+                segment_index: 0,
+                source_in_ms: 0,
+                source_out_ms: 3_000,
+                timeline_start_ms: 0,
+                timeline_duration_ms: 3_000,
+                stretch: 1.0,
+                fit: timeline::Fit::Exact,
+            },
+            is_hdr: false,
+        },
+        ffmpeg::RenderItem {
+            video: body.clone(),
+            audio: silence.clone(),
+            item: timeline::TimelineItem {
+                clip_id: "c0".into(),
+                segment_index: 0,
+                source_in_ms: 0,
+                source_out_ms: 2_000,
+                timeline_start_ms: 3_000,
+                timeline_duration_ms: 2_000,
+                stretch: 1.0,
+                fit: timeline::Fit::Exact,
+            },
+            is_hdr: false,
+        },
+    ];
+
+    // Hard cuts everywhere, dissolve only out of the intro: the shape the
+    // spike proved composes once `settb` matches the timebases.
+    let with_intro = RenderSettings { intro_fade_ms: 600, ..settings.clone() };
+    let out = fx.dir.join("full.mp4");
+    ffmpeg::render_rough_cut(&fx.ffmpeg, &items, &with_intro, &ffmpeg::FfmpegCaps::default(), &out)
+        .expect("full render");
+
+    // 3s + 2s minus the 0.6s the dissolve consumes.
+    let total = ffmpeg::probe_duration_ms(&fx.ffprobe, &out).expect("probe full");
+    assert!(
+        total.abs_diff(4_400) < 200,
+        "intro + body less the overlap should be 4.4s, measured {total}ms",
+    );
+
+    // The proof that it is a dissolve and not a cut: mid-transition the frame
+    // is neither colour. The montage ends blue, the film opens yellow.
+    let before = ffmpeg::frame_rgb(&fx.ffmpeg, &out, 2_200).expect("before");
+    let middle = ffmpeg::frame_rgb(&fx.ffmpeg, &out, 2_700).expect("middle");
+    let after = ffmpeg::frame_rgb(&fx.ffmpeg, &out, 3_600).expect("after");
+    println!("\n  before {before:?}  middle {middle:?}  after {after:?}");
+
+    assert_eq!(nearest(before), "blue", "last montage shot");
+    assert_eq!(nearest(after), "yellow", "first shot of the film");
+    assert!(
+        middle.0 > 30 && middle.2 > 30,
+        "mid-dissolve should carry both colours, saw {middle:?}",
+    );
+    assert_ne!(nearest(middle), nearest(before), "a cut would still be blue here");
+}
+
+/// The opening keeps its own dissolve when the rest of the film also dissolves.
+///
+/// `intro_fade_ms` is a separate setting because the opening's dissolve is part
+/// of the opening, not a style choice. In the pairwise crossfade path it would
+/// be easy — and invisible — for boundary zero to quietly take the body's
+/// setting instead. Duration is the observable: each dissolve eats its own
+/// length out of the total, so a wrong fade at one boundary shows up as a film
+/// of the wrong length.
+#[test]
+fn the_opening_dissolve_is_not_the_body_crossfade() {
+    let Some(fx) = Fixture::new("intro-fades") else {
+        eprintln!("ffmpeg not available; skipping");
+        return;
+    };
+    let base = RenderSettings { width: 320, height: 180, fps: 30, ..Default::default() };
+
+    // 3s intro, then two 2s items. Fades: 600ms out of the intro, 200ms between
+    // the body's own shots.
+    let mut items = Vec::new();
+    for (i, (dur, name)) in [(3_000u64, "intro"), (2_000, "one"), (2_000, "two")].iter().enumerate()
+    {
+        let v = fx.dir.join(format!("{name}.mp4"));
+        let a = fx.dir.join(format!("{name}.wav"));
+        ffmpeg::make_placeholder(&fx.ffmpeg, &v, PALETTE[i].1, *dur + 1_000, 320, 180, 30)
+            .expect("video");
+        tts::write_wav(&a, &vec![0f32; (*dur as usize) * 24]).expect("audio");
+        items.push(ffmpeg::RenderItem {
+            video: v,
+            audio: a,
+            item: timeline::TimelineItem {
+                clip_id: name.to_string(),
+                segment_index: 0,
+                source_in_ms: 0,
+                source_out_ms: *dur,
+                timeline_start_ms: 0,
+                timeline_duration_ms: *dur,
+                stretch: 1.0,
+                fit: timeline::Fit::Exact,
+            },
+            is_hdr: false,
+        });
+    }
+
+    let settings = RenderSettings { crossfade_ms: 200, intro_fade_ms: 600, ..base };
+    let out = fx.dir.join("both.mp4");
+    ffmpeg::render_rough_cut(&fx.ffmpeg, &items, &settings, &ffmpeg::FfmpegCaps::default(), &out)
+        .expect("renders with two different fade lengths");
+
+    // 7000 less 600 at the opening and 200 in the body. Taking the body's 200
+    // at both boundaries would give 6600 — 400ms away, far outside this margin.
+    let total = ffmpeg::probe_duration_ms(&fx.ffprobe, &out).expect("probe");
+    println!("\n  total {total}ms (expected 6200, 6600 if the opening lost its own fade)");
+    assert!(
+        total.abs_diff(6_200) < 200,
+        "expected 6.2s, measured {total}ms",
+    );
+}

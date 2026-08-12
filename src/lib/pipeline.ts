@@ -174,10 +174,20 @@ export function renderSignature(
   voiced: { audioPath: string; durationMs: number }[] | null,
   crossfadeMs: number,
   musicId: string | null,
+  /**
+   * The opening, as the shots and the recording that make it up.
+   *
+   * The montage is rendered inside the cut rather than beside it, so a hook
+   * rewritten and re-recorded, or footage that changes which shots get picked,
+   * leaves the existing cut opening on words nobody is saying any more. Empty
+   * string for a film with no opening, which is also a state a cut can go
+   * stale against.
+   */
+  introSig = "",
 ): string {
   if (!voiced) return "";
   const lines = voiced.map((v) => `${v.audioPath}:${v.durationMs}`).join("|");
-  return `${lines}::${crossfadeMs}::${musicId ?? "none"}`;
+  return `${lines}::${crossfadeMs}::${musicId ?? "none"}::${introSig || "no-intro"}`;
 }
 
 export interface PipelineInput {
@@ -190,6 +200,14 @@ export interface PipelineInput {
   unrecordedLines: Set<string>;
   hasAssembly: boolean;
   assemblyCurrent: boolean;
+  /**
+   * There is an opening line whose recording is missing or out of date.
+   *
+   * Without this the rail calls the voice stage done while the film's first
+   * words have never been spoken — and the cut then renders with no opening at
+   * all, silently, because a montage needs the hook's length to exist.
+   */
+  introPending: boolean;
   /** Stage currently running, if any. */
   busy: StageId | null;
 }
@@ -213,6 +231,7 @@ export function stageStatuses(input: PipelineInput): Record<StageId, StageStatus
     unrecordedLines,
     hasAssembly,
     assemblyCurrent,
+    introPending,
     busy,
   } = input;
 
@@ -231,13 +250,13 @@ export function stageStatuses(input: PipelineInput): Record<StageId, StageStatus
   let voice: StageStatus;
   if (!lines || lines.length === 0) voice = "empty";
   else if (!voiced || voiced.length === 0) voice = "ready";
-  else if (staleLines.size > 0 || unrecordedLines.size > 0) voice = "stale";
+  else if (staleLines.size > 0 || unrecordedLines.size > 0 || introPending) voice = "stale";
   else voice = "done";
 
   let assembly: StageStatus;
   if (!voiced || voiced.length === 0) assembly = "empty";
   else if (!hasAssembly) assembly = "ready";
-  else if (!assemblyCurrent || staleLines.size > 0) assembly = "stale";
+  else if (!assemblyCurrent || staleLines.size > 0 || introPending) assembly = "stale";
   else assembly = "done";
 
   const out: Record<StageId, StageStatus> = { footage, story, script, voice, assembly };
@@ -255,12 +274,12 @@ export function stalenessReason(
   stage: StageId,
   input: PipelineInput,
 ): string | null {
-  const { staleLines, unrecordedLines, assemblyCurrent, hasAssembly } = input;
+  const { staleLines, unrecordedLines, assemblyCurrent, hasAssembly, introPending } = input;
 
   if (stage === "voice") {
     const changed = staleLines.size;
     const missing = unrecordedLines.size;
-    if (changed === 0 && missing === 0) return null;
+    if (changed === 0 && missing === 0 && !introPending) return null;
     const parts: string[] = [];
     if (changed > 0) {
       parts.push(`${changed} line${changed === 1 ? "" : "s"} changed since recording`);
@@ -268,6 +287,9 @@ export function stalenessReason(
     if (missing > 0) {
       parts.push(`${missing} line${missing === 1 ? "" : "s"} never recorded`);
     }
+    // Named separately because it is not one of the numbered lines, and
+    // "1 line never recorded" would send the user looking for it in the script.
+    if (introPending) parts.push("the opening line is not recorded");
     return `${parts.join(" · ")}.`;
   }
 
@@ -275,6 +297,9 @@ export function stalenessReason(
     if (!hasAssembly) return null;
     if (staleLines.size > 0) {
       return "The narration changed after this cut was rendered.";
+    }
+    if (introPending) {
+      return "The opening line changed after this cut was rendered.";
     }
     if (!assemblyCurrent) {
       return "The audio or the cut's settings changed since this was rendered.";

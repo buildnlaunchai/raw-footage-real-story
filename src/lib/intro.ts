@@ -14,6 +14,15 @@
  * Dependency-free so the decision can be tested without ffmpeg or a library.
  */
 
+/**
+ * The dissolve out of the montage and into the first narrated line.
+ *
+ * Long enough to read as a transition rather than a glitch, short enough not
+ * to eat a one-second opening line. The renderer clamps it further against the
+ * shortest slot in the cut.
+ */
+export const INTRO_FADE_MS = 600;
+
 /** Shortest and longest a montage shot may be, in milliseconds. */
 export const MIN_SHOT_MS = 700;
 export const MAX_SHOT_MS = 1_400;
@@ -45,10 +54,17 @@ export interface Shot {
  * About a second each: quick enough to read as a montage, slow enough that a
  * viewer registers what they saw. The bounds matter more than the arithmetic —
  * two shots is not a montage, and nine in eight seconds is a strobe.
+ *
+ * `MIN_SHOT_MS` overrides the three-shot minimum rather than the other way
+ * round. A two-second hook cut three ways is 660ms a shot, which reads as a
+ * glitch; one or two shots that a viewer can actually see is a better opening
+ * than three they cannot. This matters outside English, where a natural
+ * opening is often five words and two seconds long.
  */
 export function shotCount(hookMs: number): number {
   const ideal = Math.round(hookMs / 1_000);
-  return Math.max(MIN_SHOTS, Math.min(MAX_SHOTS, ideal));
+  const most = Math.max(1, Math.floor(hookMs / MIN_SHOT_MS));
+  return Math.min(MAX_SHOTS, Math.max(MIN_SHOTS, ideal), most);
 }
 
 /**

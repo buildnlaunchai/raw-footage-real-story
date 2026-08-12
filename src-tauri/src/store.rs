@@ -674,13 +674,28 @@ pub fn take_delete(
     if let Some(t) = manifest.takes.iter().find(|t| t.id == take_id) {
         if t.kind == "render" {
             if let Some(v) = t.video_path.as_deref() {
-                let _ = std::fs::remove_file(v);
+                remove_render_files(std::path::Path::new(v));
             }
         }
     }
     manifest.takes.retain(|t| t.id != take_id);
     save_to(&path, &manifest)?;
     Ok(manifest.takes)
+}
+
+/// Delete a rendered cut and anything rendered only for it.
+///
+/// The take's opening montage sits beside it under the same take id —
+/// `cut-<id>.mp4` and `intro-<id>.mp4`. Nothing else ever references the
+/// montage, so removing only the cut leaves an orphan behind on every render
+/// the user throws away.
+pub fn remove_render_files(cut: &std::path::Path) {
+    let _ = std::fs::remove_file(cut);
+    if let (Some(dir), Some(name)) = (cut.parent(), cut.file_name()) {
+        if let Some(rest) = name.to_string_lossy().strip_prefix("cut-") {
+            let _ = std::fs::remove_file(dir.join(format!("intro-{rest}")));
+        }
+    }
 }
 
 #[tauri::command]
@@ -714,19 +729,55 @@ pub fn writing_instructions_set(
     app: AppHandle,
     instructions: Option<String>,
 ) -> Result<(), StoreError> {
-    let path = settings_file(&app)
+    write_setting(
+        &app,
+        "scriptInstructions",
+        instructions
+            .filter(|s| !s.trim().is_empty())
+            .map(|v| serde_json::json!(v)),
+    )
+}
+
+/// Whether new scripts get an opening line and a montage to run it over.
+///
+/// App-level rather than per project, and on unless turned off: an opening is
+/// what the feature is for, and someone who does not want one wants that
+/// decision to hold for everything they make, not to be re-made per video.
+#[tauri::command]
+pub fn intro_enabled_get(app: AppHandle) -> bool {
+    read_setting(&app, "introEnabled").and_then(|v| v.as_bool()).unwrap_or(true)
+}
+
+#[tauri::command]
+pub fn intro_enabled_set(app: AppHandle, enabled: bool) -> Result<(), StoreError> {
+    write_setting(&app, "introEnabled", Some(serde_json::json!(enabled)))
+}
+
+fn read_setting(app: &AppHandle, key: &str) -> Option<serde_json::Value> {
+    settings_file(app)
+        .and_then(|p| std::fs::read(p).ok())
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .and_then(|v| v.get(key).cloned())
+}
+
+/// Read-modify-write the whole file: the ffmpeg paths live here too, and
+/// replacing it wholesale would forget them.
+fn write_setting(
+    app: &AppHandle,
+    key: &str,
+    value: Option<serde_json::Value>,
+) -> Result<(), StoreError> {
+    let path = settings_file(app)
         .ok_or_else(|| StoreError::new("NO_APP_DIR", "No settings location."))?;
-    // Read-modify-write the whole file: the ffmpeg paths live here too, and
-    // replacing it wholesale would forget them.
     let mut doc: serde_json::Value = std::fs::read(&path)
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_else(|| serde_json::json!({}));
-    match instructions.filter(|s| !s.trim().is_empty()) {
-        Some(v) => doc["scriptInstructions"] = serde_json::json!(v),
+    match value {
+        Some(v) => doc[key] = v,
         None => {
             if let Some(o) = doc.as_object_mut() {
-                o.remove("scriptInstructions");
+                o.remove(key);
             }
         }
     }
