@@ -199,7 +199,7 @@ jobs:
           app="$mnt/Raw Footage, Real Story.app"
           res="$app/Contents/Resources/resources"
 
-          ls -la "$res/kokoro/model_q8f16.onnx"
+          ls -la "$res/kokoro/model_quantized.onnx"
           echo "voices: $(ls "$res/kokoro/voices"/*.bin | wc -l | tr -d ' ')"
           [ -f "$res/lexicon/cmudict.dict" ] && [ -f "$res/lexicon/us_gold.json" ]
 
@@ -225,7 +225,7 @@ jobs:
           exe=$(find src-tauri/target -name "raw-footage-real-story.exe" -not -path "*/deps/*" -not -path "*/build/*" | head -1)
           echo "exe: $exe"
           res="$(dirname "$exe")/resources"
-          ls -la "$res/kokoro/model_q8f16.onnx"
+          ls -la "$res/kokoro/model_quantized.onnx"
           echo "voices: $(ls "$res/kokoro/voices"/*.bin | wc -l | tr -d ' ')"
 
           # Whether ort links ONNX Runtime statically here is unverified — it is

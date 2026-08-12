@@ -24,7 +24,7 @@ const REQUIRED: &[(&str, u64)] = &[
     // The sizes are the point. An LFS pointer file is ~130 bytes and reads
     // perfectly well as a file, so "exists" is not evidence of anything; a
     // floor several orders of magnitude above a pointer is.
-    ("kokoro/model_q8f16.onnx", 60_000_000),
+    ("kokoro/model_quantized.onnx", 80_000_000),
     ("kokoro/tokenizer.json", 1_000),
     ("lexicon/us_gold.json", 100_000),
     ("lexicon/cmudict.dict", 1_000_000),

@@ -62,4 +62,4 @@ src-tauri/WixTools/
 .test-build/
 
 # Fetched by scripts/fetch-model.sh, not stored in the repo.
-src-tauri/resources/kokoro/model_q8f16.onnx
+src-tauri/resources/kokoro/model_quantized.onnx

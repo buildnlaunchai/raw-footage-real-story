@@ -75,7 +75,7 @@ pub fn load_session() -> Result<ort::session::Session, String> {
         // ceiling this gives up is one nobody was near.
         .with_execution_providers([CPU::default().build()])
         .map_err(|e| format!("select CPU provider: {e}"))?
-        .commit_from_file(resources_dir().join("model_q8f16.onnx"))
+        .commit_from_file(resources_dir().join("model_quantized.onnx"))
         .map_err(|e| format!("load model: {e}"))
 }
 
@@ -746,7 +746,7 @@ pub mod stages {
     pub fn session_verbose(step: &mut dyn FnMut(&str)) -> Result<ort::session::Session, String> {
         use ort::ep::CPU;
 
-        let model = resources_dir().join("model_q8f16.onnx");
+        let model = resources_dir().join("model_quantized.onnx");
         step(&format!("model path: {}", model.display()));
         step(&format!("path is verbatim: {}", model.to_string_lossy().starts_with(r"\\?\")));
         step(&format!("model readable: {}", std::fs::metadata(&model).is_ok()));

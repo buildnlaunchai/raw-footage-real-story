@@ -48,7 +48,7 @@ pub fn problem() -> Option<String> {
     if !r.is_dir() {
         return Some(format!("resource directory does not exist: {}", r.display()));
     }
-    for rel in ["kokoro/model_q8f16.onnx", "lexicon/us_gold.json"] {
+    for rel in ["kokoro/model_quantized.onnx", "lexicon/us_gold.json"] {
         let p = r.join(rel);
         match std::fs::metadata(&p) {
             Ok(m) if m.len() > 1_000 => {}

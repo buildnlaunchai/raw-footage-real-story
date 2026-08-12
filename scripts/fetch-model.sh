@@ -11,6 +11,11 @@
 # The voice packs stay in LFS. They are 28MB and, unlike the model, are not
 # published as a single addressable file anywhere convenient.
 #
+# int8 rather than the smaller q8f16 build. q8f16 mixes int8 and float16, and
+# ONNX Runtime's Windows build segfaults parsing it — inside commit_from_file,
+# before any inference. Every other variant in the repo loads and speaks there;
+# this is the smallest of them, 6MB more than the one that crashed.
+#
 # Pinned by revision *and* checked by hash. The revision alone is not enough:
 # the sibling repo `onnx-community/Kokoro-82M-ONNX` publishes a different file
 # under the same name and nearly the same size, so a copy-paste error would
@@ -23,12 +28,12 @@ set -euo pipefail
 
 REPO="onnx-community/Kokoro-82M-v1.0-ONNX"
 REVISION="1939ad2a8e416c0acfeecc08a694d14ef25f2231"
-REMOTE_PATH="onnx/model_q8f16.onnx"
-SHA256="04c658aec1b6008857c2ad10f8c589d4180d0ec427e7e6118ceb487e215c3cd0"
-BYTES=86033585
+REMOTE_PATH="onnx/model_quantized.onnx"
+SHA256="fbae9257e1e05ffc727e951ef9b9c98418e6d79f1c9b6b13bd59f5c9028a1478"
+BYTES=92361116
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-dest="$here/src-tauri/resources/kokoro/model_q8f16.onnx"
+dest="$here/src-tauri/resources/kokoro/model_quantized.onnx"
 url="https://huggingface.co/$REPO/resolve/$REVISION/$REMOTE_PATH"
 
 digest() {
