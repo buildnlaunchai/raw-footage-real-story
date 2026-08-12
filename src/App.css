@@ -1412,7 +1412,17 @@ kbd {
 
 .stale-banner .ghost-button {
   margin-left: auto;
-  background: #fff;
+  /* Was a white button inside an amber panel with amber text inherited into
+     it, which left the label almost invisible. Its own solid colours now. */
+  background: var(--warn);
+  border-color: var(--warn);
+  color: #12100b;
+  font-weight: 600;
+}
+
+.stale-banner .ghost-button:hover:not(:disabled) {
+  filter: brightness(1.1);
+  background: var(--warn);
 }
 
 /* ── project gallery ───────────────────────────────────────────────────── */
@@ -3055,4 +3065,79 @@ kbd {
 
 .setup-log div[data-bad="true"] {
   color: var(--danger);
+}
+
+
+/* ── story sections ────────────────────────────────────────────────────── */
+/*
+ * The story screen is the densest in the app — ideas, title, length, tone,
+ * language, provider, critique — and on the dark canvas it read as one wall.
+ * Each group gets its own surface and a heading, so the eye has somewhere to
+ * stop.
+ */
+
+.story-section {
+  background: var(--card-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: 1.1rem 1.2rem;
+  margin-top: 1rem;
+}
+
+.story-section:first-of-type {
+  margin-top: 0;
+}
+
+.story-section > h3 {
+  margin: 0 0 0.85rem;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+}
+
+.story-section .field-label {
+  margin-top: 0;
+  color: var(--ink);
+}
+
+.story-section + .story-section {
+  margin-top: 0.85rem;
+}
+
+/* Body copy on the dark canvas was too dim to read comfortably. */
+.panel p,
+.story-section p {
+  color: var(--ink-2);
+}
+
+.panel .hint,
+.story-section .hint {
+  color: var(--ink-dim);
+}
+
+/* ── finished states ───────────────────────────────────────────────────── */
+
+.done-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  background: rgba(47, 190, 126, 0.12);
+  border: 1px solid rgba(47, 190, 126, 0.4);
+  color: #7ee2b3;
+  border-radius: var(--r-md);
+  padding: 0.85rem 1.1rem;
+  margin-bottom: 1rem;
+  font-size: 0.95rem;
+}
+
+.done-banner strong {
+  color: #a8f0cd;
+}
+
+.done-banner .ghost-button {
+  margin-left: auto;
+  border-color: rgba(47, 190, 126, 0.5);
+  color: #a8f0cd;
 }

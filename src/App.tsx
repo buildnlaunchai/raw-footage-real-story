@@ -29,7 +29,7 @@ import {
   type Take,
 } from "./lib/takes";
 import { getWritingInstructions, SCRIPT_PROVIDERS } from "./lib/scriptProviders";
-import { FilterIcon, SaveIcon, SearchIcon, SortIcon } from "./components/Icons";
+import { CheckIcon, FilterIcon, SaveIcon, SearchIcon, SortIcon } from "./components/Icons";
 import {
   allowMedia,
   listLibrary,
@@ -176,6 +176,8 @@ function App() {
   const [currentScriptTake, setCurrentScriptTake] = useState<string | null>(null);
   const [currentVoiceTake, setCurrentVoiceTake] = useState<string | null>(null);
   const [currentRenderTake, setCurrentRenderTake] = useState<string | null>(null);
+  /** What just finished, so the app can say so instead of silently changing. */
+  const [justDone, setJustDone] = useState<"script" | "voice" | null>(null);
   /** The Settings override, read once and passed to every composition. */
   const [instructions, setInstructions] = useState<string | null>(null);
   const [page, setPage] = useState(1);
@@ -647,6 +649,18 @@ function App() {
       );
       setTakes(await addTake(manifest.project.id, take));
       setCurrentScriptTake(take.id);
+
+      // Writing finishes while the user is looking at the Story screen, and
+      // the result is somewhere else. Say it worked, and go there.
+      setJustDone("script");
+      setStage("script");
+      setTab("script");
+
+      // Writing finishes on a screen the user is not looking at the result on.
+      // Say it worked, and go to it.
+      setJustDone("script");
+      setStage("script");
+      setTab("script");
     } catch (err) {
       setComposeError(errorText(err));
     } finally {
@@ -693,6 +707,7 @@ function App() {
         );
         setTakes(await addTake(projectId, take));
         setCurrentVoiceTake(take.id);
+        setJustDone("voice");
       }
       setFailures(result.failures);
       setAssembly(null);
@@ -1411,6 +1426,24 @@ function App() {
           />
         ))}
 
+      {justDone === "script" && stage === "script" && (
+        <div className="done-banner" role="status">
+          <CheckIcon size={16} />
+          <span>
+            <strong>Script written.</strong> {lines?.length ?? 0} lines,{" "}
+            {words} words. Read it through and change anything that does not
+            sound like you.
+          </span>
+          <button
+            type="button"
+            className="ghost-button small"
+            onClick={() => setJustDone(null)}
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
       {stage === "script" && !composing && (
         <TakeHistory
           kind="script"
@@ -1580,6 +1613,23 @@ function App() {
                     </span>
                   )}
                 </div>
+              </div>
+            )}
+
+            {justDone === "voice" && (
+              <div className="done-banner" role="status">
+                <CheckIcon size={16} />
+                <span>
+                  <strong>Narration recorded.</strong> {voiced?.length ?? 0} lines.
+                  Play it whole below before assembling.
+                </span>
+                <button
+                  type="button"
+                  className="ghost-button small"
+                  onClick={() => setJustDone(null)}
+                >
+                  Dismiss
+                </button>
               </div>
             )}
 

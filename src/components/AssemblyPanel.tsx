@@ -35,7 +35,7 @@ interface Props {
 const FIT_LABEL: Record<TimelineItem["fit"], string> = {
   exact: "exact",
   trimmed: "trimmed to fit",
-  held: "last frame held",
+  slowed: "slowed to fit",
 };
 
 function secs(ms: number): string {
@@ -170,7 +170,19 @@ export function AssemblyPanel({
                       {secs(item.timelineStartMs)} → {secs(item.timelineStartMs + item.timelineDurationMs)}
                     </span>
                     <span className={`fit-chip fit-${item.fit}`}>{FIT_LABEL[item.fit]}</span>
-                    {item.holdMs > 0 && <span className="hint">held {secs(item.holdMs)}</span>}
+                    {item.stretch > 1.01 && (
+                      <span
+                        className={item.stretch > 2 ? "skip-chip" : "hint"}
+                        title={
+                          item.stretch > 2
+                            ? "This line has more words than the clip has seconds. Shorten it, or describe more of this clip, or the footage will look like slow motion."
+                            : "Slowed slightly so the picture keeps moving under the narration."
+                        }
+                      >
+                        {item.stretch.toFixed(2)}× slower
+                        {item.stretch > 2 ? " — very slow" : ""}
+                      </span>
+                    )}
                   </div>
                 </div>
               </li>

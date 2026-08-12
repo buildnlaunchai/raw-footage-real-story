@@ -22,7 +22,7 @@ export interface FfmpegInfo {
   caps: FfmpegCaps;
 }
 
-export type Fit = "exact" | "trimmed" | "held";
+export type Fit = "exact" | "trimmed" | "slowed";
 
 export interface TimelineItem {
   clipId: string;
@@ -38,7 +38,13 @@ export interface TimelineItem {
   sourceOutMs: number;
   timelineStartMs: number;
   timelineDurationMs: number;
-  holdMs: number;
+  /**
+   * How much the footage is slowed to cover its line. 1 when it fits.
+   *
+   * Replaces holdMs: a clip shorter than its narration used to freeze on its
+   * last frame, which reads as the video having broken.
+   */
+  stretch: number;
   fit: Fit;
 }
 

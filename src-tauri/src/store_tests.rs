@@ -294,7 +294,7 @@ fn json_uses_camel_case_for_the_web_editor() {
     let json = serde_json::to_string(&project_with_video()).unwrap();
     for key in [
         "schemaVersion", "sourceDurationMs", "isPlaceholder", "skippedWords",
-        "timelineStartMs", "timelineDurationMs", "sourceInMs", "sourceOutMs", "holdMs",
+        "timelineStartMs", "timelineDurationMs", "sourceInMs", "sourceOutMs", "stretch",
         "startSec", "endSec", "segmentIndex", "wordCountTarget",
     ] {
         assert!(json.contains(&format!("\"{key}\"")), "missing key {key}");

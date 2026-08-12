@@ -60,9 +60,23 @@ pub enum Fit {
     Exact,
     /// Source was longer than needed; the tail was discarded.
     Trimmed,
-    /// Source was shorter than needed; its last frame is held.
-    Held,
+    /// Source was shorter than needed and has been slowed to fill the time.
+    ///
+    /// Replaces the old `Held`, which froze the last frame while the narration
+    /// carried on. A still image under a talking voice reads as a broken video,
+    /// and it happened wherever a line outran its footage. Slowing keeps the
+    /// picture moving, which is the thing a viewer actually notices.
+    Slowed,
 }
+
+/// The most a clip may be stretched before it stops looking deliberate.
+///
+/// Past roughly this, slow motion reads as an effect rather than as pacing.
+/// Beyond it the clip is still slowed rather than frozen — a moving picture is
+/// always better than a still one — but the timeline says so, so the app can
+/// point at the real problem: a line with more words than its footage has
+/// seconds.
+pub const COMFORTABLE_STRETCH: f64 = 2.0;
 
 /// Identity of a described moment.
 ///
@@ -132,7 +146,7 @@ impl LineInput {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TimelineItem {
     pub clip_id: String,
@@ -146,9 +160,21 @@ pub struct TimelineItem {
     pub source_out_ms: u64,
     pub timeline_start_ms: u64,
     pub timeline_duration_ms: u64,
-    /// How long the final frame is held. Zero unless `fit` is `Held`.
-    pub hold_ms: u64,
+    /// How much the source is slowed, as a multiplier on its duration.
+    ///
+    /// 1.0 for everything that fits. 1.4 means the footage plays at five
+    /// sevenths of its speed to cover the narration.
+    ///
+    /// Defaulted, because projects saved before this existed carry `holdMs`
+    /// and no `stretch`. Without a default they would fail to parse and every
+    /// timeline already on disk would come back empty.
+    #[serde(default = "unstretched")]
+    pub stretch: f64,
     pub fit: Fit,
+}
+
+fn unstretched() -> f64 {
+    1.0
 }
 
 /// How long a clip should stay on screen for a given narration length.
@@ -183,13 +209,17 @@ pub fn plan(clips: &[ClipInput], lines: &[LineInput]) -> Vec<TimelineItem> {
             .and_then(|c| c.source_duration_ms)
             .map(|len| len.saturating_sub(start));
 
-        let (source_in_ms, source_out_ms, hold_ms, fit) = match available {
+        let (source_in_ms, source_out_ms, stretch, fit) = match available {
             // No media yet: a placeholder is generated at exactly the length
             // required, so nothing needs trimming or holding.
-            None => (start, start + target, 0, Fit::Exact),
-            Some(len) if len > target => (start, start + target, 0, Fit::Trimmed),
-            Some(len) if len < target => (start, start + len, target - len, Fit::Held),
-            Some(len) => (start, start + len, 0, Fit::Exact),
+            None => (start, start + target, 1.0, Fit::Exact),
+            Some(len) if len > target => (start, start + target, 1.0, Fit::Trimmed),
+            // Slowed rather than frozen. The clip plays from `start` to the end
+            // of its footage, stretched to cover the narration.
+            Some(len) if len < target && len > 0 => {
+                (start, start + len, target as f64 / len as f64, Fit::Slowed)
+            }
+            Some(len) => (start, start + len, 1.0, Fit::Exact),
         };
 
         out.push(TimelineItem {
@@ -199,7 +229,7 @@ pub fn plan(clips: &[ClipInput], lines: &[LineInput]) -> Vec<TimelineItem> {
             source_out_ms,
             timeline_start_ms: cursor,
             timeline_duration_ms: target,
-            hold_ms,
+            stretch,
             fit,
         });
         cursor += target;
@@ -259,16 +289,48 @@ mod tests {
         assert_eq!(items[0].fit, Fit::Trimmed);
         assert_eq!(items[0].timeline_duration_ms, 4_700); // 4400 + 300 tail
         assert_eq!(items[0].source_out_ms, 4_700, "tail of the clip discarded");
-        assert_eq!(items[0].hold_ms, 0);
+        assert_eq!(items[0].stretch, 1.0);
     }
 
     #[test]
-    fn clip_shorter_than_narration_holds_last_frame() {
+    fn clip_shorter_than_narration_is_slowed_never_frozen() {
+        // 2s of footage under 4.7s of narration. It used to freeze the last
+        // frame for 2.7s, which reads as the video having broken.
         let items = plan(&[clip("a", Some(2_000))], &[line("a", 4_400)]);
-        assert_eq!(items[0].fit, Fit::Held);
+        assert_eq!(items[0].fit, Fit::Slowed);
         assert_eq!(items[0].timeline_duration_ms, 4_700);
         assert_eq!(items[0].source_out_ms, 2_000, "whole clip is used");
-        assert_eq!(items[0].hold_ms, 2_700, "remainder is a frozen frame");
+        assert!(
+            (items[0].stretch - 4_700.0 / 2_000.0).abs() < 0.001,
+            "stretched to cover the line, got {}",
+            items[0].stretch
+        );
+        // 2.35x is past what reads as deliberate, so the app can say so rather
+        // than quietly shipping slow motion nobody asked for.
+        assert!(items[0].stretch > COMFORTABLE_STRETCH);
+    }
+
+    #[test]
+    fn a_gentle_shortfall_is_stretched_without_complaint() {
+        // 4s under 4.7s: a 1.18x stretch, which just reads as pacing.
+        let items = plan(&[clip("a", Some(4_000))], &[line("a", 4_400)]);
+        assert_eq!(items[0].fit, Fit::Slowed);
+        assert!(items[0].stretch < COMFORTABLE_STRETCH);
+    }
+
+    #[test]
+    fn nothing_is_ever_frozen() {
+        // The property the whole change exists for: whatever the shortfall,
+        // the picture keeps moving.
+        for source in [500u64, 1_000, 2_000, 4_000, 9_000] {
+            let items = plan(&[clip("a", Some(source))], &[line("a", 4_400)]);
+            let covered = (items[0].source_out_ms - items[0].source_in_ms) as f64
+                * items[0].stretch;
+            assert!(
+                (covered - items[0].timeline_duration_ms as f64).abs() < 2.0,
+                "{source}ms of footage must cover the whole slot, covered {covered}",
+            );
+        }
     }
 
     #[test]
@@ -276,7 +338,7 @@ mod tests {
         let items = plan(&[clip("a", None)], &[line("a", 4_400)]);
         assert_eq!(items[0].fit, Fit::Exact);
         assert_eq!(items[0].source_out_ms, 4_700);
-        assert_eq!(items[0].hold_ms, 0);
+        assert_eq!(items[0].stretch, 1.0);
     }
 
     #[test]
@@ -334,13 +396,13 @@ mod tests {
     }
 
     #[test]
-    fn a_segment_near_the_end_holds_rather_than_running_past_the_clip() {
+    fn a_segment_near_the_end_is_slowed_rather_than_running_past_the_clip() {
         // Only 2s of footage left after the start point, but 4.7s is needed.
         let items = plan(&[segment_of("a", Some(60_000), 58_000)], &[line("a", 4_400)]);
-        assert_eq!(items[0].fit, Fit::Held);
+        assert_eq!(items[0].fit, Fit::Slowed);
         assert_eq!(items[0].source_in_ms, 58_000);
         assert_eq!(items[0].source_out_ms, 60_000, "never reads past the end of the clip");
-        assert_eq!(items[0].hold_ms, 2_700);
+        assert!((items[0].stretch - 4_700.0 / 2_000.0).abs() < 0.001);
         assert_eq!(items[0].timeline_duration_ms, 4_700);
     }
 

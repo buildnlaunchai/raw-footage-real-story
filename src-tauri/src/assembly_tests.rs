@@ -80,7 +80,7 @@ fn assembles_a_rough_cut_with_correct_order_and_timing() {
     let items = timeline::plan(&clips, &lines);
     assert_eq!(
         items.iter().map(|i| i.fit).collect::<Vec<_>>(),
-        [Fit::Trimmed, Fit::Held, Fit::Exact, Fit::Exact],
+        [Fit::Trimmed, Fit::Slowed, Fit::Exact, Fit::Exact],
         "planner should exercise every fit mode"
     );
 
@@ -748,7 +748,7 @@ fn crossfade_is_capped_so_short_clips_still_resolve() {
                 source_out_ms: 1_500,
                 timeline_start_ms: i as u64 * 1_500,
                 timeline_duration_ms: 1_500,
-                hold_ms: 0,
+                stretch: 1.0,
                 fit: Fit::Exact,
             },
             is_hdr: false,

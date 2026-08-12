@@ -663,28 +663,33 @@ pub fn render_rough_cut(
         let use_ms = it.item.source_out_ms.saturating_sub(it.item.source_in_ms);
         let total_s = it.item.timeline_duration_ms as f64 / 1000.0;
 
-        // trim -> tone map -> normalise geometry -> lock timebase/rate -> hold.
+        // trim -> tone map -> stretch -> normalise geometry -> lock rate.
         // Order matters twice over: tone mapping must precede the scale so it
-        // works on the original colour data, and tpad must come last or it pads
-        // the pre-scaled stream.
+        // works on the original colour data, and the stretch must precede `fps`
+        // so the frame rate filter fills in the intermediate frames rather than
+        // stretching a stream that has already been locked.
         //
         // Rotation needs no filter here: ffmpeg's autorotation applies the
         // display matrix on decode, and that survives filter_complex — verified
         // by `rotation_survives_filter_complex` in the tests.
         filter.push_str(&format!(
-            "[{v}:v]trim=start={:.3}:duration={:.3},setpts=PTS-STARTPTS{}\
+            "[{v}:v]trim=start={:.3}:duration={:.3},setpts=PTS-STARTPTS{}{}\
              ,scale={width}:{height}:force_original_aspect_ratio=decrease,\
              pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={fps}",
             it.item.source_in_ms as f64 / 1000.0,
             use_ms as f64 / 1000.0,
             if it.is_hdr { tonemap_chain(caps) } else { "" },
+            // Slowed rather than frozen when the line outruns the footage.
+            // `setpts` multiplies each timestamp, so a stretch of 1.4 makes the
+            // clip take 1.4x as long; `fps` afterwards interpolates the gaps so
+            // the result is smooth rather than a slideshow.
+            if it.item.fit == Fit::Slowed && it.item.stretch > 1.0 {
+                format!(",setpts={:.4}*PTS", it.item.stretch)
+            } else {
+                String::new()
+            },
         ));
-        if it.item.fit == Fit::Held && it.item.hold_ms > 0 {
-            filter.push_str(&format!(
-                ",tpad=stop_mode=clone:stop_duration={:.3}",
-                it.item.hold_ms as f64 / 1000.0
-            ));
-        }
+
         // Guarantee the exact slot length regardless of rounding in the filters.
         filter.push_str(&format!(",trim=duration={total_s:.3},setpts=PTS-STARTPTS[v{i}];"));
 
