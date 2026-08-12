@@ -488,7 +488,16 @@ pub fn write_bundle(project_dir: &Path, out_zip: &Path) -> std::io::Result<()> {
                 for (i, clip) in manifest.clips.iter_mut().enumerate() {
                     let Some(src) = clip.source_path.clone() else { continue };
                     let p = Path::new(&src);
-                    if !p.is_absolute() {
+                    // Entries already inside the bundle ("clips/000-x.mp4") are
+                    // left alone; anything pointing outside it is copied in or
+                    // cleared.
+                    //
+                    // `is_absolute` alone is the wrong test on Windows, where a
+                    // path needs a drive letter to be absolute: "/nowhere/x.mp4"
+                    // has a root but is not absolute, so it was treated as an
+                    // in-bundle entry and a dangling path survived into the zip.
+                    // `has_root` covers the root-relative form as well.
+                    if !p.is_absolute() && !p.has_root() {
                         continue;
                     }
                     let name = p

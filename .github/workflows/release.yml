@@ -111,18 +111,10 @@ jobs:
 
       # Everything that guards the app itself still has to pass before we
       # spend twenty minutes bundling it.
-      # Non-blocking on purpose, and only until the Windows crash is understood.
-      #
-      # `cargo test --lib` segfaults on the Windows runner (exit 139) even with
-      # every ONNX test ignored — it now crashes after they are skipped, which
-      # points at process-level runtime setup rather than any one test. That is
-      # a real problem, but it is a *debug test harness* problem, and letting it
-      # block the run means never learning whether the shipped installer works.
-      #
-      # The installer gate below stays a hard failure. If the built app cannot
-      # speak, this pipeline still goes red — which is the check that matters.
+      # Everything that guards the app itself has to pass before we spend
+      # twenty minutes bundling it. This was briefly non-blocking while the
+      # Windows ONNX segfault was being chased; it is not any more.
       - name: Test
-        continue-on-error: true
         shell: bash
         run: |
           npm test

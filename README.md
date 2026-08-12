@@ -18,9 +18,21 @@ See `TEMPLATE.md` for the ecosystem rules this repo follows.
 narration and render a rough cut — all of it runs. Cloud providers (OpenAI for
 scripts, ElevenLabs for voices) are optional and bring-your-own-key.
 
-Packaging is in progress: CI builds unsigned installers for macOS and Windows.
-Unsigned means both operating systems will warn before opening the app — see
-`INSTALL.md`.
+Packaging is in progress: CI builds unsigned installers for macOS and Windows,
+each verified by loading the bundled model and speaking a line before the
+artifact is accepted. Unsigned means both operating systems will warn before
+opening the app.
+
+**macOS is Apple Silicon only.** ONNX Runtime publishes no prebuilt binary for
+Intel macOS at the version this uses, so a universal build cannot link:
+
+    ort-sys@2.0.0-rc.13: no prebuilt binaries available for
+    target x86_64-apple-darwin
+
+Reaching Intel Macs means building ONNX Runtime from source, which is out of
+scope for now. CI prints the architecture of every build so the limitation
+stays visible rather than being discovered by someone whose Mac will not open
+the app.
 
 ---
 
