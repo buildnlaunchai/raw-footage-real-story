@@ -96,7 +96,7 @@ pub fn init_from_exe() -> Result<(PathBuf, &'static str), String> {
 
     for (path, what) in candidates {
         if path.join("kokoro").is_dir() {
-            let resolved = path.canonicalize().unwrap_or(path);
+            let resolved = strip_verbatim(path.canonicalize().unwrap_or(path));
             init(resolved.clone());
             return Ok((resolved, what));
         }
@@ -106,4 +106,26 @@ pub fn init_from_exe() -> Result<(PathBuf, &'static str), String> {
          ../Resources/resources, ./resources and ../../resources.",
         dir.display()
     ))
+}
+
+/// Remove Windows' `\\?\` extended-length prefix.
+///
+/// `canonicalize` returns verbatim paths on Windows — `\\?\D:\a\...` — which are
+/// valid for the Rust API and hostile to anything that parses a path itself.
+/// ONNX Runtime takes the model path across an FFI boundary into C++, and the
+/// Windows build segfaults while opening it; a verbatim prefix is the kind of
+/// thing that does that.
+///
+/// Only the prefix is dropped, so the path still points at the same file. Done
+/// by hand rather than by adding `dunce` for four lines.
+fn strip_verbatim(p: PathBuf) -> PathBuf {
+    let s = p.to_string_lossy();
+    match s.strip_prefix(r"\\?\UNC\") {
+        // \\?\UNC\server\share -> \\server\share
+        Some(rest) => PathBuf::from(format!(r"\\{rest}")),
+        None => match s.strip_prefix(r"\\?\") {
+            Some(rest) => PathBuf::from(rest),
+            None => p,
+        },
+    }
 }

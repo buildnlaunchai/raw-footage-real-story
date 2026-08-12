@@ -738,6 +738,32 @@ pub mod stages {
         Ok(ph.phonemes)
     }
 
+    /// The session build, announced piece by piece.
+    ///
+    /// `load_session` is three FFI calls in a row and the Windows crash is
+    /// inside one of them. `step` is called before each so the last line
+    /// printed names the one that died.
+    pub fn session_verbose(step: &mut dyn FnMut(&str)) -> Result<ort::session::Session, String> {
+        use ort::ep::CPU;
+
+        let model = resources_dir().join("model_q8f16.onnx");
+        step(&format!("model path: {}", model.display()));
+        step(&format!("path is verbatim: {}", model.to_string_lossy().starts_with(r"\\?\")));
+        step(&format!("model readable: {}", std::fs::metadata(&model).is_ok()));
+
+        step("Session::builder()");
+        let builder = ort::session::Session::builder()
+            .map_err(|e| format!("session builder: {e}"))?;
+
+        step("with_execution_providers([CPU])");
+        let mut builder = builder
+            .with_execution_providers([CPU::default().build()])
+            .map_err(|e| format!("select CPU provider: {e}"))?;
+
+        step("commit_from_file()");
+        builder.commit_from_file(&model).map_err(|e| format!("load model: {e}"))
+    }
+
     pub fn session() -> Result<ort::session::Session, String> {
         load_session()
     }

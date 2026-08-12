@@ -148,7 +148,11 @@ pub fn run() -> i32 {
     step!("      long phonemes:  {long:?}");
 
     step!("  2/5 building the ONNX session (loads 82MB)…");
-    let mut session = match crate::tts::stages::session() {
+    let mut log = |m: &str| {
+        println!("      · {m}");
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+    };
+    let mut session = match crate::tts::stages::session_verbose(&mut log) {
         Ok(s) => s,
         Err(e) => {
             step!("  FAIL  {e}");
