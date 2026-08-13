@@ -184,10 +184,14 @@ export function renderSignature(
    * stale against.
    */
   introSig = "",
+  /** Whether the words are drawn into the picture. */
+  subtitles = false,
 ): string {
   if (!voiced) return "";
   const lines = voiced.map((v) => `${v.audioPath}:${v.durationMs}`).join("|");
-  return `${lines}::${crossfadeMs}::${musicId ?? "none"}::${introSig || "no-intro"}`;
+  return `${lines}::${crossfadeMs}::${musicId ?? "none"}::${introSig || "no-intro"}::${
+    subtitles ? "subs" : "no-subs"
+  }`;
 }
 
 export interface PipelineInput {

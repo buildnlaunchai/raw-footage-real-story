@@ -1093,3 +1093,96 @@ fn a_capped_shot_replays_exactly_as_often_as_it_must() {
     // Degenerate input must not divide by zero or loop forever.
     assert_eq!(Fit::Replayed.plays(8_000, 0, 2.0), 1);
 }
+
+/// Subtitles, burned in for real and then looked at.
+///
+/// "It rendered" proves nothing here: a filter that silently draws nothing
+/// produces a perfectly valid video of the footage without captions. So this
+/// samples the strip of frame where the text sits and requires it to differ
+/// from the same strip on the same render without subtitles.
+#[test]
+fn subtitles_are_drawn_into_the_picture() {
+    let Some(fx) = Fixture::new("subs") else {
+        eprintln!("ffmpeg not available; skipping");
+        return;
+    };
+    let info = ffmpeg::detect(&FfmpegSettings::default()).expect("detect");
+    if !info.caps.subtitles {
+        eprintln!("this ffmpeg has no libass; skipping the burn-in check");
+        return;
+    }
+
+    // Larger than the other fixtures: at 320x180 the text is a few pixels tall
+    // and averages away to almost nothing, which would make this pass or fail
+    // on rounding rather than on whether anything was drawn.
+    let settings = RenderSettings { width: 640, height: 360, fps: 30, ..Default::default() };
+    let video = fx.dir.join("clip.mp4");
+    ffmpeg::make_placeholder(&fx.ffmpeg, &video, PALETTE[2].1, 6_000, 640, 360, 30).expect("clip");
+    let audio = fx.dir.join("line.wav");
+    tts::write_wav(&audio, &vec![0f32; 4 * 24_000]).expect("wav");
+
+    let items = timeline::plan(
+        &[timeline::ClipInput::whole("c0", Some(6_000))],
+        &[timeline::LineInput::whole("c0", 4_000)],
+    );
+    let render_items = vec![ffmpeg::RenderItem {
+        video,
+        audio,
+        item: items[0].clone(),
+        is_hdr: false,
+    }];
+
+    // Non-Latin on purpose. Bengali needs conjunct shaping and reordering that
+    // only a real text stack gets right, and it is the language this app is
+    // most used in — a check that only ever proved "ABC" would prove nothing
+    // about the case that matters.
+    let cues = crate::subtitles::cues(&items, |_| {
+        Some("বন্দরটা জমে যায়নি, থেমে গেছে।".into())
+    });
+    assert_eq!(cues.len(), 1);
+    let srt = fx.dir.join("cut-test.srt");
+    std::fs::write(&srt, crate::subtitles::to_srt(&cues, Some(crate::subtitles::WRAP_CHARS)))
+        .expect("write srt");
+
+    let plain = fx.dir.join("plain.mp4");
+    ffmpeg::render_rough_cut(&fx.ffmpeg, &render_items, &settings, &info.caps, &plain)
+        .expect("render without subtitles");
+
+    let burned = fx.dir.join("burned.mp4");
+    let with_subs = RenderSettings {
+        subtitle_path: Some(srt.to_string_lossy().to_string()),
+        ..settings.clone()
+    };
+    ffmpeg::render_rough_cut(&fx.ffmpeg, &render_items, &with_subs, &info.caps, &burned)
+        .expect("render with subtitles");
+
+    // The lower fifth of the frame, where a caption sits.
+    let at = 1_500;
+    let (x, y, w, h) = (0, 260, 640, 100);
+    let clean = ffmpeg::frame_rgb_region(&fx.ffmpeg, &plain, at, x, y, w, h).expect("clean strip");
+    let capped = ffmpeg::frame_rgb_region(&fx.ffmpeg, &burned, at, x, y, w, h).expect("caption strip");
+    println!("\n  caption strip: clean {clean:?} -> burned {capped:?}");
+
+    assert_ne!(clean, capped, "nothing was drawn into the frame");
+    // How much the strip moved, in any direction. White glyphs with a dark
+    // outline over a flat colour push some channels up and others down, so a
+    // signed measure can cancel itself out to nearly zero on a blue frame and
+    // report "nothing drawn" about a perfectly good caption.
+    let moved = capped.0.abs_diff(clean.0) as u32
+        + capped.1.abs_diff(clean.1) as u32
+        + capped.2.abs_diff(clean.2) as u32;
+    assert!(moved > 10, "the strip barely changed ({moved}); is the text being drawn?");
+
+    // And nowhere else: the top of the frame is untouched.
+    let top_plain = ffmpeg::frame_rgb_region(&fx.ffmpeg, &plain, at, 0, 0, 640, 80).expect("top");
+    let top_burned = ffmpeg::frame_rgb_region(&fx.ffmpeg, &burned, at, 0, 0, 640, 80).expect("top");
+    assert_eq!(top_plain, top_burned, "captions must not cover the picture");
+
+    // The caption ends with the words, not with the shot, so the beat of
+    // silence the cut leaves after the sentence is uncaptioned. The slot runs
+    // to 4300ms and the cue to 4000, so this samples between the two.
+    assert_eq!(cues[0].end_ms, 4_000);
+    let late_plain = ffmpeg::frame_rgb_region(&fx.ffmpeg, &plain, 4_150, x, y, w, h).expect("late");
+    let late_burned = ffmpeg::frame_rgb_region(&fx.ffmpeg, &burned, 4_150, x, y, w, h).expect("late");
+    assert_eq!(late_plain, late_burned, "the caption outlived its line");
+}

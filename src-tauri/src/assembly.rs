@@ -133,6 +133,9 @@ pub struct IntroSpec {
     /// Dissolve from the montage into the first narrated line.
     #[serde(default = "default_intro_fade")]
     pub fade_ms: u32,
+    /// The words spoken over the montage, so they can be captioned too.
+    #[serde(default)]
+    pub text: Option<String>,
 }
 
 fn default_intro_fade() -> u32 {
@@ -343,6 +346,11 @@ pub struct AssembleResult {
     pub project_path: String,
     pub duration_ms: u64,
     pub timeline: Vec<crate::timeline::TimelineItem>,
+    /// Where the subtitle file was written. Always, whether or not it is burned
+    /// in — it costs nothing to make and every site takes one as an upload.
+    pub subtitle_path: Option<String>,
+    /// Why the words are not drawn into the picture, when that was asked for.
+    pub subtitle_error: Option<String>,
     /// Why the opening is missing, when one was asked for and could not be made.
     ///
     /// Present rather than thrown: the cut itself rendered, and a silent
@@ -370,6 +378,7 @@ pub async fn assembly_render(
     crossfade_ms: Option<u32>,
     music_id: Option<String>,
     intro: Option<IntroSpec>,
+    subtitles: Option<bool>,
 ) -> Result<AssembleResult, FfmpegError> {
     let info = ffmpeg::detect(&load_settings(&app))?;
     let dir = project_dir(&app, &project_id)?;
@@ -523,6 +532,44 @@ pub async fn assembly_render(
         }
     }
 
+    // --- subtitles ------------------------------------------------------------
+    //
+    // Built from the timeline that is about to be rendered, so the timings are
+    // the cut's own rather than an estimate of it, and written whatever the
+    // toggle says. Burning them in is the part that needs libass.
+    let subs_path = dir.join("render").join(format!("cut-{stem}.srt"));
+    let cues = crate::subtitles::cues(&items, |it| {
+        if it.clip_id == timeline::INTRO_CLIP_ID {
+            intro.as_ref().and_then(|i| i.text.clone())
+        } else {
+            voiced
+                .iter()
+                .find(|v| v.clip_id == it.clip_id && v.segment_index == it.segment_index)
+                .map(|v| v.text.clone())
+        }
+    });
+    let mut subtitle_path = None;
+    let mut subtitle_error = None;
+    if !cues.is_empty() {
+        let doc = crate::subtitles::to_srt(&cues, Some(crate::subtitles::WRAP_CHARS));
+        match std::fs::write(&subs_path, doc) {
+            Ok(()) => subtitle_path = Some(subs_path.to_string_lossy().to_string()),
+            Err(e) => subtitle_error = Some(format!("Could not write the subtitle file: {e}")),
+        }
+    }
+
+    if subtitles.unwrap_or(false) {
+        if !info.caps.subtitles {
+            subtitle_error = Some(
+                "This copy of ffmpeg was built without libass, so it cannot draw text into \
+                 the picture. The subtitle file was still saved next to the video."
+                    .into(),
+            );
+        } else if let Some(p) = subtitle_path.clone() {
+            settings.subtitle_path = Some(p);
+        }
+    }
+
     let out = dir.join("render").join(format!("cut-{stem}.mp4"));
     ffmpeg::render_rough_cut(&info.ffmpeg, &render_items, &settings, &info.caps, &out)?;
 
@@ -656,6 +703,8 @@ pub async fn assembly_render(
         project_path: manifest_path.to_string_lossy().into(),
         duration_ms: timeline::total_duration_ms(&items),
         timeline: items,
+        subtitle_path,
+        subtitle_error,
         intro_error,
     })
 }

@@ -356,6 +356,7 @@ function App() {
   const [assemblyError, setAssemblyError] = useState<string | null>(null);
   const [crossfadeMs, setCrossfadeMs] = useState(0);
   const [musicId, setMusicId] = useState<string | null>(null);
+  const [burnSubtitles, setBurnSubtitles] = useState(false);
 
   const projectId = manifest?.project.id ?? null;
 
@@ -395,6 +396,9 @@ function App() {
       })),
       audioPath: hookAudio.audioPath,
       fadeMs: INTRO_FADE_MS,
+      // What the recording actually says, not what the editor now shows: the
+      // caption has to match the audio in the file being rendered.
+      text: hookAudio.text,
     };
   }, [introShots, hookAudio, manifest]);
 
@@ -1160,16 +1164,21 @@ function App() {
         crossfadeMs,
         musicId,
         intro: introSpec,
+        subtitles: burnSubtitles,
         onProgress: setRenderProgress,
       });
       setAssembly(result);
-      if (result.introError) {
-        setAssemblyError(
-          `The cut rendered, but without its opening: ${result.introError}`,
-        );
-      }
+      // Both are partial failures: the cut exists, one thing it was asked for
+      // is missing. Saying so beats a video that quietly lacks what you ticked.
+      const missed = [result.introError && `without its opening: ${result.introError}`,
+                      result.subtitleError]
+        .filter(Boolean)
+        .join(" · ");
+      if (missed) setAssemblyError(`The cut rendered, but ${missed}`);
       // Stamp what this cut was made from, so a later edit can be seen.
-      setRenderedSig(renderSignature(voiced, crossfadeMs, musicId, introSignature));
+      setRenderedSig(
+        renderSignature(voiced, crossfadeMs, musicId, introSignature, burnSubtitles),
+      );
 
       const take = renderTake(
         takeId,
@@ -1581,7 +1590,8 @@ function App() {
   const assemblyCurrent =
     !assembly ||
     renderedSig === "" ||
-    renderedSig === renderSignature(voiced, crossfadeMs, musicId, introSignature);
+    renderedSig ===
+      renderSignature(voiced, crossfadeMs, musicId, introSignature, burnSubtitles);
 
   const busyStage: StageId | null = importing
     ? "footage"
@@ -2070,6 +2080,37 @@ function App() {
                     >
                       Crossfade
                     </button>
+                  </div>
+                </div>
+
+                <div className="field-row">
+                  <span className="field-label">Subtitles</span>
+                  <div className="style-row">
+                    <button
+                      type="button"
+                      className={`style-chip${!burnSubtitles ? " is-selected" : ""}`}
+                      onClick={() => setBurnSubtitles(false)}
+                    >
+                      Off
+                    </button>
+                    <button
+                      type="button"
+                      className={`style-chip${burnSubtitles ? " is-selected" : ""}`}
+                      onClick={() => setBurnSubtitles(true)}
+                      disabled={!ffmpeg.caps.subtitles}
+                      title={
+                        ffmpeg.caps.subtitles
+                          ? "Draw the script into the picture, in the language it was written in"
+                          : "This copy of ffmpeg was built without libass and cannot draw text"
+                      }
+                    >
+                      Burn into the video
+                    </button>
+                    <span className="hint">
+                      {ffmpeg.caps.subtitles
+                        ? "A .srt file is saved next to the video either way."
+                        : "Not available in this ffmpeg build — a .srt is still saved next to the video."}
+                    </span>
                   </div>
                 </div>
 

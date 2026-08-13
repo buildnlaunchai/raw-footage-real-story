@@ -13,6 +13,8 @@ export interface FfmpegCaps {
   /** libzimg. Without it HDR tone mapping is only approximate. */
   zscale: boolean;
   tonemap: boolean;
+  /** libass. Without it no text can be drawn into the picture. */
+  subtitles: boolean;
 }
 
 export interface FfmpegInfo {
@@ -54,6 +56,10 @@ export interface AssembleResult {
   projectPath: string;
   durationMs: number;
   timeline: TimelineItem[];
+  /** Where the .srt was written. Always, whether or not it is burned in. */
+  subtitlePath: string | null;
+  /** Set when burning them in was asked for and could not be done. */
+  subtitleError: string | null;
   /** Set when an opening was asked for and could not be rendered. */
   introError: string | null;
 }
@@ -72,6 +78,8 @@ export interface IntroSpec {
   shots: { sourcePath: string; sourceInMs: number; durationMs: number; isHdr: boolean }[];
   audioPath: string;
   fadeMs: number;
+  /** The spoken hook, so the montage can be captioned like everything else. */
+  text: string | null;
 }
 
 export interface GeneratedClip {
@@ -207,6 +215,8 @@ export interface RenderOptions {
   musicId?: string | null;
   /** The opening montage, or null for a film that starts on its first line. */
   intro?: IntroSpec | null;
+  /** Draw the script into the picture. The .srt is written either way. */
+  subtitles?: boolean;
   onProgress?: (p: RenderProgress) => void;
 }
 
@@ -234,6 +244,7 @@ export async function renderRoughCut(
       crossfadeMs: opts.crossfadeMs ?? 0,
       musicId: opts.musicId ?? null,
       intro: opts.intro ?? null,
+      subtitles: opts.subtitles ?? false,
     });
   } catch (err) {
     throw asError(err);

@@ -617,6 +617,13 @@ pub struct RenderSettings {
     /// with the voice defeats the point of the voice.
     #[serde(default = "default_music_gain")]
     pub music_gain: f32,
+    /// A subtitle file to burn into the picture.
+    ///
+    /// The file is written whatever this is set to — it is useful on its own,
+    /// and every site accepts one as an upload. This is only about drawing the
+    /// words into the frames, which needs a build with libass.
+    #[serde(default)]
+    pub subtitle_path: Option<String>,
 }
 
 fn default_music_gain() -> f32 {
@@ -638,6 +645,7 @@ impl Default for RenderSettings {
             intro_fade_ms: 0,
             music_path: None,
             music_gain: default_music_gain(),
+            subtitle_path: None,
         }
     }
 }
@@ -826,6 +834,35 @@ pub fn render_rough_cut(
             aprev = an;
         }
         (format!("[{vprev}]"), format!("[{aprev}]"))
+    };
+
+    // Subtitles last, so they are drawn over the finished picture rather than
+    // into a shot that a later dissolve then fades out from under them.
+    //
+    // The file is named without a path and ffmpeg is run from the directory it
+    // sits in. The filter parses its own argument, so a Windows drive letter or
+    // any of the punctuation macOS allows in a folder name would otherwise have
+    // to be escaped twice over — and getting that wrong fails at render time,
+    // on someone else's machine, with a parse error about a colon.
+    let vout = match settings.subtitle_path.as_deref().filter(|p| Path::new(p).is_file()) {
+        None => vout,
+        Some(subs) => {
+            let path = Path::new(subs);
+            if let Some(dir) = path.parent() {
+                cmd.current_dir(dir);
+            }
+            let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            // Sized from the frame rather than fixed: 24pt is unreadable on a
+            // phone-shot 1080-wide portrait clip and enormous on a 4K one.
+            let font = (height as f64 / 22.0).round().max(16.0) as u32;
+            filter.push_str(&format!(
+                "{vout}subtitles=filename={name}:force_style='FontSize={font},\
+                 PrimaryColour=&H00FFFFFF,OutlineColour=&H90000000,BorderStyle=1,\
+                 Outline=2,Shadow=1,MarginV={}'[subv];",
+                (height as f64 / 18.0).round().max(12.0) as u32,
+            ));
+            "[subv]".to_string()
+        }
     };
 
     // Optional music bed under the narration.

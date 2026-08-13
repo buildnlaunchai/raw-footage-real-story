@@ -132,6 +132,23 @@ if grep -rInE 'api_key|apiKey' src-tauri/src/project.rs 2>/dev/null; then
 fi
 [ "$key_leak" -eq 0 ] && ok "  clean — no key material in projects"
 
+# --- duplicated resource files ---------------------------------------------
+#
+# This machine has twice produced "name 2.ext" copies of files under sync
+# pressure: once emptying seven voice packs of their contents, once filling a
+# freshly installed node_modules with them mid-build. `resources/**/*` is
+# bundled wholesale, so a duplicate that survives to build time ships inside
+# the app — 62 voice packs where there should be 55, seven of them junk. Cheap
+# to check here; expensive to find out from a user.
+say "→ checking for duplicated resource files"
+dupes="$(find src-tauri/resources \( -name '* [0-9]' -o -name '* [0-9].*' \) 2>/dev/null || true)"
+if [ -n "$dupes" ]; then
+  bad "  duplicated files under resources — these would be bundled into the app:"
+  printf '%s\n' "$dupes" | sed 's/^/    /'
+else
+  ok "  clean — no duplicated resources"
+fi
+
 say ""
 if [ "$fail" -ne 0 ]; then
   printf '%spreflight FAILED%s\n' "$RED" "$OFF"
