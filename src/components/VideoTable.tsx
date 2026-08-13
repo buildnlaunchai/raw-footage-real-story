@@ -28,6 +28,19 @@ interface Props {
    */
   onDelete: (clips: LibraryClip[]) => void;
   onOpenProject: (projectId: string) => void;
+  /**
+   * Reordering, when this list is showing one project in its running order.
+   *
+   * Absent everywhere else: the order belongs to a project, and the
+   * all-collections view is several projects interleaved, where "third" would
+   * mean nothing.
+   */
+  reorder?: {
+    /** The rows in their new top-to-bottom order. */
+    onReorder: (clips: LibraryClip[]) => void;
+    /** True when the list is showing last-to-first. */
+    reversed: boolean;
+  };
 }
 
 export function VideoTable({
@@ -36,8 +49,11 @@ export function VideoTable({
   onDescribe,
   onDelete,
   onOpenProject,
+  reorder,
 }: Props) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [dragging, setDragging] = useState<string | null>(null);
+  const [over, setOver] = useState<string | null>(null);
   const key = (c: LibraryClip) => `${c.projectId}/${c.clipId}`;
 
   // Selection is scoped to what is on screen. Carrying it across a page or a
@@ -62,6 +78,26 @@ export function VideoTable({
       else shown.forEach((k) => next.add(k));
       return next;
     });
+  }
+
+  /** Move one row to another row's position and hand the whole order back. */
+  function move(fromKey: string, toKey: string) {
+    if (!reorder || fromKey === toKey) return;
+    const from = clips.findIndex((c) => key(c) === fromKey);
+    const to = clips.findIndex((c) => key(c) === toKey);
+    if (from < 0 || to < 0) return;
+    const next = [...clips];
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    reorder.onReorder(next);
+  }
+
+  /** Keyboard equivalent, because a drag handle nobody can tab to is a wall. */
+  function nudge(k: string, delta: number) {
+    const i = clips.findIndex((c) => key(c) === k);
+    const j = i + delta;
+    if (i < 0 || j < 0 || j >= clips.length) return;
+    move(k, key(clips[j]));
   }
 
   return (
@@ -103,6 +139,7 @@ export function VideoTable({
                 aria-label={allShown ? "Deselect all on this page" : "Select all on this page"}
               />
             </th>
+            {reorder && <th className="lib-order" scope="col"><span className="visually-hidden">Order</span>#</th>}
             <th>Video</th>
             <th>Description</th>
             <th>Duration</th>
@@ -125,7 +162,57 @@ export function VideoTable({
               .join(" • ");
 
             return (
-              <tr key={k} data-picked={selected.has(k) || undefined}>
+              <tr
+                key={k}
+                data-picked={selected.has(k) || undefined}
+                data-dragging={dragging === k || undefined}
+                data-dropzone={over === k && dragging !== k || undefined}
+                onDragOver={(e) => {
+                  if (!dragging) return;
+                  e.preventDefault();
+                  setOver(k);
+                }}
+                onDrop={(e) => {
+                  if (!dragging) return;
+                  e.preventDefault();
+                  move(dragging, k);
+                  setDragging(null);
+                  setOver(null);
+                }}
+              >
+                {reorder && (
+                  <td className="lib-order">
+                    <button
+                      type="button"
+                      className="drag-handle"
+                      draggable
+                      onDragStart={(e) => {
+                        setDragging(k);
+                        e.dataTransfer.effectAllowed = "move";
+                      }}
+                      onDragEnd={() => {
+                        setDragging(null);
+                        setOver(null);
+                      }}
+                      onKeyDown={(e) => {
+                        // In a reversed view, up on screen is later in the film.
+                        const dir = reorder.reversed ? -1 : 1;
+                        if (e.key === "ArrowUp") {
+                          e.preventDefault();
+                          nudge(k, -1 * dir * dir);
+                        } else if (e.key === "ArrowDown") {
+                          e.preventDefault();
+                          nudge(k, 1);
+                        }
+                      }}
+                      title="Drag to reorder, or use the arrow keys"
+                      aria-label={`Position ${c.sequence + 1}. Drag or use arrow keys to reorder ${c.fileName}`}
+                    >
+                      <span className="drag-grip" aria-hidden="true">⠿</span>
+                      <span className="drag-index">{c.sequence + 1}</span>
+                    </button>
+                  </td>
+                )}
                 <td className="lib-pick">
                   <input
                     type="checkbox"

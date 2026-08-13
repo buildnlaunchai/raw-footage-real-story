@@ -394,6 +394,13 @@ pub struct LibraryClip {
     /// When the clip entered the library. Falls back to the project's own time
     /// for clips imported before this was tracked.
     pub added_at: String,
+    /// Where this clip sits in its project's running order, from zero.
+    ///
+    /// The order *is* the position in `project.json`'s `clips` array — there is
+    /// no separate field to drift out of step with it. It is carried on the row
+    /// because the library view merges several projects and re-sorts them,
+    /// which is exactly where array position gets lost.
+    pub sequence: usize,
 }
 
 /// Flatten one clip into a library row.
@@ -401,7 +408,7 @@ pub struct LibraryClip {
 /// Separated from `library_list` so the mapping can be tested: the row used to
 /// carry only the joined description, and a view that needed real segments
 /// rebuilt a single one from that sentence — which quietly destroyed splits.
-pub fn to_library_clip(p: &ProjectFile, c: &project::ProjectClip) -> LibraryClip {
+pub fn to_library_clip(p: &ProjectFile, c: &project::ProjectClip, sequence: usize) -> LibraryClip {
     LibraryClip {
         project_id: p.project.id.clone(),
         project_name: p.project.name.clone(),
@@ -427,6 +434,7 @@ pub fn to_library_clip(p: &ProjectFile, c: &project::ProjectClip) -> LibraryClip
         deleted_at: c.deleted_at.clone(),
         description: c.combined_text(),
         segment_count: c.segments.len(),
+        sequence,
         segments: c.segments.clone(),
         added_at: p.project.created_at.clone(),
     }
@@ -439,11 +447,57 @@ pub fn library_list(app: AppHandle) -> Result<Vec<LibraryClip>, StoreError> {
     for entry in std::fs::read_dir(&root).into_iter().flatten().flatten() {
         let manifest = entry.path().join("project.json");
         let Ok(p) = project::load(&manifest) else { continue };
-        for c in &p.clips {
-            out.push(to_library_clip(&p, c));
+        for (i, c) in p.clips.iter().enumerate() {
+            out.push(to_library_clip(&p, c, i));
         }
     }
     Ok(out)
+}
+
+/// Put a project's clips into the given order.
+///
+/// The running order of the footage *is* the order of the `clips` array — the
+/// script is written to follow it and the cut is assembled in it — so
+/// reordering is a rewrite of that array rather than a field set on each clip.
+/// One source of truth, and no way for a stored index to disagree with the
+/// position it claims to describe.
+///
+/// Ids the caller does not mention keep their relative order and follow the
+/// ones it does. That matters because the table can be filtered or paged: a
+/// drag on the visible twenty must not silently discard the other two hundred
+/// and eighty.
+#[tauri::command]
+pub fn clip_reorder(
+    app: AppHandle,
+    project_id: String,
+    clip_ids: Vec<String>,
+) -> Result<(), StoreError> {
+    let path = project_dir(&app, &project_id)?.join("project.json");
+    let mut manifest = load_from(&path)?;
+    manifest.clips = reordered(std::mem::take(&mut manifest.clips), &clip_ids);
+    save_to(&path, &manifest)
+}
+
+/// The named clips first, in the order named; everything else after, in the
+/// order it already had.
+pub fn reordered(
+    clips: Vec<project::ProjectClip>,
+    order: &[String],
+) -> Vec<project::ProjectClip> {
+    let rank: std::collections::HashMap<&str, usize> =
+        order.iter().enumerate().map(|(i, id)| (id.as_str(), i)).collect();
+    let mut named: Vec<project::ProjectClip> = Vec::new();
+    let mut rest: Vec<project::ProjectClip> = Vec::new();
+    for c in clips {
+        if rank.contains_key(c.id.as_str()) {
+            named.push(c);
+        } else {
+            rest.push(c);
+        }
+    }
+    named.sort_by_key(|c| rank[c.id.as_str()]);
+    named.extend(rest);
+    named
 }
 
 /// Apply one change to one clip, in place.
@@ -616,7 +670,7 @@ mod library_rows {
             Segment { start_sec: 12.0, end_sec: 85.055, text: "mosque".into() },
         ]));
 
-        let row = to_library_clip(&p, &p.clips[0]);
+        let row = to_library_clip(&p, &p.clips[0], 0);
 
         assert_eq!(row.segments.len(), 2, "both moments must reach the row");
         assert_eq!(row.segments[0].text, "kobutor");
@@ -633,7 +687,7 @@ mod library_rows {
     fn an_undescribed_clip_has_no_moments_rather_than_an_empty_one() {
         let mut p = ProjectFile::new("p1".into(), "Mecca".into(), "2026-08-12T00:00:00Z".into());
         p.clips.push(clip_with(Vec::new()));
-        let row = to_library_clip(&p, &p.clips[0]);
+        let row = to_library_clip(&p, &p.clips[0], 0);
         assert!(row.segments.is_empty());
         assert_eq!(row.description, "");
     }

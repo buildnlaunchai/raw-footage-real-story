@@ -39,6 +39,7 @@ const FIT_LABEL: Record<TimelineItem["fit"], string> = {
   exact: "exact",
   trimmed: "trimmed to fit",
   slowed: "slowed to fit",
+  replayed: "shown twice",
 };
 
 function secs(ms: number): string {
@@ -192,15 +193,14 @@ export function AssemblyPanel({
                     {isIntro && <span className="fit-chip fit-exact">montage</span>}
                     {item.stretch > 1.01 && (
                       <span
-                        className={item.stretch > 2 ? "skip-chip" : "hint"}
+                        className={item.fit === "replayed" ? "skip-chip" : "hint"}
                         title={
-                          item.stretch > 2
-                            ? "This line has more words than the clip has seconds. Shorten it, or describe more of this clip, or the footage will look like slow motion."
+                          item.fit === "replayed"
+                            ? "This line has more words than the clip has seconds. Slowing stops at 2x, so the shot is shown again to cover the rest — shorten the line, or describe more of this clip."
                             : "Slowed slightly so the picture keeps moving under the narration."
                         }
                       >
                         {item.stretch.toFixed(2)}× slower
-                        {item.stretch > 2 ? " — very slow" : ""}
                       </span>
                     )}
                   </div>

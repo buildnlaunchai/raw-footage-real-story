@@ -752,21 +752,32 @@ export async function selectSegments(
     pool = shortlist.length >= Math.min(want, 3) ? shortlist : candidates;
   }
 
-  // Final pass: pick and order.
+  // Final pass: pick, but do not order.
+  //
+  // The running order of the footage is the user's, set by dragging the
+  // footage list, and the film is cut in it. A model that reorders on top of
+  // that is overruling a decision somebody made deliberately — and the
+  // reorder was invisible, because nothing in the UI showed that the script
+  // had rearranged the trip.
   const raw = await generate({
     ...base,
     system: SELECT_SYSTEM,
     format: REFS_SCHEMA,
     prompt:
       `Video title: "${options.title}"\n\nMoments:\n${listFor(pool)}\n\n` +
-      `Choose about ${want} moments for this video and put them in the order ` +
-      `the story should tell them — which is not necessarily the order above. ` +
-      `Return JSON with a "refs" array of the numbers, in your chosen order.`,
+      `Choose about ${want} moments for this video. They will be shown in the ` +
+      `order they are listed above, which is the order the footage is in, so ` +
+      `choose on merit and not on sequence. ` +
+      `Return JSON with a "refs" array of the numbers you chose.`,
   });
 
   const ordered = parseRefs(raw, new Set(pool.map((c) => c.ref)))
     .map((r) => byRef.get(r)!)
-    .filter(Boolean);
+    .filter(Boolean)
+    // Footage order, whatever order the model answered in. `ref` is assigned
+    // by walking the clips in the order the project stores them, so sorting by
+    // it restores exactly the sequence shown in the footage list.
+    .sort((a, b) => a.ref - b.ref);
 
   if (ordered.length === 0) {
     // Better a sensible default than an empty script.
@@ -845,27 +856,29 @@ export async function writeScript(
  * lines by. Joining them keeps every word and restores the invariant: one line
  * per moment, each with an identity of its own.
  *
- * Order follows each moment's first mention, so the story keeps the sequence
- * the model chose.
+ * Order follows the footage, not the order the model happened to answer in.
+ * It used to follow first mention, which handed the model a second chance to
+ * rearrange the trip after selection had already been pinned to the footage
+ * list — a model that writes moment 7 before moment 3 would have cut the film
+ * that way.
  */
 function collapseByMoment(
   written: { ref: number; text: string }[],
   byRef: Map<number, Candidate>,
 ): ScriptLineDraft[] {
-  const order: number[] = [];
   const textsByRef = new Map<number, string[]>();
   for (const l of written) {
-    if (!textsByRef.has(l.ref)) {
-      textsByRef.set(l.ref, []);
-      order.push(l.ref);
-    }
-    textsByRef.get(l.ref)!.push(l.text.trim());
+    const texts = textsByRef.get(l.ref) ?? [];
+    texts.push(l.text.trim());
+    textsByRef.set(l.ref, texts);
   }
-  return order.map((ref) => ({
-    clipId: byRef.get(ref)!.clipId,
-    segmentIndex: byRef.get(ref)!.segmentIndex,
-    text: textsByRef.get(ref)!.join(" "),
-  }));
+  return [...textsByRef.keys()]
+    .sort((a, b) => a - b)
+    .map((ref) => ({
+      clipId: byRef.get(ref)!.clipId,
+      segmentIndex: byRef.get(ref)!.segmentIndex,
+      text: textsByRef.get(ref)!.join(" "),
+    }));
 }
 
 /**

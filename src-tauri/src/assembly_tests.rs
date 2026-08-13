@@ -66,7 +66,7 @@ fn assembles_a_rough_cut_with_correct_order_and_timing() {
     // Narration durations chosen to exercise every branch of the planner.
     let lines = [
         LineInput::whole("c0", 2_000), // vs 10s source -> Trimmed
-        LineInput::whole("c1", 3_000), // vs 1s source  -> Held
+        LineInput::whole("c1", 3_000), // vs 1s source  -> capped and replayed
         LineInput::whole("c2", 1_700), // vs 2s source  -> Exact
         LineInput::whole("c3", 2_500), // no source     -> placeholder
     ];
@@ -80,7 +80,7 @@ fn assembles_a_rough_cut_with_correct_order_and_timing() {
     let items = timeline::plan(&clips, &lines);
     assert_eq!(
         items.iter().map(|i| i.fit).collect::<Vec<_>>(),
-        [Fit::Trimmed, Fit::Slowed, Fit::Exact, Fit::Exact],
+        [Fit::Trimmed, Fit::Replayed, Fit::Exact, Fit::Exact],
         "planner should exercise every fit mode"
     );
 
@@ -234,7 +234,7 @@ fn handles_awkward_sources_and_normalises_them() {
         eprintln!("ffmpeg not available; skipping");
         return;
     };
-    let caps = ffmpeg::FfmpegCaps { zscale: true, tonemap: true };
+    let caps = ffmpeg::FfmpegCaps { zscale: true, tonemap: true, subtitles: true };
 
     struct Case {
         name: &'static str,
@@ -572,7 +572,7 @@ fn validation_accepts_reports_and_rejects_explicitly() {
         eprintln!("ffmpeg not available; skipping");
         return;
     };
-    let caps = ffmpeg::FfmpegCaps { zscale: true, tonemap: true };
+    let caps = ffmpeg::FfmpegCaps { zscale: true, tonemap: true, subtitles: true };
 
     // A silent clip is usable, but the user should be told it is silent.
     let ok = fx.dir.join("ok.mp4");
@@ -1017,4 +1017,79 @@ fn the_opening_dissolve_is_not_the_body_crossfade() {
         total.abs_diff(6_200) < 200,
         "expected 6.2s, measured {total}ms",
     );
+}
+
+/// The 2x cap, proved against real ffmpeg rather than only in the planner.
+///
+/// A clip far too short for its line used to be slowed without limit, which at
+/// a fifth speed reads as a broken video rather than as pacing. Now it slows to
+/// the cap and replays. The check that matters is that the narration is still
+/// covered end to end and the picture is still moving — a silent regression
+/// here would be a frozen frame nobody notices until they watch the export.
+#[test]
+fn a_clip_too_short_for_its_line_is_capped_and_replayed() {
+    let Some(fx) = Fixture::new("cap") else {
+        eprintln!("ffmpeg not available; skipping");
+        return;
+    };
+    let settings = RenderSettings { width: 320, height: 180, fps: 30, ..Default::default() };
+
+    // Two seconds of footage under eight seconds of narration: 4x if it were
+    // allowed to stretch, which it is not.
+    let short = fx.dir.join("short.mp4");
+    ffmpeg::make_placeholder(&fx.ffmpeg, &short, PALETTE[0].1, 2_000, 320, 180, 30).expect("clip");
+    let audio = fx.dir.join("long.wav");
+    tts::write_wav(&audio, &vec![0f32; 8 * 24_000]).expect("wav");
+
+    let items = timeline::plan(
+        &[timeline::ClipInput::whole("c0", Some(2_000))],
+        &[timeline::LineInput::whole("c0", 8_000)],
+    );
+    assert_eq!(items[0].fit, timeline::Fit::Replayed, "the cap bound");
+    assert_eq!(items[0].stretch, timeline::COMFORTABLE_STRETCH, "and stopped exactly there");
+
+    let render_items = vec![ffmpeg::RenderItem {
+        video: short,
+        audio,
+        item: items[0].clone(),
+        is_hdr: false,
+    }];
+    let out = fx.dir.join("capped.mp4");
+    ffmpeg::render_rough_cut(
+        &fx.ffmpeg, &render_items, &settings, &ffmpeg::FfmpegCaps::default(), &out,
+    )
+    .expect("a capped shot still renders");
+
+    // The narration is never cut, so the slot is still the length the planner
+    // asked for — the replay fills it, rather than the video ending early.
+    let slot = items[0].timeline_duration_ms;
+    let measured = ffmpeg::probe_duration_ms(&fx.ffprobe, &out).expect("probe");
+    println!("\n  slot {slot}ms, rendered {measured}ms, stretch {:.2}", items[0].stretch);
+    assert!(
+        measured.abs_diff(slot) < 200,
+        "the shot must cover its whole line: wanted {slot}ms, got {measured}ms",
+    );
+
+    // Picture throughout, including in the stretch past the first play-through
+    // where the old code would have run out of frames.
+    for at in [200u64, 3_000, 5_000, slot - 400] {
+        let rgb = ffmpeg::frame_rgb(&fx.ffmpeg, &out, at).expect("frame");
+        assert_eq!(nearest(rgb), PALETTE[0].0, "black or frozen at {at}ms: {rgb:?}");
+    }
+}
+
+/// The arithmetic behind the replay, without paying for a render each time.
+#[test]
+fn a_capped_shot_replays_exactly_as_often_as_it_must() {
+    use timeline::Fit;
+    // 2s of footage, slowed to 4s, under an 8s line: two plays.
+    assert_eq!(Fit::Replayed.plays(8_000, 2_000, 2.0), 2);
+    // Just over two plays' worth needs a third, since the tail is trimmed.
+    assert_eq!(Fit::Replayed.plays(8_500, 2_000, 2.0), 3);
+    // Anything that fits plays once, whatever it is asked.
+    assert_eq!(Fit::Slowed.plays(8_000, 2_000, 2.0), 1);
+    assert_eq!(Fit::Exact.plays(8_000, 2_000, 1.0), 1);
+    assert_eq!(Fit::Trimmed.plays(8_000, 60_000, 1.0), 1);
+    // Degenerate input must not divide by zero or loop forever.
+    assert_eq!(Fit::Replayed.plays(8_000, 0, 2.0), 1);
 }

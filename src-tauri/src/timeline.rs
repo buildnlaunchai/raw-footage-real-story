@@ -67,15 +67,46 @@ pub enum Fit {
     /// and it happened wherever a line outran its footage. Slowing keeps the
     /// picture moving, which is the thing a viewer actually notices.
     Slowed,
+    /// Slowed to the cap and then replayed, because even at `COMFORTABLE_STRETCH`
+    /// the footage could not cover its line.
+    ///
+    /// The last resort, and one the script writer is meant to make unreachable
+    /// by keeping each line inside what its clip can carry. It exists because a
+    /// line edited by hand afterwards can still outrun its footage, and the
+    /// renderer has to do *something* — and of the things it could do, showing
+    /// the shot again is the only one that neither freezes the picture nor cuts
+    /// a word of narration.
+    Replayed,
 }
 
-/// The most a clip may be stretched before it stops looking deliberate.
+impl Fit {
+    /// How many times the trimmed source must play to fill its slot.
+    ///
+    /// One for everything that fits or is merely slowed. More only where the
+    /// cap has bound, and then exactly enough — the graph trims the tail.
+    pub fn plays(&self, slot_ms: u64, source_ms: u64, stretch: f64) -> u32 {
+        if *self != Fit::Replayed || source_ms == 0 {
+            return 1;
+        }
+        let each = source_ms as f64 * stretch;
+        if each <= 0.0 {
+            return 1;
+        }
+        (slot_ms as f64 / each).ceil().max(1.0) as u32
+    }
+}
+
+/// The most a clip may ever be stretched. A hard limit, not a guideline.
 ///
-/// Past roughly this, slow motion reads as an effect rather than as pacing.
-/// Beyond it the clip is still slowed rather than frozen — a moving picture is
-/// always better than a still one — but the timeline says so, so the app can
-/// point at the real problem: a line with more words than its footage has
-/// seconds.
+/// Past roughly this, slow motion stops reading as pacing and starts reading
+/// as a fault in the video. It used to be advisory — declared here, checked by
+/// nothing — so a line with more words than its footage had seconds produced
+/// footage at a fifth speed and the app called it `Slowed` and moved on.
+///
+/// Nothing downstream may exceed it. Where narration needs more time than
+/// twice the footage can give, the answer is a shorter line, which is settled
+/// while the script is being written; `MAX_STRETCH` is what makes that a
+/// guarantee rather than an intention.
 pub const COMFORTABLE_STRETCH: f64 = 2.0;
 
 /// Identity of a described moment.
@@ -215,9 +246,17 @@ pub fn plan(clips: &[ClipInput], lines: &[LineInput]) -> Vec<TimelineItem> {
             None => (start, start + target, 1.0, Fit::Exact),
             Some(len) if len > target => (start, start + target, 1.0, Fit::Trimmed),
             // Slowed rather than frozen. The clip plays from `start` to the end
-            // of its footage, stretched to cover the narration.
+            // of its footage, stretched to cover the narration — but never
+            // past the cap. Beyond it the shot replays rather than crawling:
+            // the picture keeps moving, the narration is never cut, and no
+            // frame is ever held.
             Some(len) if len < target && len > 0 => {
-                (start, start + len, target as f64 / len as f64, Fit::Slowed)
+                let wanted = target as f64 / len as f64;
+                if wanted > COMFORTABLE_STRETCH {
+                    (start, start + len, COMFORTABLE_STRETCH, Fit::Replayed)
+                } else {
+                    (start, start + len, wanted, Fit::Slowed)
+                }
             }
             Some(len) => (start, start + len, 1.0, Fit::Exact),
         };
@@ -331,19 +370,30 @@ mod tests {
     #[test]
     fn clip_shorter_than_narration_is_slowed_never_frozen() {
         // 2s of footage under 4.7s of narration. It used to freeze the last
-        // frame for 2.7s, which reads as the video having broken.
+        // frame for 2.7s, which reads as the video having broken; then it was
+        // stretched 2.35x, which reads as the video being wrong.
         let items = plan(&[clip("a", Some(2_000))], &[line("a", 4_400)]);
-        assert_eq!(items[0].fit, Fit::Slowed);
-        assert_eq!(items[0].timeline_duration_ms, 4_700);
+        assert_eq!(items[0].fit, Fit::Replayed, "2.35x is past the cap");
+        assert_eq!(items[0].timeline_duration_ms, 4_700, "the line is never cut");
         assert_eq!(items[0].source_out_ms, 2_000, "whole clip is used");
-        assert!(
-            (items[0].stretch - 4_700.0 / 2_000.0).abs() < 0.001,
-            "stretched to cover the line, got {}",
-            items[0].stretch
-        );
-        // 2.35x is past what reads as deliberate, so the app can say so rather
-        // than quietly shipping slow motion nobody asked for.
-        assert!(items[0].stretch > COMFORTABLE_STRETCH);
+        assert_eq!(items[0].stretch, COMFORTABLE_STRETCH, "and stops exactly at the cap");
+    }
+
+    #[test]
+    fn nothing_is_ever_stretched_past_the_cap() {
+        // The guarantee the cap exists to give. It was declared and enforced
+        // nowhere, so a line with far more words than its clip had seconds
+        // produced footage at a fifth speed and the app called it fine.
+        for source in [200u64, 500, 1_000, 2_000, 4_000, 9_000] {
+            for narration in [1_000u64, 4_400, 20_000] {
+                let items = plan(&[clip("a", Some(source))], &[line("a", narration)]);
+                assert!(
+                    items[0].stretch <= COMFORTABLE_STRETCH,
+                    "{source}ms under {narration}ms stretched {}x",
+                    items[0].stretch,
+                );
+            }
+        }
     }
 
     #[test]
@@ -357,13 +407,15 @@ mod tests {
     #[test]
     fn nothing_is_ever_frozen() {
         // The property the whole change exists for: whatever the shortfall,
-        // the picture keeps moving.
+        // the picture keeps moving for the whole slot. Slowing covers it up to
+        // the cap; past that the shot replays, and `plays` says how often.
         for source in [500u64, 1_000, 2_000, 4_000, 9_000] {
-            let items = plan(&[clip("a", Some(source))], &[line("a", 4_400)]);
-            let covered = (items[0].source_out_ms - items[0].source_in_ms) as f64
-                * items[0].stretch;
+            let it = &plan(&[clip("a", Some(source))], &[line("a", 4_400)])[0];
+            let used = it.source_out_ms - it.source_in_ms;
+            let covered =
+                used as f64 * it.stretch * it.fit.plays(it.timeline_duration_ms, used, it.stretch) as f64;
             assert!(
-                (covered - items[0].timeline_duration_ms as f64).abs() < 2.0,
+                covered + 2.0 >= it.timeline_duration_ms as f64,
                 "{source}ms of footage must cover the whole slot, covered {covered}",
             );
         }
@@ -433,12 +485,14 @@ mod tests {
 
     #[test]
     fn a_segment_near_the_end_is_slowed_rather_than_running_past_the_clip() {
-        // Only 2s of footage left after the start point, but 4.7s is needed.
+        // Only 2s of footage left after the start point, but 4.7s is needed —
+        // more than twice, so it caps and replays rather than reading on into
+        // footage this moment does not own.
         let items = plan(&[segment_of("a", Some(60_000), 58_000)], &[line("a", 4_400)]);
-        assert_eq!(items[0].fit, Fit::Slowed);
+        assert_eq!(items[0].fit, Fit::Replayed);
         assert_eq!(items[0].source_in_ms, 58_000);
         assert_eq!(items[0].source_out_ms, 60_000, "never reads past the end of the clip");
-        assert!((items[0].stretch - 4_700.0 / 2_000.0).abs() < 0.001);
+        assert_eq!(items[0].stretch, COMFORTABLE_STRETCH);
         assert_eq!(items[0].timeline_duration_ms, 4_700);
     }
 

@@ -38,6 +38,7 @@ import { CheckIcon, FilterIcon, SaveIcon, SearchIcon, SortIcon } from "./compone
 import {
   allowMedia,
   listLibrary,
+  reorderClips,
   purgeClip,
   setSegments,
   storageUsage,
@@ -191,7 +192,13 @@ function App() {
   /** The Settings override, read once and passed to every composition. */
   const [instructions, setInstructions] = useState<string | null>(null);
   const [page, setPage] = useState(1);
-  const [sortBy, setSortBy] = useState<"added" | "name" | "duration" | "described">("added");
+  // Running order is the default because it is the order the film is cut in:
+  // the script is written to follow it and assembly reads it straight through.
+  // Every other sort is a way of *looking* at the list, not a way of changing
+  // what gets made.
+  const [sortBy, setSortBy] = useState<
+    "sequence" | "sequence-desc" | "added" | "name" | "duration" | "described"
+  >("sequence");
   const [filterProject, setFilterProject] = useState<string>("");
   const [preview, setPreview] = useState<LibraryClip | null>(null);
   /** Clips awaiting a delete confirmation. */
@@ -1141,6 +1148,41 @@ function App() {
     }
   }
 
+  /**
+   * Put the open collection's footage into the order these rows are in.
+   *
+   * Written straight to disk as well as to the manifest in memory. The order
+   * decides what the script narrates and what the cut shows, so leaving it
+   * only in memory would mean a drag survived until the next reload and no
+   * further — and the user has no reason to think dragging needs saving.
+   *
+   * The list arrives in screen order, which is reversed when the table is
+   * showing last-to-first; the file always stores first-to-last.
+   */
+  async function onReorder(rows: LibraryClip[]) {
+    if (!manifest) return;
+    const onScreen = sortBy === "sequence-desc" ? [...rows].reverse() : rows;
+    const ids = onScreen.map((r) => r.clipId);
+
+    // Reorder in memory the same way the Rust side does it, so the table moves
+    // under the cursor rather than after a round trip.
+    const rank = new Map(ids.map((id, i) => [id, i]));
+    const named = manifest.clips
+      .filter((c) => rank.has(c.id))
+      .sort((a, b) => rank.get(a.id)! - rank.get(b.id)!);
+    const rest = manifest.clips.filter((c) => !rank.has(c.id));
+    setManifest({ ...manifest, clips: [...named, ...rest] });
+
+    try {
+      await reorderClips(manifest.project.id, ids);
+      // A reordered library invalidates a cut assembled from the old order.
+      setAssembly(null);
+      await refreshLibraryRef.current?.();
+    } catch (err) {
+      setError(errorText(err));
+    }
+  }
+
   // --- library -------------------------------------------------------------
 
   const refreshLibrary = useCallback(async () => {
@@ -1300,7 +1342,7 @@ function App() {
   const liveLibrary = useMemo(() => {
     if (!manifest) return library;
     const others = library.filter((c) => c.projectId !== manifest.project.id);
-    const mine: LibraryClip[] = manifest.clips.map((c) => ({
+    const mine: LibraryClip[] = manifest.clips.map((c, i) => ({
       projectId: manifest.project.id,
       projectName: manifest.project.name,
       clipId: c.id,
@@ -1322,6 +1364,10 @@ function App() {
       segmentCount: c.segments.length,
       segments: c.segments,
       addedAt: manifest.project.createdAt,
+      // Position in the manifest is the running order, exactly as the Rust
+      // side derives it — the open collection is served from memory, so the
+      // index has to come from the same array either way.
+      sequence: i,
     }));
     return [...others, ...mine];
   }, [library, manifest]);
@@ -1343,6 +1389,16 @@ function App() {
     )
     .sort((a, b) => {
       switch (sortBy) {
+        case "sequence":
+        case "sequence-desc": {
+          // Sequence is per project, so across collections group by project
+          // first — "third" only means anything inside one of them.
+          const byProject = a.projectName.localeCompare(b.projectName);
+          if (byProject !== 0 && !onFootageTab) return byProject;
+          return sortBy === "sequence"
+            ? a.sequence - b.sequence
+            : b.sequence - a.sequence;
+        }
         case "name":
           return a.fileName.localeCompare(b.fileName);
         case "duration":
@@ -1355,10 +1411,23 @@ function App() {
       }
     });
 
+  /**
+   * Reordering is only offered where the order means something: one
+   * collection, shown in its running order.
+   *
+   * And it turns pagination off. Dragging clip four to position forty is the
+   * whole point of dragging, and no page size makes both ends visible — a
+   * paged reorder can only ever shuffle within a window.
+   */
+  const reordering =
+    onFootageTab && (sortBy === "sequence" || sortBy === "sequence-desc");
+
   const PER_PAGE = 10;
-  const pageCount = Math.max(1, Math.ceil(tableRows.length / PER_PAGE));
+  const pageCount = reordering ? 1 : Math.max(1, Math.ceil(tableRows.length / PER_PAGE));
   const safePage = Math.min(page, pageCount);
-  const pageRows = tableRows.slice((safePage - 1) * PER_PAGE, safePage * PER_PAGE);
+  const pageRows = reordering
+    ? tableRows
+    : tableRows.slice((safePage - 1) * PER_PAGE, safePage * PER_PAGE);
 
   const counts = { all: liveLibrary.filter((c) => !c.deletedAt).length };
 
@@ -2122,6 +2191,8 @@ function App() {
                   value={sortBy}
                   onChange={(e) => setSortBy(e.currentTarget.value as typeof sortBy)}
                 >
+                  <option value="sequence">Running order · first to last</option>
+                  <option value="sequence-desc">Running order · last to first</option>
                   <option value="added">Newest first</option>
                   <option value="name">Name</option>
                   <option value="duration">Longest first</option>
@@ -2234,6 +2305,14 @@ function App() {
                       onOpenProject={openProjectById}
                       onDescribe={(c) => setPreview(c)}
                       onDelete={(cs) => setPendingDelete({ clips: cs })}
+                      reorder={
+                        reordering && manifest
+                          ? {
+                              reversed: sortBy === "sequence-desc",
+                              onReorder: (rows) => void onReorder(rows),
+                            }
+                          : undefined
+                      }
                     />
 
                     <div className="lib-foot">

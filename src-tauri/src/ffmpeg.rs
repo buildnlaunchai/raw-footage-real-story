@@ -44,6 +44,15 @@ pub struct FfmpegCaps {
     /// comes out washed out and grey — silently, which is the worst kind.
     pub zscale: bool,
     pub tonemap: bool,
+    /// libass. Without it nothing can draw text into the picture, so subtitles
+    /// can only be written as a file alongside the video.
+    ///
+    /// Not an incidental gap: Homebrew's plain `ffmpeg` formula is built
+    /// without it, so the most ordinary install on macOS cannot burn a single
+    /// character. Bengali, Arabic and Thai make it load-bearing rather than a
+    /// nicety — they need the shaping and bidi that libass brings with
+    /// harfbuzz and fribidi, which no hand-rolled overlay would get right.
+    pub subtitles: bool,
 }
 
 fn probe_caps(ffmpeg: &Path) -> FfmpegCaps {
@@ -57,7 +66,11 @@ fn probe_caps(ffmpeg: &Path) -> FfmpegCaps {
             .lines()
             .any(|l| l.split_whitespace().nth(1).is_some_and(|f| f == name))
     };
-    FfmpegCaps { zscale: has("zscale"), tonemap: has("tonemap") }
+    FfmpegCaps {
+        zscale: has("zscale"),
+        tonemap: has("tonemap"),
+        subtitles: has("subtitles"),
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -197,30 +210,31 @@ fn resolve_auto(stem: &str) -> Option<PathBuf> {
 /// binary than the one a user named would be worse than the problem it solves.
 /// A limited explicit choice is reported through [`FfmpegCaps`] instead.
 ///
-/// For automatic discovery only, a zscale-capable build is preferred. On macOS
-/// the common case is Homebrew's `ffmpeg` on PATH (no zscale) alongside
-/// keg-only `ffmpeg-full` (zscale), and picking the former means every HDR clip
-/// silently loses its colour.
+/// For automatic discovery only, the most capable build wins. On macOS the
+/// common case is Homebrew's `ffmpeg` on PATH — no zscale, no libass —
+/// alongside keg-only `ffmpeg-full`, which has both. Picking the former means
+/// every HDR clip silently loses its colour and no subtitle can be drawn.
 fn resolve_ffmpeg(saved: Option<&String>) -> Option<PathBuf> {
     if let Some(explicit) = resolve_explicit("FFMPEG_PATH", saved) {
         return Some(explicit);
     }
 
-    let mut first_runnable: Option<PathBuf> = None;
+    let mut best: Option<(u8, PathBuf)> = None;
     for candidate in candidates("ffmpeg") {
         if !is_runnable(&candidate) {
             continue;
         }
-        // Short-circuit: the very first thing found is usually already right,
-        // and then this costs one extra probe total.
-        if probe_caps(&candidate).zscale {
+        let caps = probe_caps(&candidate);
+        let score = u8::from(caps.zscale) + u8::from(caps.subtitles);
+        // Nothing scores higher, so stop paying for probes.
+        if score == 2 {
             return Some(candidate);
         }
-        if first_runnable.is_none() {
-            first_runnable = Some(candidate);
+        if best.as_ref().is_none_or(|(s, _)| score > *s) {
+            best = Some((score, candidate));
         }
     }
-    first_runnable
+    best.map(|(_, p)| p)
 }
 
 pub fn detect(settings: &FfmpegSettings) -> Result<FfmpegInfo, FfmpegError> {
@@ -699,21 +713,52 @@ pub fn render_rough_cut(
             // `setpts` multiplies each timestamp, so a stretch of 1.4 makes the
             // clip take 1.4x as long; `fps` afterwards interpolates the gaps so
             // the result is smooth rather than a slideshow.
-            if it.item.fit == Fit::Slowed && it.item.stretch > 1.0 {
+            // Any fit that carries a stretch, not just `Slowed`: a shot that
+            // hit the cap is slowed *and* replayed, and testing for one fit by
+            // name meant a capped shot was replayed at full speed and came out
+            // short of its own narration.
+            if it.item.stretch > 1.0 {
                 format!(",setpts={:.4}*PTS", it.item.stretch)
             } else {
                 String::new()
             },
         ));
 
-        // Guarantee the exact slot length regardless of rounding in the filters.
-        // `settb` matters even when nothing fades: the intro path joins a
+        // `settb` below matters even when nothing fades: the intro path joins a
         // concat output (microsecond timebase) to a raw stream at an xfade, and
         // ffmpeg refuses unless both agree —
         //   "First input link main timebase (1/30) do not match the
         //    corresponding second input link xfade timebase (1/1000000)"
+        filter.push_str(&format!("[seg{i}];"));
+
+        // A shot the cap would not let cover its line is shown again rather
+        // than crawling or freezing. `split` then `concat` repeats the trimmed
+        // segment itself — looping the *input* would replay the whole file,
+        // which for a moment taken from the middle of a long clip is different
+        // footage, not the same shot again.
+        let plays = it.item.fit.plays(
+            it.item.timeline_duration_ms,
+            use_ms,
+            it.item.stretch,
+        );
+        if plays > 1 {
+            filter.push_str(&format!("[seg{i}]split={plays}"));
+            for r in 0..plays {
+                filter.push_str(&format!("[rep{i}_{r}]"));
+            }
+            filter.push(';');
+            for r in 0..plays {
+                filter.push_str(&format!("[rep{i}_{r}]"));
+            }
+            filter.push_str(&format!("concat=n={plays}:v=1:a=0[shot{i}];"));
+        } else {
+            filter.push_str(&format!("[seg{i}]null[shot{i}];"));
+        }
+
+        // Guarantee the exact slot length regardless of rounding in the
+        // filters, and hand on a timebase the intro's xfade can join.
         filter.push_str(&format!(
-            ",trim=duration={total_s:.3},setpts=PTS-STARTPTS,settb=1/{fps}[v{i}];"
+            "[shot{i}]trim=duration={total_s:.3},setpts=PTS-STARTPTS,settb=1/{fps}[v{i}];"
         ));
 
         // Narration, resampled and padded with silence to fill the same slot.

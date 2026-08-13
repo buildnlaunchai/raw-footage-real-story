@@ -567,3 +567,50 @@ fn deleting_a_take_takes_its_opening_with_it() {
     crate::store::remove_render_files(&lone);
     assert!(!lone.exists(), "a cut with no opening still deletes cleanly");
 }
+
+// --- running order ---------------------------------------------------------
+//
+// The order of the clips array is the order of the film: the script is written
+// to follow it and the cut is assembled in it. These hold the reorder to the
+// one property that makes that safe — it may rearrange, never lose.
+
+fn ids(clips: &[project::ProjectClip]) -> Vec<&str> {
+    clips.iter().map(|c| c.id.as_str()).collect()
+}
+
+fn bare(id: &str) -> project::ProjectClip {
+    let mut c = clip_with_segments(0, 1);
+    c.id = id.into();
+    c
+}
+
+#[test]
+fn reordering_puts_clips_in_the_order_named() {
+    let clips = vec![bare("a"), bare("b"), bare("c")];
+    let out = crate::store::reordered(clips, &["c".into(), "a".into(), "b".into()]);
+    assert_eq!(ids(&out), ["c", "a", "b"]);
+}
+
+#[test]
+fn clips_the_caller_never_saw_are_kept() {
+    // The table pages and filters, so a drag on the visible rows arrives as a
+    // partial list. Dropping the rest would delete footage on a drag.
+    let clips = vec![bare("a"), bare("b"), bare("c"), bare("d")];
+    let out = crate::store::reordered(clips, &["c".into(), "a".into()]);
+    assert_eq!(ids(&out), ["c", "a", "b", "d"], "unnamed keep their order, after");
+    assert_eq!(out.len(), 4, "nothing is lost");
+}
+
+#[test]
+fn an_unknown_id_reorders_nothing_and_breaks_nothing() {
+    let clips = vec![bare("a"), bare("b")];
+    let out = crate::store::reordered(clips, &["ghost".into(), "b".into()]);
+    assert_eq!(ids(&out), ["b", "a"]);
+}
+
+#[test]
+fn an_empty_order_leaves_the_film_alone() {
+    let clips = vec![bare("a"), bare("b"), bare("c")];
+    let out = crate::store::reordered(clips, &[]);
+    assert_eq!(ids(&out), ["a", "b", "c"]);
+}

@@ -11,6 +11,7 @@ mod openai;
 mod project;
 mod store;
 mod store_tests;
+mod subtitles;
 mod resources;
 mod secrets;
 mod timeline;
@@ -94,6 +95,7 @@ pub fn run() {
             store::clip_purge,
             store::clip_set_description,
             store::clip_set_segments,
+            store::clip_reorder,
             store::allow_media,
             tts::narration_concat,
             assembly::save_video_as,

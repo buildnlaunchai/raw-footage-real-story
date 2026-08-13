@@ -33,6 +33,15 @@ export interface LibraryClip {
    */
   segments: { startSec: number; endSec: number; text: string }[];
   addedAt: string;
+  /**
+   * Where this clip sits in its project's running order, from zero.
+   *
+   * The order *is* the position in the project file's clip array — the script
+   * is written to follow it and the cut is assembled in it. Carried on the row
+   * because this view merges projects and re-sorts them, which is exactly
+   * where array position would otherwise be lost.
+   */
+  sequence: number;
 }
 
 export interface StorageUsage {
@@ -45,6 +54,17 @@ export interface StorageUsage {
 
 export async function listLibrary(): Promise<LibraryClip[]> {
   return await invoke<LibraryClip[]>("library_list");
+}
+
+/**
+ * Put a project's footage into this order.
+ *
+ * Ids left out keep their relative order and follow the ones given, so a drag
+ * on a filtered or paged view rearranges what was visible without touching —
+ * or losing — the rest.
+ */
+export async function reorderClips(projectId: string, clipIds: string[]): Promise<void> {
+  await invoke("clip_reorder", { projectId, clipIds });
 }
 
 /**

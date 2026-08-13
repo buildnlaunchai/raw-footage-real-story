@@ -7,7 +7,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   composeScript,
+  flattenCandidates,
   momentsToRequest,
+  selectSegments,
   targetSegmentCount,
   WORDS_PER_SEGMENT,
   writeScript,
@@ -135,4 +137,58 @@ test("the suggestion stays in a range a person would choose", async () => {
   assert.equal(suggestedWordCount(1), 60, "a floor, so one clip is not a 14-word film");
   assert.ok(suggestedWordCount(300) <= 900, "and a ceiling, past which this is not a rough cut");
   assert.equal(suggestedWordCount(40) % 10, 0, "rounded to something typeable");
+});
+
+// --- the footage order is the film's order ---------------------------------
+//
+// The running order belongs to the user, who sets it by dragging the footage
+// list. Two places used to overrule it: selection asked the model to reorder,
+// and the writer's output was kept in whatever order the model answered in.
+
+test("selection is asked to choose, not to reorder", async () => {
+  const seen = [];
+  const model = async (args) => {
+    seen.push(args.prompt ?? "");
+    if (args.system?.startsWith("You choose")) return JSON.stringify({ refs: [2, 0, 1] });
+    return JSON.stringify({ lines: [] });
+  };
+  await selectSegments(model, flattenCandidates(CLIPS), { title: "Umrah", wordCount: 60 });
+  const final = seen[seen.length - 1];
+  assert.doesNotMatch(final, /order the story should tell/);
+  assert.match(final, /order the footage is in/);
+});
+
+test("moments come back in footage order however the model answers", async () => {
+  // The model is told to choose on merit; it answered 2, 0, 1.
+  const model = async (args) => {
+    if (args.system?.startsWith("You choose")) return JSON.stringify({ refs: [2, 0, 1] });
+    return JSON.stringify({ lines: [] });
+  };
+  const picked = await selectSegments(model, flattenCandidates(CLIPS), {
+    title: "Umrah", wordCount: 60,
+  });
+  assert.deepEqual(picked.map((c) => c.ref), [0, 1, 2]);
+  assert.deepEqual(picked.map((c) => c.clipId), ["clip-a", "clip-b", "clip-c"]);
+});
+
+test("a script written out of order is put back into it", async () => {
+  // The writer answering 3, 1, 2 must not cut the film that way.
+  const model = async (args) => {
+    if (args.system?.startsWith("You choose")) return JSON.stringify({ refs: [0, 1, 2] });
+    return JSON.stringify({
+      lines: [
+        { ref: 2, text: "Third clip, written first." },
+        { ref: 0, text: "First clip, written last." },
+        { ref: 1, text: "Second clip." },
+      ],
+    });
+  };
+  const draft = await composeScript(model, CLIPS, {
+    title: "Umrah", wordCount: 60, critique: false, hook: false,
+  });
+  assert.deepEqual(
+    draft.lines.map((l) => l.clipId),
+    ["clip-a", "clip-b", "clip-c"],
+    "the cut follows the footage list, not the model's answer order",
+  );
 });
