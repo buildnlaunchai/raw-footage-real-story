@@ -794,3 +794,52 @@ pub mod stages {
         synthesize_with(session, phonemes, voice, 1.0)
     }
 }
+
+#[cfg(test)]
+mod rate_tests {
+    /// How fast the bundled voice actually speaks, in words per second.
+    ///
+    /// Run on purpose, not in CI: it loads the ONNX model and synthesises real
+    /// audio. Its output is the number recorded in `WORDS_PER_SECOND`, which
+    /// decides how many words a clip of a given length can carry — a guess
+    /// there becomes narration that outruns its footage on every shot.
+    ///
+    ///   cargo test --lib measure_speaking_rate -- --ignored --nocapture
+    #[test]
+    #[ignore = "loads the speech model and synthesises; run by hand when recalibrating"]
+    fn measure_speaking_rate() {
+        // Ordinary narration, not tongue-twisters: the length of the lines this
+        // app actually writes, with the punctuation it actually uses.
+        const LINES: &[&str] = &[
+            "The harbour did not so much freeze as stop, boats caught mid-turn where the water took them.",
+            "One man was out early, scraping his deck clear with the back of a shovel.",
+            "The road ran forty miles without meeting another car.",
+            "Rain moved across the valley in a single sheet, arriving long after we watched it start.",
+            "We came down through cloud into a morning that had already been going for hours.",
+            "Frost had drawn itself across the inside of the window overnight.",
+            "The light caught the wing first, then everything else at once.",
+            "The sheep had no opinion about the road being ours.",
+        ];
+
+        let mut rates: Vec<f64> = Vec::new();
+        let mut total_words = 0usize;
+        let mut total_ms = 0f64;
+        for text in LINES {
+            let samples = super::synthesise_for_selftest(text).expect("synthesis");
+            let ms = samples.len() as f64 * 1000.0 / super::SAMPLE_RATE as f64;
+            let words = text.split_whitespace().count();
+            rates.push(words as f64 * 1000.0 / ms);
+            total_words += words;
+            total_ms += ms;
+            println!("  {:5.2} w/s  {:5.0}ms  {words:2} words", words as f64 * 1000.0 / ms, ms);
+        }
+        rates.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        println!(
+            "\n  slowest {:.2}  median {:.2}  fastest {:.2}  overall {:.2} w/s ({total_words} words)",
+            rates[0],
+            rates[rates.len() / 2],
+            rates[rates.len() - 1],
+            total_words as f64 * 1000.0 / total_ms,
+        );
+    }
+}

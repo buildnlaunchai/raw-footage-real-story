@@ -4,6 +4,7 @@
  * word-count targeting can be tested against a real Ollama without a webview.
  */
 import type { ProjectClip } from "./project";
+import { languageFor } from "./languages";
 import {
   makeGenerateFn,
   UsageMeter,
@@ -12,6 +13,7 @@ import {
 } from "./scriptProviders";
 import {
   composeScript,
+  shortenToFit,
   writeHook,
   type ComposeOptions,
   type ScriptDraft,
@@ -21,6 +23,9 @@ import {
 export {
   SCRIPT_STYLES,
   ScriptComposeError,
+  flattenCandidates as candidatesOf,
+  overBudget,
+  unitBudget,
   HOOK_MIN_WORDS,
   HOOK_MAX_WORDS,
   hookLengthOk,
@@ -54,7 +59,15 @@ export async function generateScriptForTitle(
   const meter = new UsageMeter();
   const draft = await composeScript(
     makeGenerateFn(provider, options.qualityTier ?? "balanced", meter),
-    clips,
+    // Mapped by hand rather than passed through. The two types name the same
+    // thing differently — `sourceDurationMs` here, `durationMs` there — and
+    // the field is optional, so handing the project's clips straight over
+    // bound nothing and silently turned every per-clip word budget off.
+    clips.map((c) => ({
+      id: c.id,
+      durationMs: c.sourceDurationMs,
+      segments: c.segments,
+    })),
     options,
   );
   return provider === "openai"
@@ -85,5 +98,27 @@ export async function generateHookForScript(
     makeGenerateFn(provider, options.qualityTier ?? "balanced", new UsageMeter()),
     material,
     options,
+  );
+}
+
+/**
+ * Shorten one line so it fits the clip it is spoken over.
+ *
+ * Offered as a button rather than run automatically once a script exists. The
+ * pass during generation is welcome to rewrite a machine's own draft; silently
+ * replacing a sentence somebody typed by hand is a different thing entirely.
+ */
+export async function shortenLineToFit(
+  text: string,
+  budget: number,
+  language: string,
+  opts: { provider?: ScriptProviderId; qualityTier?: QualityTier; instructions?: string } = {},
+): Promise<string | null> {
+  return await shortenToFit(
+    makeGenerateFn(opts.provider ?? "local", opts.qualityTier ?? "balanced", new UsageMeter()),
+    text,
+    budget,
+    languageFor(language),
+    { instructions: opts.instructions },
   );
 }

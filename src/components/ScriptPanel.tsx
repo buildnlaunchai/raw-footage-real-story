@@ -25,6 +25,16 @@ interface Props {
   voiced: VoicedLine[] | null;
   /** Keys whose recording no longer matches the words. */
   staleLines: Set<string>;
+  /**
+   * Lines saying more than their own clip can carry, by `clipId#segmentIndex`.
+   *
+   * Flagged rather than fixed. Generation shortens its own drafts silently;
+   * a sentence somebody typed is theirs, so this offers the rewrite instead of
+   * performing it.
+   */
+  overBudget: Map<string, { budget: number; used: number }>;
+  shortening: string | null;
+  onShorten: (index: number, budget: number) => void;
   pronunciations: Record<string, string>;
   /** Cloud providers have no lexicon, so nothing can be flagged. */
   showPronunciationFixes: boolean;
@@ -68,6 +78,9 @@ export function ScriptPanel({
   busy,
   resynthesizing,
   intro,
+  overBudget,
+  shortening,
+  onShorten,
   onEditLine,
   onHearLine,
   onCorrectWord,
@@ -127,6 +140,7 @@ export function ScriptPanel({
           const audio = byKey.get(key);
           const isBusy = resynthesizing === key;
           const isStale = staleLines.has(key);
+          const over = overBudget.get(key);
           return (
             <li key={key} className="script-row" data-stale={isStale || undefined}>
               <span className="clip-index" aria-hidden="true">
@@ -147,6 +161,25 @@ export function ScriptPanel({
                   disabled={busy}
                   onChange={(e) => onEditLine(i, e.currentTarget.value)}
                 />
+
+                {over && (
+                  <div className="voiced-controls">
+                    <span
+                      className="skip-chip"
+                      title={`This clip can carry about ${over.budget} words. Slowing stops at 2x, so the shot would be shown twice to cover the rest.`}
+                    >
+                      {over.used} words, clip fits {over.budget}
+                    </span>
+                    <button
+                      type="button"
+                      className="ghost-button small"
+                      disabled={busy || shortening !== null}
+                      onClick={() => onShorten(i, over.budget)}
+                    >
+                      {shortening === key ? "Shortening…" : "Shorten to fit"}
+                    </button>
+                  </div>
+                )}
 
                 {!audio && (
                   <div className="voiced-controls">

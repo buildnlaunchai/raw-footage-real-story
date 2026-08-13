@@ -79,8 +79,11 @@ import {
 } from "./lib/scriptProviders";
 import { suggestStoryIdeas, type IdeaProgress, type StoryIdea } from "./lib/storyIdeas";
 import {
+  candidatesOf,
   generateHookForScript,
   generateScriptForTitle,
+  overBudget as overBudgetLines,
+  shortenLineToFit,
   type ComposeProgress,
   type ScriptLineDraft,
   type ScriptStyle,
@@ -266,6 +269,7 @@ function App() {
   const [hookAudio, setHookAudio] = useState<VoicedLine | null>(null);
   const [introEnabled, setIntroEnabled] = useState(true);
   const [hookBusy, setHookBusy] = useState(false);
+  const [shortening, setShortening] = useState<string | null>(null);
   const [composing, setComposing] = useState(false);
   const [composeProgress, setComposeProgress] = useState<ComposeProgress | null>(null);
   const [composeError, setComposeError] = useState<string | null>(null);
@@ -399,6 +403,30 @@ function App() {
     ? `${introSpec.audioPath}:${hookAudio?.durationMs ?? 0}|` +
       introShots.map((s) => `${s.clipId}#${s.segmentIndex}@${s.sourceInMs}+${s.durationMs}`).join(",")
     : "";
+
+  /**
+   * Lines saying more than the clip they are spoken over can carry.
+   *
+   * Recomputed from the current text rather than stamped at generation, so an
+   * edit shows up as you make it — which is the whole point, since generation
+   * already fits its own drafts and this exists for what happens afterwards.
+   */
+  const overBudget = useMemo(() => {
+    const out = new Map<string, { budget: number; used: number }>();
+    if (!manifest || !lines) return out;
+    const selected = candidatesOf(
+      manifest.clips.map((c) => ({
+        id: c.id,
+        durationMs: c.sourceDurationMs,
+        segments: c.segments,
+      })),
+    );
+    for (const o of overBudgetLines(lines, selected, languageFor(language))) {
+      const l = lines[o.index];
+      out.set(`${l.clipId}#${l.segmentIndex}`, { budget: o.budget, used: o.used });
+    }
+    return out;
+  }, [manifest, lines, language]);
 
   /** The recording no longer says what the written hook says. */
   const hookStale =
@@ -825,6 +853,34 @@ function App() {
       setComposeError(errorText(err));
     } finally {
       setHookBusy(false);
+    }
+  }
+
+  /** Rewrite one line so it fits its clip, on request rather than silently. */
+  async function onShortenLine(index: number, budget: number) {
+    if (!lines) return;
+    const line = lines[index];
+    if (!line) return;
+    const key = `${line.clipId}#${line.segmentIndex}`;
+    setShortening(key);
+    setComposeError(null);
+    try {
+      const shorter = await shortenLineToFit(line.text, budget, language, {
+        provider: scriptProvider,
+        qualityTier,
+        instructions: instructions ?? undefined,
+      });
+      if (shorter) {
+        onEditLine(index, shorter);
+      } else {
+        setComposeError(
+          "The model couldn't make that line shorter without losing what it says. Try editing it by hand.",
+        );
+      }
+    } catch (err) {
+      setComposeError(errorText(err));
+    } finally {
+      setShortening(null);
     }
   }
 
@@ -1699,6 +1755,9 @@ function App() {
             busy={ttsBusy}
             resynthesizing={resynthesizing}
             intro={introProps}
+            overBudget={overBudget}
+            shortening={shortening}
+            onShorten={(i, b) => void onShortenLine(i, b)}
             onEditLine={onEditLine}
             onHearLine={onHearLine}
             onCorrectWord={onCorrectWord}
@@ -1847,6 +1906,9 @@ function App() {
               busy={ttsBusy}
               resynthesizing={resynthesizing}
               intro={introProps}
+              overBudget={overBudget}
+              shortening={shortening}
+              onShorten={(i, b) => void onShortenLine(i, b)}
               onEditLine={onEditLine}
               onHearLine={onHearLine}
               onCorrectWord={onCorrectWord}

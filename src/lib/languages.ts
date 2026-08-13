@@ -42,10 +42,50 @@ export interface ScriptLanguage {
    * to be per language because the trap is different in each.
    */
   registerHint?: string;
+  /**
+   * How fast this language is actually spoken, in counting units per second.
+   *
+   * Used to work out how many words a clip of a given length can carry, which
+   * is now a hard constraint rather than a preference: footage may be slowed
+   * to cover its narration but never past 2x, so a line's length is bounded by
+   * its clip's length. A number guessed here becomes narration that outruns
+   * its footage on every shot in the film.
+   *
+   * Deliberately the *slow* end of what was measured, not the median. Being
+   * wrong low writes a slightly short line; being wrong high writes one that
+   * does not fit, which costs a re-write and a re-record.
+   *
+   * en — 2.4. Kokoro synthesising eight narration lines measured 2.79 w/s
+   *      overall, slowest line 2.37 (`tts::rate_tests::measure_speaking_rate`);
+   *      eight ElevenLabs lines already on disk measured 3.03 median, 2.79 min.
+   * bn — 2.0. Seventy-nine recorded lines, 2498 words: 2.38 median, 2.12 at the
+   *      tenth percentile, 2.03 slowest. Bengali is slower per word than
+   *      English, which is the opposite of what assuming one number would have
+   *      given.
+   *
+   * Everything else is the conservative default. Unmeasured, and marked as
+   * such rather than dressed up as data.
+   */
+  unitsPerSecond: number;
 }
 
+/**
+ * For languages nothing has been measured in.
+ *
+ * The slowest thing measured anywhere, so an unmeasured language errs toward
+ * lines that fit.
+ */
+export const DEFAULT_UNITS_PER_SECOND = 2.0;
+
+/**
+ * Character-counting languages, where one character carries far more than one
+ * letter does. Unmeasured — no recordings exist in any of them — so this is a
+ * conservative stand-in, not a finding.
+ */
+const CJK_CHARS_PER_SECOND = 4.5;
+
 export const LANGUAGES: ScriptLanguage[] = [
-  { code: "en", label: "English", nativeLabel: "English", counting: "words", direction: "ltr", localVoiceSupported: true, documented: true },
+  { code: "en", label: "English", nativeLabel: "English", counting: "words", direction: "ltr", localVoiceSupported: true, documented: true, unitsPerSecond: 2.4 },
   {
     code: "bn",
     label: "Bengali",
@@ -54,6 +94,7 @@ export const LANGUAGES: ScriptLanguage[] = [
     direction: "ltr",
     localVoiceSupported: false,
     documented: false,
+    unitsPerSecond: 2.0,
     registerHint:
       "Write in modern spoken Bengali — চলিত ভাষা, the register of today's " +
       "television and online narration. Never write সাধু ভাষা: no করিয়া, হইয়া, " +
@@ -65,19 +106,19 @@ export const LANGUAGES: ScriptLanguage[] = [
       "Bengali Muslims use — হাজি or হজযাত্রী rather than তীর্থযাত্রী, and never " +
       "Hindu religious terms.",
   },
-  { code: "ar", label: "Arabic", nativeLabel: "العربية", counting: "words", direction: "rtl", localVoiceSupported: false, documented: true },
-  { code: "es", label: "Spanish", nativeLabel: "Español", counting: "words", direction: "ltr", localVoiceSupported: false, documented: true },
-  { code: "fr", label: "French", nativeLabel: "Français", counting: "words", direction: "ltr", localVoiceSupported: false, documented: true },
-  { code: "de", label: "German", nativeLabel: "Deutsch", counting: "words", direction: "ltr", localVoiceSupported: false, documented: true },
-  { code: "it", label: "Italian", nativeLabel: "Italiano", counting: "words", direction: "ltr", localVoiceSupported: false, documented: true },
-  { code: "pt", label: "Portuguese", nativeLabel: "Português", counting: "words", direction: "ltr", localVoiceSupported: false, documented: true },
-  { code: "ru", label: "Russian", nativeLabel: "Русский", counting: "words", direction: "ltr", localVoiceSupported: false, documented: true },
-  { code: "vi", label: "Vietnamese", nativeLabel: "Tiếng Việt", counting: "words", direction: "ltr", localVoiceSupported: false, documented: true },
-  { code: "ko", label: "Korean", nativeLabel: "한국어", counting: "words", direction: "ltr", localVoiceSupported: false, documented: true },
+  { code: "ar", label: "Arabic", nativeLabel: "العربية", counting: "words", direction: "rtl", localVoiceSupported: false, documented: true, unitsPerSecond: DEFAULT_UNITS_PER_SECOND },
+  { code: "es", label: "Spanish", nativeLabel: "Español", counting: "words", direction: "ltr", localVoiceSupported: false, documented: true, unitsPerSecond: DEFAULT_UNITS_PER_SECOND },
+  { code: "fr", label: "French", nativeLabel: "Français", counting: "words", direction: "ltr", localVoiceSupported: false, documented: true, unitsPerSecond: DEFAULT_UNITS_PER_SECOND },
+  { code: "de", label: "German", nativeLabel: "Deutsch", counting: "words", direction: "ltr", localVoiceSupported: false, documented: true, unitsPerSecond: DEFAULT_UNITS_PER_SECOND },
+  { code: "it", label: "Italian", nativeLabel: "Italiano", counting: "words", direction: "ltr", localVoiceSupported: false, documented: true, unitsPerSecond: DEFAULT_UNITS_PER_SECOND },
+  { code: "pt", label: "Portuguese", nativeLabel: "Português", counting: "words", direction: "ltr", localVoiceSupported: false, documented: true, unitsPerSecond: DEFAULT_UNITS_PER_SECOND },
+  { code: "ru", label: "Russian", nativeLabel: "Русский", counting: "words", direction: "ltr", localVoiceSupported: false, documented: true, unitsPerSecond: DEFAULT_UNITS_PER_SECOND },
+  { code: "vi", label: "Vietnamese", nativeLabel: "Tiếng Việt", counting: "words", direction: "ltr", localVoiceSupported: false, documented: true, unitsPerSecond: DEFAULT_UNITS_PER_SECOND },
+  { code: "ko", label: "Korean", nativeLabel: "한국어", counting: "words", direction: "ltr", localVoiceSupported: false, documented: true, unitsPerSecond: DEFAULT_UNITS_PER_SECOND },
   // No spaces between words: whitespace counting would be nonsense.
-  { code: "zh", label: "Chinese", nativeLabel: "中文", counting: "characters", direction: "ltr", localVoiceSupported: false, documented: true },
-  { code: "ja", label: "Japanese", nativeLabel: "日本語", counting: "characters", direction: "ltr", localVoiceSupported: false, documented: true },
-  { code: "th", label: "Thai", nativeLabel: "ไทย", counting: "characters", direction: "ltr", localVoiceSupported: false, documented: true },
+  { code: "zh", label: "Chinese", nativeLabel: "中文", counting: "characters", direction: "ltr", localVoiceSupported: false, documented: true, unitsPerSecond: CJK_CHARS_PER_SECOND },
+  { code: "ja", label: "Japanese", nativeLabel: "日本語", counting: "characters", direction: "ltr", localVoiceSupported: false, documented: true, unitsPerSecond: CJK_CHARS_PER_SECOND },
+  { code: "th", label: "Thai", nativeLabel: "ไทย", counting: "characters", direction: "ltr", localVoiceSupported: false, documented: true, unitsPerSecond: CJK_CHARS_PER_SECOND },
 ];
 
 export const DEFAULT_LANGUAGE = "en";

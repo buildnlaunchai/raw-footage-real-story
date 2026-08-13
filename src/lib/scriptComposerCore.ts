@@ -28,8 +28,58 @@ import {
 
 export interface DescribedClip {
   id: string;
+  /** Length of the media, when it is known. Null for a placeholder slot. */
+  durationMs?: number | null;
   segments: { startSec: number; endSec: number; text: string }[];
 }
+
+// --- how much a clip can carry ---------------------------------------------
+//
+// Footage may be slowed to cover its narration but never past twice speed, so
+// how long a line may be is decided by the clip it is spoken over. This has to
+// agree exactly with `timeline.rs`, or the budget promises something the
+// planner will not honour and every shot ends up replayed.
+
+/** Mirrors `timeline::COMFORTABLE_STRETCH`. */
+export const MAX_STRETCH = 2;
+/** Mirrors `timeline::SENTENCE_TAIL_MS` — the beat left after a full stop. */
+export const TAIL_MS = 520;
+/** Mirrors `timeline::MIN_ON_SCREEN_MS`. */
+export const MIN_ON_SCREEN_MS = 1_500;
+
+/**
+ * How much of a clip a moment starting at `startMs` can use.
+ *
+ * To the end of the clip, not to the end of the described moment — which is
+ * what `timeline::plan` does, and the two must not disagree.
+ */
+export function availableMs(clipDurationMs: number | null | undefined, startMs: number): number | null {
+  if (clipDurationMs == null || clipDurationMs <= 0) return null;
+  return Math.max(0, clipDurationMs - startMs);
+}
+
+/**
+ * The most a line over this much footage may say, in the language's own unit.
+ *
+ * Null where there is no media to measure — a placeholder is generated at
+ * whatever length is asked for, so nothing constrains it.
+ */
+export function unitBudget(available: number | null, lang: ScriptLanguage): number | null {
+  if (available === null) return null;
+  // The slot the planner will give this line, at the very most.
+  const slot = Math.max(available * MAX_STRETCH, MIN_ON_SCREEN_MS);
+  const speakable = Math.max(0, slot - TAIL_MS);
+  return Math.max(1, Math.floor((speakable / 1000) * lang.unitsPerSecond));
+}
+
+/**
+ * Footage too short to carry even a few words.
+ *
+ * A one-second clip can hold about four words at twice speed. Choosing it puts
+ * a line nobody can write into the film, so it is kept out of the running
+ * rather than narrated badly.
+ */
+export const MIN_USABLE_UNITS = 5;
 
 export type GenerateFn = (args: {
   system?: string;
@@ -157,6 +207,8 @@ export interface Candidate {
   clipId: string;
   segmentIndex: number;
   text: string;
+  /** Footage available from this moment on, or null when there is no media. */
+  availableMs: number | null;
 }
 
 export interface ScriptLineDraft {
@@ -181,7 +233,7 @@ export interface ScriptDraft {
 }
 
 export interface ComposeProgress {
-  stage: "selecting" | "writing" | "critiquing" | "adjusting" | "hook";
+  stage: "selecting" | "writing" | "critiquing" | "adjusting" | "fitting" | "hook";
   done: number;
   total: number;
 }
@@ -199,11 +251,25 @@ export function flattenCandidates(clips: DescribedClip[]): Candidate[] {
     clip.segments.forEach((s, i) => {
       const text = s.text.trim();
       if (text) {
-        out.push({ ref: out.length, clipId: clip.id, segmentIndex: i, text });
+        out.push({
+          ref: out.length,
+          clipId: clip.id,
+          segmentIndex: i,
+          text,
+          availableMs: availableMs(clip.durationMs, Math.round(s.startSec * 1000)),
+        });
       }
     });
   }
   return out;
+}
+
+/** Moments with room for a line worth writing. */
+export function usableCandidates(all: Candidate[], lang: ScriptLanguage): Candidate[] {
+  return all.filter((c) => {
+    const budget = unitBudget(c.availableMs, lang);
+    return budget === null || budget >= MIN_USABLE_UNITS;
+  });
 }
 
 export function chunk<T>(items: T[], size: number): T[][] {
@@ -680,6 +746,43 @@ function listFor(candidates: Candidate[]): string {
   return candidates.map((c) => `${c.ref}. ${c.text}`).join("\n");
 }
 
+/**
+ * The same list, with each moment's limit attached.
+ *
+ * Stated per moment rather than as one rule, because the limit really is per
+ * moment: it comes from the length of that clip. A model given a single global
+ * cap writes to the shortest one everywhere and the film loses half its words.
+ */
+function listWithBudgets(candidates: Candidate[], lang: ScriptLanguage): string {
+  const unit = lang.counting === "characters" ? "characters" : "words";
+  return candidates
+    .map((c) => {
+      const budget = unitBudget(c.availableMs, lang);
+      return budget === null
+        ? `${c.ref}. ${c.text}`
+        : `${c.ref}. [at most ${budget} ${unit}] ${c.text}`;
+    })
+    .join("\n");
+}
+
+/** Lines saying more than their footage can carry. */
+export function overBudget(
+  lines: ScriptLineDraft[],
+  selected: Candidate[],
+  lang: ScriptLanguage,
+): { index: number; budget: number; used: number }[] {
+  const byKey = new Map(selected.map((c) => [`${c.clipId}#${c.segmentIndex}`, c]));
+  const out: { index: number; budget: number; used: number }[] = [];
+  lines.forEach((l, index) => {
+    const cand = byKey.get(`${l.clipId}#${l.segmentIndex}`);
+    const budget = cand ? unitBudget(cand.availableMs, lang) : null;
+    if (budget === null) return;
+    const used = countUnits(l.text, lang);
+    if (used > budget) out.push({ index, budget, used });
+  });
+  return out;
+}
+
 export interface ComposeOptions {
   title: string;
   wordCount: number;
@@ -818,11 +921,18 @@ export async function writeScript(
     prompt:
       preamble +
       `Video title: "${options.title}"\n\n${style}\n\n${inLanguage}` +
-      `Moments, in order:\n${listFor(selected)}\n\n` +
+      `Moments, in order:\n${listWithBudgets(selected, lang)}\n\n` +
       `Write the narration for this video. The whole script should be ` +
       `${lengthInstruction(options.wordCount, lang)}. Write exactly one line per ` +
-      `moment, using each moment number once; a moment that carries more of the ` +
-      `story may have a longer line. ` +
+      `moment, using each moment number once. ` +
+      // The limits are not stylistic. A line longer than its moment allows
+      // cannot be spoken over that footage without slowing it past the point
+      // where it reads as broken, so it gets rewritten shorter afterwards
+      // anyway — better to land it first time.
+      `Each moment shows a limit in square brackets: that line must not be ` +
+      `longer than that, because it is spoken over that clip and the clip is ` +
+      `only so long. A moment carrying more of the story may have a longer ` +
+      `line, within its own limit. ` +
       `Return JSON with a "lines" array, each item having "ref" (the moment ` +
       `number) and "text".`,
   });
@@ -882,6 +992,54 @@ function collapseByMoment(
 }
 
 /**
+ * Rewrite one line to fit inside a budget.
+ *
+ * Shared by the pass that runs during generation and the button offered beside
+ * a line the user has edited past what its clip can carry. Returns null when
+ * nothing better came back — a line that cannot be shortened is kept and
+ * flagged, never dropped and never replaced by something worse.
+ */
+export async function shortenToFit(
+  generate: GenerateFn,
+  text: string,
+  budget: number,
+  lang: ScriptLanguage,
+  opts: { seed?: number; instructions?: string } = {},
+): Promise<string | null> {
+  const unit = lang.counting === "characters" ? "characters" : "words";
+  const used = countUnits(text, lang);
+  try {
+    const raw = await generate({
+      system: opts.instructions?.trim() || writeSystemFor(lang),
+      temperature: 0.4,
+      seed: opts.seed,
+      numCtx: NUM_CTX,
+      // A shortening, not a composition: the words are already chosen.
+      tier: "fast",
+      format: {
+        type: "object",
+        properties: { line: { type: "string" } },
+        required: ["line"],
+      },
+      prompt:
+        `This line is spoken over one clip, and the clip is too short for it. ` +
+        `It is ${used} ${unit} and must be at most ${budget}.\n\n` +
+        `"${text}"\n\n` +
+        `Rewrite it shorter. Keep what it says about the footage and drop ` +
+        `whatever is doing least work. Do not add anything new. ` +
+        `Return JSON with a "line" string.`,
+    });
+    const parsed = JSON.parse(raw) as { line?: unknown };
+    const rewritten = typeof parsed.line === "string" ? parsed.line.trim() : "";
+    // Only an improvement is accepted. A "shortening" that came back longer,
+    // or empty, would make the problem worse while reporting success.
+    return rewritten && countUnits(rewritten, lang) < used ? rewritten : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Full stage C: select, order, write, and correct the length if it lands wide.
  *
  * A single length-correction pass is worth it because word count is a stated
@@ -896,11 +1054,17 @@ export async function composeScript(
   if (!options.title.trim()) {
     throw new ScriptComposeError("Choose or write a title first.");
   }
-  const candidates = flattenCandidates(clips);
-  if (candidates.length === 0) {
+  const lang = languageFor(options.language ?? "en");
+  const all = flattenCandidates(clips);
+  if (all.length === 0) {
     throw new ScriptComposeError("Describe at least one clip before generating a script.");
   }
-  const lang = languageFor(options.language ?? "en");
+  // Footage with no room for a line worth writing is kept out of the running
+  // rather than narrated badly — a one-second clip holds about four words.
+  // If that would leave nothing at all, the short clips are all there is, and
+  // a short film beats refusing to make one.
+  const usable = usableCandidates(all, lang);
+  const candidates = usable.length > 0 ? usable : all;
 
   const selected = await selectSegments(generate, candidates, options);
 
@@ -1037,6 +1201,32 @@ export async function composeScript(
       // Keep the original script; a failed correction is not a failed script.
     }
     options.onProgress?.({ stage: "adjusting", done: 1, total: 1 });
+  }
+
+  // --- make every line fit its own footage --------------------------------
+  //
+  // The budgets are in the writing prompt, and the length-correction pass just
+  // above can push a line back over one. This is the pass that makes "the
+  // script fits the footage" true rather than requested: anything still over
+  // is rewritten, one line at a time, against its own limit.
+  //
+  // One line at a time on purpose. Rewriting the whole script to fix two lines
+  // would discard eighteen the user is about to read and approve.
+  const tooLong = overBudget(lines, selected, lang);
+  if (tooLong.length > 0) {
+    options.onProgress?.({ stage: "fitting", done: 0, total: tooLong.length });
+    for (const [n, over] of tooLong.entries()) {
+      const line = lines[over.index];
+      const rewritten = await shortenToFit(generate, line.text, over.budget, lang, {
+        seed: options.seed,
+        instructions: options.instructions,
+      });
+      if (rewritten) {
+        lines = lines.map((l, i) => (i === over.index ? { ...l, text: rewritten } : l));
+      }
+      options.onProgress?.({ stage: "fitting", done: n + 1, total: tooLong.length });
+    }
+    words = lines.reduce((n, l) => n + countUnits(l.text, lang), 0);
   }
 
   // Last, and after the word count is settled, so the hook cannot be counted
