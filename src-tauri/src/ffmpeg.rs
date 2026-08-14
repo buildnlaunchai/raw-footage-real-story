@@ -913,9 +913,17 @@ pub fn render_rough_cut(
         }
     }
 
+    // Two decoder threads per input, not the default of roughly one per core.
+    // macOS caps a process at 4096 threads (`kern.num_taskthreads`), and this
+    // command opens two inputs per line of the film — a fifty-clip project is
+    // a hundred inputs, each spawning its own decoder pool, on top of a pool
+    // per slice-threaded filter instance in a graph with hundreds of them.
+    // Measured on a 30-input graph: 709 threads unbounded, 111 bounded, same
+    // wall-clock. Unbounded, a long film dies mid-open with
+    // `pthread_create() failed: Resource temporarily unavailable`.
     for it in items {
-        cmd.arg("-i").arg(&it.video);
-        cmd.arg("-i").arg(&it.audio);
+        cmd.args(["-threads", "2"]).arg("-i").arg(&it.video);
+        cmd.args(["-threads", "2"]).arg("-i").arg(&it.audio);
     }
 
     // Inputs are numbered by the order they are added, so the music bed is
@@ -924,7 +932,7 @@ pub fn render_rough_cut(
     let music = settings.music_path.as_deref().filter(|p| Path::new(p).is_file());
     let music_idx = items.len() * 2;
     if let Some(path) = music {
-        cmd.arg("-stream_loop").arg("-1").arg("-i").arg(path);
+        cmd.args(["-threads", "2"]).arg("-stream_loop").arg("-1").arg("-i").arg(path);
     }
 
     let mut filter = String::new();
@@ -1145,7 +1153,7 @@ pub fn render_rough_cut(
         let first_image = items.len() * 2 + usize::from(music.is_some());
 
         for cue in &settings.burn_in {
-            cmd.arg("-i").arg(&cue.image);
+            cmd.args(["-threads", "1"]).arg("-i").arg(&cue.image);
         }
 
         let mut prev = vout;
@@ -1188,7 +1196,7 @@ pub fn render_rough_cut(
     };
 
     let filter = filter.trim_end_matches(';').to_string();
-    cmd.args(["-filter_complex", &filter]);
+    cmd.args(["-filter_complex_threads", "2", "-filter_complex", &filter]);
     cmd.args([
         "-map", &vout, "-map", &aout,
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
@@ -1354,9 +1362,9 @@ pub fn render_intro(
     let mut cmd = Command::new(ffmpeg);
     cmd.args(["-y", "-v", "error"]);
     for s in shots {
-        cmd.arg("-i").arg(&s.source_path);
+        cmd.args(["-threads", "2"]).arg("-i").arg(&s.source_path);
     }
-    cmd.arg("-i").arg(hook_audio);
+    cmd.args(["-threads", "2"]).arg("-i").arg(hook_audio);
 
     let mut filter = String::new();
     for (i, s) in shots.iter().enumerate() {
@@ -1383,7 +1391,7 @@ pub fn render_intro(
          apad,atrim=duration={total_s:.3},asetpts=PTS-STARTPTS[outa]"
     ));
 
-    cmd.args(["-filter_complex", &filter]);
+    cmd.args(["-filter_complex_threads", "2", "-filter_complex", &filter]);
     cmd.args(["-map", "[outv]", "-map", "[outa]"]);
     cmd.args(["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p"]);
     cmd.args(["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"]);

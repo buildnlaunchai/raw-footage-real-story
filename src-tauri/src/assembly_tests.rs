@@ -1554,3 +1554,86 @@ fn a_caption_image_lands_where_and_when_it_should() {
     let mid_row = during.iter().enumerate().max_by_key(|(_, n)| **n).unwrap().0;
     assert!(during[mid_row] >= 199, "the image is not its full width");
 }
+
+/// A film the size people actually make, rendered without running out of
+/// threads.
+///
+/// macOS caps a process at 4096 threads. A fifty-clip film opens over a
+/// hundred inputs, and unbounded, every one of them spawns a decoder pool of
+/// roughly one thread per core while every slice-threaded filter instance in a
+/// graph with hundreds of them spawns another — measured at 709 threads for
+/// thirty inputs on ten cores. A real fifty-clip render died mid-open with
+/// `pthread_create() failed: Resource temporarily unavailable`. The caps keep
+/// the count flat, and this renders sixty lines — more than the film that
+/// died — while watching the count to prove it.
+#[test]
+fn a_sixty_clip_film_renders_within_the_thread_budget() {
+    let Some(fx) = Fixture::new("sixty") else {
+        eprintln!("ffmpeg not available; skipping");
+        return;
+    };
+
+    const N: usize = 60;
+    let lines: Vec<LineInput> =
+        (0..N).map(|i| LineInput::whole(format!("c{i}"), 900)).collect();
+    let clips: Vec<ClipInput> =
+        (0..N).map(|i| ClipInput::whole(format!("c{i}"), Some(1_000))).collect();
+    let items = timeline::plan(&clips, &lines);
+
+    let settings = RenderSettings { width: 640, height: 360, fps: 30, ..Default::default() };
+    // One source video and one silence, reused for every line: the thread cost
+    // scales with inputs opened, not with distinct files, and sixty generated
+    // placeholders would spend the test's budget making fixtures.
+    let video = fx.dir.join("clip.mp4");
+    ffmpeg::make_placeholder(&fx.ffmpeg, &video, "0x336699", 1_000, 640, 360, 30)
+        .expect("placeholder");
+    let audio = fx.dir.join("line.wav");
+    tts::write_wav(&audio, &vec![0f32; (900 * 24_000) / 1000]).expect("silence");
+
+    let render_items: Vec<RenderItem> = items
+        .iter()
+        .map(|item| RenderItem {
+            video: video.clone(),
+            audio: audio.clone(),
+            item: item.clone(),
+            is_hdr: false,
+            has_audio: false,
+            sound_gain: None,
+        })
+        .collect();
+
+    // Watch the ffmpeg process from a second thread while the render runs.
+    let peak = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watcher = {
+        let (peak, stop) = (peak.clone(), stop.clone());
+        std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                if let Ok(out) = std::process::Command::new("sh")
+                    .args(["-c", "ps -M $(pgrep -f 'rfrs-test-sixty' | head -1) 2>/dev/null | wc -l"])
+                    .output()
+                {
+                    if let Ok(n) = String::from_utf8_lossy(&out.stdout).trim().parse::<usize>() {
+                        peak.fetch_max(n.saturating_sub(1), std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        })
+    };
+
+    let out = fx.dir.join("sixty.mp4");
+    let result =
+        ffmpeg::render_rough_cut(&fx.ffmpeg, &render_items, &settings, &ffmpeg::FfmpegCaps::default(), &out);
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = watcher.join();
+
+    result.expect("a sixty-clip render must not exhaust anything");
+    let peak = peak.load(std::sync::atomic::Ordering::Relaxed);
+    let expected = timeline::total_duration_ms(&items);
+    let actual = ffmpeg::probe_duration_ms(&fx.ffprobe, &out).expect("probe");
+    println!("\n  {N} lines, {expected}ms planned, {actual}ms rendered, ffmpeg peaked at {peak} threads");
+    assert!(actual.abs_diff(expected) <= 300, "drifted {}ms", actual.abs_diff(expected));
+    // Well under the 4096 ceiling, with room for a film twice this long.
+    assert!(peak < 1500, "thread caps are not holding: {peak} threads for {N} clips");
+}
