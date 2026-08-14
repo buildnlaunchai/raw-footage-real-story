@@ -83,6 +83,27 @@ export function loadCaptionFont(family: string, urls: string[]): Promise<void> {
   return fontReady;
 }
 
+/** How far in from each edge a caption must stay. */
+const SIDE_MARGIN = 0.04;
+
+/**
+ * A size that keeps the line inside the frame.
+ *
+ * Captions are one line by design, and how wide a line runs depends on the
+ * script as much as on the character count — the wrap is counted in
+ * characters, and a Bengali character is nearly twice a Latin one, so a line
+ * that fits in English can overrun in Bengali at the same setting. Shrinking
+ * costs a little legibility on the occasional long line. Not shrinking takes
+ * the ends off a sentence, which costs the sentence.
+ *
+ * Separate from the drawing so the rule can be tested without a canvas.
+ */
+export function shrinkToFit(fontPx: number, widthPx: number, frameWidth: number): number {
+  const maxW = frameWidth * (1 - SIDE_MARGIN * 2);
+  if (widthPx <= maxW || widthPx <= 0) return fontPx;
+  return Math.max(12, Math.floor((fontPx * maxW) / widthPx));
+}
+
 /**
  * Draw one caption onto a canvas and return it as a PNG.
  *
@@ -96,14 +117,26 @@ export function drawCaption(
   frameWidth: number,
   family: string,
 ): { png: string; width: number; height: number } {
-  const fontPx = Math.max(12, Math.round(frameHeight * style.size));
-  const pad = Math.round(fontPx * 0.4);
-  const font = `600 ${fontPx}px "${family}", system-ui, sans-serif`;
-
   // Measure first, on a throwaway context, so the real canvas is exactly the
   // size of what goes on it.
   const measure = document.createElement("canvas").getContext("2d")!;
-  measure.font = font;
+  const fontAt = (px: number) => `600 ${px}px "${family}", system-ui, sans-serif`;
+
+  let fontPx = Math.max(12, Math.round(frameHeight * style.size));
+  measure.font = fontAt(fontPx);
+
+  const fitted = shrinkToFit(
+    fontPx,
+    measure.measureText(text).width + Math.round(fontPx * 0.4) * 2,
+    frameWidth,
+  );
+  if (fitted !== fontPx) {
+    fontPx = fitted;
+    measure.font = fontAt(fontPx);
+  }
+
+  const pad = Math.round(fontPx * 0.4);
+  const font = fontAt(fontPx);
   const m = measure.measureText(text);
   // Actual ascent and descent rather than the em box: Bengali and Devanagari
   // hang marks well above and below it, and a canvas cropped to the em clips
@@ -111,7 +144,9 @@ export function drawCaption(
   const ascent = m.actualBoundingBoxAscent || fontPx * 0.8;
   const descent = m.actualBoundingBoxDescent || fontPx * 0.35;
   const textW = Math.ceil(m.width);
-  const w = Math.min(frameWidth, textW + pad * 2);
+  // Not clamped to the frame: the size was already chosen so it fits, and a
+  // clamp here would quietly cut the ends off instead of failing the fit.
+  const w = textW + pad * 2;
   const h = Math.ceil(ascent + descent) + pad * 2;
 
   const canvas = document.createElement("canvas");
