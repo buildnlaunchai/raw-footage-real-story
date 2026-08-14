@@ -201,7 +201,146 @@ function renderDrawtext(probes) {
   return files;
 }
 
+/** A sentence with four pre-base signs in it, one of them behind a conjunct. */
+const SENTENCE = "ভেতরের ক্রেডিট ডিভাইসটি ঠিক নেই";
+
+/**
+ * Draw a sentence with the shipped `drawCaption`, and with two references.
+ *
+ * The module is bundled from source and run in the browser exactly as the app
+ * runs it, with the same bundled font, so what is measured is the code that
+ * ships rather than something written here to stand in for it.
+ */
+function measureShippedFunction() {
+  const bundle = join(work, "captions.js");
+  try {
+    execFileSync(
+      "npx",
+      ["esbuild", join(root, "src/lib/captions.ts"), "--bundle", "--format=esm", `--outfile=${bundle}`],
+      { cwd: root, stdio: "ignore" },
+    );
+  } catch {
+    return null;
+  }
+
+  const ttf = readFileSync(join(fontsDir, "NotoSansBengali-Regular.ttf")).toString("base64");
+  const page = `<!doctype html><meta charset="utf-8"><body>
+<script type="module">
+import { drawCaption, loadCaptionFont } from "./captions.js";
+await loadCaptionFont("Cap", ["data:font/ttf;base64,${ttf}"]);
+const text = ${JSON.stringify(SENTENCE)};
+const out = {};
+out.app = drawCaption(text, { size: 1/26, colour: "#ffffff", boxBehind: false }, 1080, 1920, "Cap");
+// The two references, plain and at the size drawCaption settled on.
+const fontPx = Math.round(1080 / 26);
+const draw = (unshaped) => {
+  const probe = document.createElement("canvas").getContext("2d");
+  probe.font = \`600 \${fontPx}px "Cap"\`;
+  const c = document.createElement("canvas");
+  c.width = Math.ceil(probe.measureText(text).width) + 200;
+  c.height = fontPx * 3;
+  const g = c.getContext("2d");
+  g.fillStyle = "#000"; g.fillRect(0, 0, c.width, c.height);
+  g.font = \`600 \${fontPx}px "Cap"\`;
+  g.fillStyle = "#fff";
+  g.textBaseline = "alphabetic";
+  if (unshaped) {
+    let x = 40;
+    for (const ch of [...text]) { g.fillText(ch, x, fontPx * 1.6); x += g.measureText(ch).width; }
+  } else {
+    g.fillText(text, 40, fontPx * 1.6);
+  }
+  return { png: c.toDataURL("image/png").split(",")[1] };
+};
+out.shaped = draw(false);
+out.unshaped = draw(true);
+const tag = document.createElement("script");
+tag.type = "application/json";
+tag.id = "out";
+tag.textContent = JSON.stringify(out);
+document.body.appendChild(tag);
+</script></body>`;
+  const file = join(work, "app.html");
+  writeFileSync(file, page);
+  let dom;
+  try {
+    dom = execFileSync(
+      CHROME,
+      ["--headless=new", "--disable-gpu", "--allow-file-access-from-files",
+       "--virtual-time-budget=9000", "--dump-dom", `file://${file}`],
+      { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] },
+    );
+  } catch {
+    return null;
+  }
+  const m = /<script type="application\/json" id="out">([\s\S]*?)<\/script>/.exec(dom);
+  if (!m) return null;
+  const parsed = JSON.parse(m[1]);
+  const paths = {};
+  for (const [k, v] of Object.entries(parsed)) {
+    paths[k] = join(work, `app-${k}.png`);
+    writeFileSync(paths[k], Buffer.from(v.png, "base64"));
+  }
+
+  const a = inkProfile(paths.app);
+  const s = inkProfile(paths.shaped);
+  const u = inkProfile(paths.unshaped);
+  return {
+    width: a.length,
+    shapedWidth: s.length,
+    unshapedWidth: u.length,
+    shaped: correlate(a, s),
+    unshaped: correlate(a, u),
+  };
+}
+
 // --- measurement -------------------------------------------------------------
+
+/** How much ink stands in each pixel column, trimmed to where the ink is. */
+function inkProfile(png) {
+  const [w, h] = execFileSync(
+    "ffprobe",
+    ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height",
+     "-of", "csv=p=0", png],
+    { encoding: "utf8" },
+  ).trim().split(",").map(Number);
+  const raw = execFileSync(
+    "ffmpeg",
+    ["-v", "error", "-i", png, "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+    { maxBuffer: 256 * 1024 * 1024 },
+  );
+  const cols = new Array(w).fill(0);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) cols[x] += raw[y * w + x];
+  let a = cols.findIndex((v) => v > 2000);
+  let b = cols.length - 1;
+  while (b > a && cols[b] <= 2000) b--;
+  return a < 0 ? [] : cols.slice(a, b + 1);
+}
+
+/** How alike two ink profiles are, from -1 to 1, after stretching to a length. */
+function correlate(p, q) {
+  if (!p.length || !q.length) return 0;
+  const n = 400;
+  const take = (r) => {
+    const s = [];
+    for (let i = 0; i < n; i++) s.push(r[Math.min(r.length - 1, Math.floor((i * r.length) / n))]);
+    const max = Math.max(...s, 1);
+    return s.map((v) => v / max);
+  };
+  const x = take(p);
+  const y = take(q);
+  const mx = x.reduce((s, v) => s + v, 0) / n;
+  const my = y.reduce((s, v) => s + v, 0) / n;
+  let num = 0, dx = 0, dy = 0;
+  for (let i = 0; i < n; i++) {
+    const u = x[i] - mx;
+    const v = y[i] - my;
+    num += u * v;
+    dx += u * u;
+    dy += v * v;
+  }
+  return dx && dy ? num / Math.sqrt(dx * dy) : 0;
+}
 
 /** A PNG as an ink bitmap, cropped to its ink. ffmpeg decodes; nothing else can. */
 function bitmap(png) {
@@ -357,6 +496,37 @@ for (const engine of engines) {
   console.log();
 }
 
+// --- the function that actually ships ----------------------------------------
+//
+// Everything above measures the engines. This measures `drawCaption` itself, on
+// a whole sentence, because the engine being right does not prove the code on
+// top of it is: anything that drew a caption character by character — for
+// letter-spacing, say — would shape every cluster on its own and undo all of
+// it, and the probes above would still pass.
+//
+// A whole sentence rather than clusters, and a correlation rather than template
+// matching, because drawCaption outlines its text and an outline merges a
+// narrow mark into the consonant beside it. That made the ি probes
+// unmeasurable this way and left them neither passing nor failing. Comparing
+// the sentence against a shaped and a hand-placed rendering of itself has no
+// such trouble: an outline thickens glyphs without moving them.
+console.log("drawCaption (the function that ships)");
+const app = measureShippedFunction();
+if (!app) {
+  console.log("  skipped — esbuild could not bundle the module\n");
+} else {
+  console.log(`  ink width          ${app.width}px, against ${app.shapedWidth}px shaped ` +
+    `and ${app.unshapedWidth}px hand-placed`);
+  console.log(`  matches shaped     ${app.shaped.toFixed(4)}`);
+  console.log(`  matches unshaped   ${app.unshaped.toFixed(4)}`);
+  if (app.shaped > app.unshaped && app.shaped > 0.8) {
+    console.log("  the sentence it draws is the shaped one\n");
+  } else {
+    console.log("  WHAT drawCaption DRAWS IS NOT THE SHAPED SENTENCE\n");
+    failures++;
+  }
+}
+
 if (failures > 0) {
   console.error(`${failures} problem(s). Captions are not safe to ship.`);
   process.exit(1);
@@ -364,4 +534,5 @@ if (failures > 0) {
 console.log("Every pre-base vowel sign is drawn before its consonant, in every engine");
 console.log("that draws a caption. An unshaped rendering was caught in each, and so was");
 console.log("the renderer that shipped broken — so the measurement measures, and the");
-console.log("engines the app uses pass it.");
+console.log("engines the app uses pass it. And what drawCaption itself draws is the");
+console.log("shaped sentence, not a pile of correctly-shaped pieces in the wrong order.");
