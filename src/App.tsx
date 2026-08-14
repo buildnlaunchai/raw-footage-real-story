@@ -93,6 +93,9 @@ import {
 } from "./lib/scriptComposer";
 import { INTRO_FADE_MS, pickShots, type ShotCandidate } from "./lib/intro";
 import { TimelinePanel } from "./components/TimelinePanel";
+import { CAPTION_FACES, drawCaptions, loadCaptionFont } from "./lib/captions";
+import { resolveResource } from "@tauri-apps/api/path";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import {
   applyEdits,
   DEFAULT_TIMELINE,
@@ -121,6 +124,7 @@ import {
   INTRO_CLIP_ID,
   MUSIC_BEDS,
   planTimeline,
+  captionCues,
   renderRoughCut,
   VIDEO_EXTENSIONS,
   type AssembleResult,
@@ -137,6 +141,9 @@ import "./App.css";
  * af_heart's 58.2). See `src-tauri/src/voice_audition.rs`.
  */
 const DEFAULT_VOICE = "af_kore";
+
+/** The family captions are drawn in; loaded from the app's own resources. */
+const CAPTION_FONT = "RFRS Caption";
 
 /**
  * Turn anything thrown into something a person can read.
@@ -1302,6 +1309,21 @@ function App() {
         segmentStarts.set(key, edit?.sourceInMs ?? planStart);
         if (edit?.sourceClipId) sourceClipIds.set(key, edit.sourceClipId);
       }
+      // Captions are drawn here, in the webview, because it is the only
+      // renderer in this app that shapes Bengali correctly — ffmpeg's two text
+      // tools both place ি and ে after their consonant. ffmpeg is handed
+      // finished pictures instead.
+      let captions: Awaited<ReturnType<typeof drawCaptionsFor>> = [];
+      if (timelineDoc.subtitles) {
+        const cues = await captionCues(clipSpecs, inCut, {
+          segmentStarts,
+          sourceClipIds,
+          intro: introSpec,
+          introFadeMs: INTRO_FADE_MS,
+        });
+        captions = await drawCaptionsFor(cues);
+      }
+
       const result = await renderRoughCut(clipSpecs, inCut, {
         projectId: manifest.project.id,
         projectName: manifest.project.name,
@@ -1323,6 +1345,7 @@ function App() {
           : 0,
         soundGains: soundGains(shots, timelineDoc.originalAudio),
         language,
+        captions,
         subtitleStyle: {
           size: timelineDoc.subtitleStyle.size,
           bottom: timelineDoc.subtitleStyle.bottom,
@@ -1373,6 +1396,38 @@ function App() {
       setAssemblyBusy(false);
       setRenderProgress(null);
     }
+  }
+
+  /**
+   * Draw every caption in the webview and hand back the pictures.
+   *
+   * The fonts are the ones bundled with the app rather than whatever the
+   * machine has, so a Mac with no Bengali font installed does not quietly draw
+   * boxes.
+   */
+  async function drawCaptionsFor(cues: { startMs: number; endMs: number; text: string }[]) {
+    if (cues.length === 0) return [];
+    try {
+      const urls = await Promise.all(
+        CAPTION_FACES.map(async (f) =>
+          convertFileSrc(await resolveResource(`resources/fonts/${f}`)),
+        ),
+      );
+      await loadCaptionFont(CAPTION_FONT, urls);
+    } catch {
+      // Falls back to the system stack, which still shapes correctly.
+    }
+    return drawCaptions(
+      cues,
+      {
+        size: timelineDoc.subtitleStyle.size,
+        colour: timelineDoc.subtitleStyle.colour,
+        boxBehind: timelineDoc.subtitleStyle.boxBehind,
+      },
+      1920,
+      1080,
+      CAPTION_FONT,
+    );
   }
 
   /** Pick a music file from disk for the timeline's music track. */

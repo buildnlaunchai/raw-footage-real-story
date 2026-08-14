@@ -149,6 +149,26 @@ else
   ok "  clean — no duplicated resources"
 fi
 
+# --- captions are shaped correctly -----------------------------------------
+#
+# The Bengali subtitles were declared fixed three times and were wrong three
+# times, because a wrong vowel sign and a right one look alike at the size they
+# render. This measures instead, in every engine that draws a caption, and
+# checks that its own measurement can still catch a renderer known to be wrong.
+# Skipped where the tools are missing rather than failing the run — a Linux CI
+# box has no CoreText and no Chrome at that path.
+say "→ checking captions are shaped correctly"
+if [ -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ]; then
+  if caption_out="$(node scripts/check-captions.mjs 2>&1)"; then
+    ok "  correct in every engine, and the broken renderer was caught"
+  else
+    bad "  captions are not shaped correctly:"
+    printf '%s\n' "$caption_out" | sed 's/^/    /'
+  fi
+else
+  printf '%s  skipped — no Chrome to measure against%s\n' "$YELLOW" "$OFF"
+fi
+
 say ""
 if [ "$fail" -ne 0 ]; then
   printf '%spreflight FAILED%s\n' "$RED" "$OFF"

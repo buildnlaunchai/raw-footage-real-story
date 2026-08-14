@@ -2,23 +2,24 @@
 #
 # Fetch the fonts that captions are drawn in.
 #
-# Bundled rather than borrowed from the machine, because the machine's fonts do
-# not work. Two things were learned the hard way:
+# Captions are drawn by the app's own webview onto a canvas and handed to ffmpeg
+# as pictures, because neither of ffmpeg's text tools can draw them:
 #
-#   1. libass — what ffmpeg's `subtitles` filter uses — does no complex shaping
-#      in the builds people actually have. Bengali vowel signs land after their
-#      consonant (ভেতরের renders ভতেররে), Arabic letters do not join, Devanagari
-#      does not reorder. Every font produced the same wrong output, so the text
-#      is drawn with `drawtext` instead, which shapes correctly.
+#   1. libass — what the `subtitles` filter uses — does no complex shaping at
+#      all in the builds people actually have. Bengali vowel signs land after
+#      their consonant (ভেতরের renders ভতেররে), Arabic does not join,
+#      Devanagari does not reorder.
 #
-#   2. `drawtext` shapes correctly only from a plain `.ttf`. Handed one of
-#      macOS's `.ttc` collections — which is what every Bengali font on a Mac
-#      is — it loses the shaping tables and produces the same mess. Kalpurush,
-#      a standalone `.ttf`, worked; Bangla Sangam MN and Bangla MN did not.
+#   2. `drawtext` shapes some of it and still gets Bengali wrong: ক্রেডিট comes
+#      out ক্রডেটি. Every font produced the same result from both tools, which
+#      is how we know it is the tools and not the fonts.
 #
-# So: a `.ttf` per script, shipped with the app. Noto because it is under the
-# SIL Open Font License, which permits redistribution — Apple's system fonts do
-# not, whatever they render like.
+# The webview shapes correctly — it was the reference that caught the other two.
+# These files are what it draws with: a `.ttf` per script, shipped with the app
+# and registered as one font family, so a machine with no Bengali font installed
+# does not draw boxes. Noto because it is under the SIL Open Font License, which
+# permits redistribution — Apple's system fonts do not, whatever they render
+# like.
 #
 # Pinned by size and SHA-256. A font that silently changes changes every
 # caption in every video anybody renders.

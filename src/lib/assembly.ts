@@ -104,6 +104,30 @@ export async function planTimeline(
   }
 }
 
+/** What the captions should say and when, so the editor can draw them. */
+export async function captionCues(
+  clips: Clip[],
+  voiced: VoicedLine[],
+  opts: {
+    segmentStarts?: Map<string, number>;
+    sourceClipIds?: Map<string, string>;
+    intro?: IntroSpec | null;
+    introFadeMs?: number;
+  } = {},
+): Promise<{ startMs: number; endMs: number; text: string }[]> {
+  try {
+    return await invoke("assembly_caption_cues", {
+      clips: toClipSpecs(clips),
+      voiced: toVoicedSpecs(voiced, opts.segmentStarts, opts.sourceClipIds),
+      intro: opts.intro ?? null,
+      introFadeMs: opts.introFadeMs ?? 0,
+    });
+  } catch {
+    // No captions is a film without them, not a failed render.
+    return [];
+  }
+}
+
 export interface GeneratedClip {
   clipId: string;
   sourcePath: string;
@@ -264,6 +288,8 @@ export interface RenderOptions {
   soundGains?: number[];
   /** The script's language: decides caption width and which font can draw it. */
   language?: string;
+  /** Captions as the editor drew them: words, timings and a picture each. */
+  captions?: { startMs: number; endMs: number; text: string; png: string }[];
   /** How burned-in captions look. */
   subtitleStyle?: {
     size: number;
@@ -309,6 +335,7 @@ export async function renderRoughCut(
       soundGains: opts.soundGains ?? [],
       language: opts.language ?? "en",
       subtitleStyle: opts.subtitleStyle ?? null,
+      captions: opts.captions ?? [],
     });
   } catch (err) {
     throw asError(err);

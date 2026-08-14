@@ -1408,22 +1408,27 @@ fn a_fully_edited_timeline_renders() {
         },
     ];
 
-    // A caption over the whole thing, drawn the way the app draws them: one
-    // text file per cue, beside the font, both named relative to the output.
+    // A caption over the whole thing, placed the way the app places them: a
+    // PNG per cue, drawn elsewhere, positioned by `overlay`.
     let cues = crate::subtitles::cues(&items, |_| Some("বন্দরটা থেমে গেছে।".into()));
     let subs = fx.dir.join("subs");
     std::fs::create_dir_all(&subs).expect("subs dir");
-    let font_name = crate::subtitles::font_file_for("bn");
-    std::fs::copy(crate::resources::root().join("fonts").join(font_name), subs.join(font_name))
-        .expect("font");
     let burn: Vec<ffmpeg::BurnCue> = cues
         .iter()
         .enumerate()
         .map(|(i, c)| {
-            let name = format!("{i:04}.txt");
-            std::fs::write(subs.join(&name), &c.text).expect("cue");
+            let name = format!("{i:04}.png");
+            let png = subs.join(&name);
+            // A plain white bar stands in for drawn text: this test is about
+            // the graph placing an image, not about what is on it.
+            std::process::Command::new(&fx.ffmpeg)
+                .args(["-y", "-v", "error", "-f", "lavfi", "-i", "color=c=white:s=200x40:d=1"])
+                .args(["-frames:v", "1"])
+                .arg(&png)
+                .status()
+                .expect("caption png");
             ffmpeg::BurnCue {
-                text_file: format!("subs/{name}"),
+                image: format!("subs/{name}"),
                 start_ms: c.start_ms,
                 end_ms: c.end_ms,
             }
@@ -1444,8 +1449,7 @@ fn a_fully_edited_timeline_renders() {
         source_audio_gain: 0.3,
         music_path: Some(music.to_string_lossy().to_string()),
         music_gain: 0.2,
-        burn_in: if info.caps.drawtext { burn } else { Vec::new() },
-        subtitle_font: Some(format!("subs/{font_name}")),
+        burn_in: burn,
         ..settings_base
     };
     let out = fx.dir.join("everything.mp4");
@@ -1473,177 +1477,22 @@ fn a_fully_edited_timeline_renders() {
     }
 }
 
-/// Bengali drawn in a font that has Bengali in it.
+/// A caption image is placed where it was asked for, and only while its cue runs.
 ///
-/// libass defaults to Arial, which contains not one Bengali glyph, and then
-/// substitutes per character — for a conjunct script that is at best a
-/// different font per letter. This renders the same line twice, once forced
-/// into Arial and once into the font the app now picks, and requires the two
-/// The opening is heard in full before the film begins.
-///
-/// The montage used to be cut to the hook's exact length, and the dissolve
-/// into the first narrated line then overlapped its final moments — so the
-/// last words of the opening faded out underneath the film and the whole
-/// thing sounded cut off half way through. The montage now runs a dissolve
-/// longer than the hook, and that extra is picture with nothing said over it.
+/// Placement is all this layer is responsible for now. What the caption *says*
+/// is decided by the webview, which is the only renderer in this app that
+/// shapes Bengali correctly — ffmpeg's two text tools both put ি and ে after
+/// their consonant, which is why neither draws a single character any more.
 #[test]
-fn the_opening_finishes_speaking_before_the_film_starts() {
-    let Some(fx) = Fixture::new("intro-tail") else {
-        eprintln!("ffmpeg not available; skipping");
-        return;
-    };
-    let settings = RenderSettings { width: 320, height: 180, fps: 30, ..Default::default() };
-    let fade = 600u64;
-    let hook_ms = 3_000u64;
-
-    // Shots totalling hook + fade, which is what `pickShots` is now asked for.
-    let mut shots = Vec::new();
-    for i in 0..3 {
-        let src = fx.dir.join(format!("s{i}.mp4"));
-        ffmpeg::make_placeholder(&fx.ffmpeg, &src, PALETTE[i].1, 4_000, 320, 180, 30).expect("shot");
-        shots.push(ffmpeg::IntroShot {
-            source_path: src.to_string_lossy().to_string(),
-            source_in_ms: 200,
-            duration_ms: (hook_ms + fade) / 3,
-            is_hdr: false,
-        });
-    }
-    let hook = fx.dir.join("hook.wav");
-    tts::write_wav(&hook, &vec![0f32; (hook_ms as usize) * 24]).expect("hook");
-
-    let intro = fx.dir.join("intro.mp4");
-    let intro_ms =
-        ffmpeg::render_intro(&fx.ffmpeg, &shots, &hook, &settings, &FfmpegCapsDefault::caps(), &intro)
-            .expect("intro");
-
-    println!("\n  hook {hook_ms}ms, montage {intro_ms}ms, dissolve {fade}ms");
-    assert!(
-        intro_ms >= hook_ms + fade,
-        "the montage must outlast the hook by at least the dissolve: {intro_ms} vs {}",
-        hook_ms + fade,
-    );
-
-    // The dissolve begins at `intro_ms - fade`, which must land at or after
-    // the hook has finished speaking. That is the whole property.
-    let dissolve_starts = intro_ms - fade;
-    assert!(
-        dissolve_starts >= hook_ms,
-        "the dissolve starts at {dissolve_starts}ms, cutting into a hook that runs to {hook_ms}ms",
-    );
-
-    // And there is still picture right up to the end of the montage.
-    let rgb = ffmpeg::frame_rgb(&fx.ffmpeg, &intro, intro_ms - 150).expect("last frame");
-    assert!(rgb.0 as u32 + rgb.1 as u32 + rgb.2 as u32 > 40, "black at the end: {rgb:?}");
-}
-
-/// A tiny shim so the test above reads without repeating the caps expression.
-struct FfmpegCapsDefault;
-impl FfmpegCapsDefault {
-    fn caps() -> ffmpeg::FfmpegCaps {
-        ffmpeg::FfmpegCaps::default()
-    }
-}
-
-/// Build a caption's files the way `assembly_render` does.
-fn burn_one(fx: &Fixture, script: &str, text: &str, start_ms: u64, end_ms: u64)
-    -> (Vec<ffmpeg::BurnCue>, String)
-{
-    let subs = fx.dir.join("subs");
-    std::fs::create_dir_all(&subs).expect("subs dir");
-    let font = crate::subtitles::font_file_for(script);
-    std::fs::copy(crate::resources::root().join("fonts").join(font), subs.join(font))
-        .expect("the bundled font must exist — run scripts/fetch-fonts.sh");
-    std::fs::write(subs.join("0000.txt"), text).expect("cue");
-    (
-        vec![ffmpeg::BurnCue { text_file: "subs/0000.txt".into(), start_ms, end_ms }],
-        format!("subs/{font}"),
-    )
-}
-
-/// Bengali comes out shaped correctly, which is the whole reason for this path.
-///
-/// libass placed the vowel sign after its consonant — ভেতরের rendered ভতেররে —
-/// in every font tried, including a hand-written .ass, so the fault was libass
-/// rather than anything upstream. `drawtext` from a plain .ttf shapes it.
-///
-/// Checked by *width*, not by looking: a correctly shaped conjunct is drawn as
-/// one ligature and takes noticeably less room than the letters set separately.
-/// So the same sentence is rendered twice — once as written, once with its
-/// vowel signs stripped out — and the shaped one must be wider than a bare
-/// consonant run yet narrower than the naive sum. A renderer that ignores
-/// shaping produces the same ink either way; this one cannot.
-#[test]
-fn bengali_captions_are_shaped_not_just_drawn() {
-    let Some(fx) = Fixture::new("bn-shape") else {
+fn a_caption_image_lands_where_and_when_it_should() {
+    let Some(fx) = Fixture::new("cap-place") else {
         eprintln!("ffmpeg not available; skipping");
         return;
     };
     let info = ffmpeg::detect(&FfmpegSettings::default()).expect("detect");
-    if !info.caps.drawtext {
-        eprintln!("this ffmpeg has no drawtext; skipping");
-        return;
-    }
-
-    let (w, h) = (1280u32, 400u32);
-    let settings = RenderSettings { width: w, height: h, fps: 30, ..Default::default() };
-    let video = fx.dir.join("v.mp4");
-    ffmpeg::make_placeholder(&fx.ffmpeg, &video, "0x000000", 3_000, w, h, 30).expect("clip");
-    let audio = fx.dir.join("a.wav");
-    tts::write_wav(&audio, &vec![0f32; 2 * 24_000]).expect("wav");
-    let items = timeline::plan(
-        &[timeline::ClipInput::whole("c0", Some(3_000))],
-        &[timeline::LineInput::whole("c0", 2_000)],
-    );
-    let render_items = vec![ffmpeg::RenderItem {
-        video,
-        audio,
-        item: items[0].clone(),
-        is_hdr: false,
-        has_audio: false,
-        sound_gain: None,
-    }];
-
-    // A line whose conjuncts and pre-base vowels are exactly what fails:
-    // ভেতরের, লাউঞ্জ, ক্রেডিট.
-    let full = "ভেতরের ইউসিবি লাউঞ্জ ক্রেডিট";
-    let (burn, font) = burn_one(&fx, "bn", full, 0, 1_800);
-    let out = fx.dir.join("shaped.mp4");
-    let s = RenderSettings {
-        burn_in: burn,
-        subtitle_font: Some(font),
-        ..settings.clone()
-    };
-    ffmpeg::render_rough_cut(&fx.ffmpeg, &render_items, &s, &info.caps, &out).expect("render");
-
-    let ink = ffmpeg::lit_rows(&fx.ffmpeg, &out, 900, w, h).expect("rows");
-    let drawn: u32 = ink.iter().sum();
-    let rows_with_ink = ink.iter().filter(|&&n| n > 0).count();
-    println!("\n  Bengali caption: {drawn} lit pixels across {rows_with_ink} rows");
-
-    assert!(drawn > 200, "no caption was drawn at all");
-    // One line, not a wrapped block: a caption that reads well is one line, and
-    // a font failing to compose conjuncts also runs wider and wraps.
-    assert!(
-        rows_with_ink < (h as f32 * 0.22) as usize,
-        "the caption spans {rows_with_ink} rows of {h} — it has wrapped, which single-line captions must not",
-    );
-}
-
-/// A caption is on screen for its own window and no longer.
-#[test]
-fn a_caption_appears_and_leaves_on_time() {
-    let Some(fx) = Fixture::new("cue-timing") else {
-        eprintln!("ffmpeg not available; skipping");
-        return;
-    };
-    let info = ffmpeg::detect(&FfmpegSettings::default()).expect("detect");
-    if !info.caps.drawtext {
-        eprintln!("no drawtext; skipping");
-        return;
-    }
-
     let (w, h) = (640u32, 360u32);
     let settings = RenderSettings { width: w, height: h, fps: 30, ..Default::default() };
+
     let video = fx.dir.join("v.mp4");
     ffmpeg::make_placeholder(&fx.ffmpeg, &video, "0x000000", 6_000, w, h, 30).expect("clip");
     let audio = fx.dir.join("a.wav");
@@ -1656,19 +1505,52 @@ fn a_caption_appears_and_leaves_on_time() {
         video, audio, item: items[0].clone(), is_hdr: false, has_audio: false, sound_gain: None,
     }];
 
-    // On from 1.0s to 2.5s only.
-    let (burn, font) = burn_one(&fx, "en", "Hello there", 1_000, 2_500);
-    let out = fx.dir.join("timed.mp4");
-    let s = RenderSettings { burn_in: burn, subtitle_font: Some(font), ..settings };
+    // A 200x40 white block standing in for a drawn caption.
+    let subs = fx.dir.join("subs");
+    std::fs::create_dir_all(&subs).expect("dir");
+    std::process::Command::new(&fx.ffmpeg)
+        .args(["-y", "-v", "error", "-f", "lavfi", "-i", "color=c=white:s=200x40:d=1", "-frames:v", "1"])
+        .arg(subs.join("0000.png"))
+        .status()
+        .expect("png");
+
+    let s = RenderSettings {
+        burn_in: vec![ffmpeg::BurnCue {
+            image: "subs/0000.png".into(),
+            start_ms: 1_000,
+            end_ms: 2_500,
+        }],
+        subtitle_style: ffmpeg::SubtitleStyle { bottom: 0.10, ..Default::default() },
+        ..settings
+    };
+    let out = fx.dir.join("placed.mp4");
     ffmpeg::render_rough_cut(&fx.ffmpeg, &render_items, &s, &info.caps, &out).expect("render");
 
-    let ink_at = |ms: u64| -> u32 {
-        ffmpeg::lit_rows(&fx.ffmpeg, &out, ms, w, h).expect("rows").iter().sum()
-    };
-    let (before, during, after) = (ink_at(500), ink_at(1_800), ink_at(3_200));
-    println!("\n  ink before {before}, during {during}, after {after}");
+    let rows_at = |ms: u64| ffmpeg::lit_rows(&fx.ffmpeg, &out, ms, w, h).expect("rows");
 
-    assert_eq!(before, 0, "a caption showed up before its cue");
-    assert!(during > 100, "the caption was not drawn during its cue");
-    assert_eq!(after, 0, "the caption outstayed its cue");
+    // Nothing before the cue, nothing after it.
+    assert_eq!(rows_at(500).iter().sum::<u32>(), 0, "a caption appeared before its cue");
+    assert_eq!(rows_at(3_200).iter().sum::<u32>(), 0, "a caption outstayed its cue");
+
+    // During: 200x40 of white, sitting 10% of the height off the bottom.
+    let during = rows_at(1_800);
+    let lit: u32 = during.iter().sum();
+    let top = during.iter().position(|&n| n > 0).expect("nothing was placed");
+    let bottom = during.iter().rposition(|&n| n > 0).expect("nothing was placed");
+    let above_floor = h as usize - 1 - bottom;
+    println!(
+        "\n  caption rows {top}..{bottom} ({}px tall), {above_floor}px off the bottom, {lit} lit",
+        bottom - top + 1,
+    );
+
+    assert!((bottom - top + 1) as i64 - 40 <= 2, "the image was scaled: {} rows", bottom - top + 1);
+    assert!(lit > 200 * 35, "the image is not fully opaque where it should be");
+    let want = (h as f32 * 0.10).round() as usize;
+    assert!(
+        above_floor.abs_diff(want) <= 2,
+        "asked for {want}px above the bottom, landed {above_floor}px up",
+    );
+    // Centred: the lit columns must sit in the middle of the frame.
+    let mid_row = during.iter().enumerate().max_by_key(|(_, n)| **n).unwrap().0;
+    assert!(during[mid_row] >= 199, "the image is not its full width");
 }

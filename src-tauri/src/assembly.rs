@@ -20,111 +20,73 @@ fn subs_dir_name(stem: &str) -> String {
     format!("subs-{stem}")
 }
 
-/// Write one text file per caption, and copy the font in beside them.
+/// Write each drawn caption to a PNG beside the cut.
 ///
-/// Returns the cues with paths relative to the render directory, and the
-/// font's filename — ffmpeg is run from that directory, so everything in the
-/// filter graph is a bare name with nothing to escape.
-fn write_burn_in(
+/// Returns them with paths relative to the render directory. ffmpeg is run from
+/// there, so nothing in the filter graph is an absolute path — a project folder
+/// named "Trip: Bangkok" would otherwise break the graph, because the parser
+/// reads a colon as an option separator.
+fn write_captions(
     subs_dir: &Path,
     rel: &str,
-    cues: &[crate::subtitles::Cue],
-    script: &str,
-) -> Result<(Vec<ffmpeg::BurnCue>, String), String> {
-    std::fs::create_dir_all(subs_dir).map_err(|e| format!("Could not make room for the captions: {e}"))?;
-
-    let font_name = crate::subtitles::font_file_for(script);
-    let bundled = crate::resources::root().join("fonts").join(font_name);
-    if !bundled.is_file() {
-        return Err(format!(
-            "The caption font {font_name} is missing from this build. \
-             The subtitle file was still saved next to the video."
-        ));
-    }
-    std::fs::copy(&bundled, subs_dir.join(font_name))
-        .map_err(|e| format!("Could not place the caption font: {e}"))?;
-
-    let mut out = Vec::with_capacity(cues.len());
-    for (i, cue) in cues.iter().enumerate() {
-        let name = format!("{i:04}.txt");
-        std::fs::write(subs_dir.join(&name), &cue.text)
+    captions: &[CaptionImage],
+) -> Result<Vec<ffmpeg::BurnCue>, String> {
+    std::fs::create_dir_all(subs_dir)
+        .map_err(|e| format!("Could not make room for the captions: {e}"))?;
+    let mut out = Vec::with_capacity(captions.len());
+    for (i, cap) in captions.iter().enumerate() {
+        let bytes = base64_decode(&cap.png)
+            .ok_or_else(|| "A caption image was not readable.".to_string())?;
+        let name = format!("{i:04}.png");
+        std::fs::write(subs_dir.join(&name), bytes)
             .map_err(|e| format!("Could not write a caption: {e}"))?;
         out.push(ffmpeg::BurnCue {
-            text_file: format!("{rel}/{name}"),
-            start_ms: cue.start_ms,
-            end_ms: cue.end_ms,
+            image: format!("{rel}/{name}"),
+            start_ms: cap.start_ms,
+            end_ms: cap.end_ms,
         });
     }
-    Ok((out, format!("{rel}/{font_name}")))
+    Ok(out)
 }
 
-/// Whether a font family is present on this machine.
-///
-/// By looking at the font directories rather than by asking `fc-match`. The
-/// first version shelled out, and shelling out is exactly what does not work
-/// here: a macOS app launched from Finder inherits a minimal PATH with no
-/// Homebrew in it, so `fc-match` was never found, every font read as missing,
-/// and Bengali fell through to Arial — which cannot draw it. The same trap
-/// this codebase already documents for ffmpeg, sprung again.
-///
-/// It also passed its own test, because a test runs from a shell that *does*
-/// have fc-match on PATH. Only the shipped app was broken.
-fn font_installed(family: &str) -> bool {
-    let want = normalise_font(family);
-    font_dirs().iter().any(|dir| {
-        std::fs::read_dir(dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .any(|e| {
-                let name = e.file_name();
-                let name = name.to_string_lossy();
-                let Some((stem, ext)) = name.rsplit_once('.') else { return false };
-                matches!(ext.to_ascii_lowercase().as_str(), "ttf" | "ttc" | "otf" | "otc")
-                    && normalise_font(stem) == want
-            })
-    })
+/// A caption as the editor drew it.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptionImage {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    /// The words, kept so the `.srt` beside the video says the same thing.
+    pub text: String,
+    /// PNG bytes, base64.
+    pub png: String,
 }
 
-/// Case and spacing vary between a family name and its filename —
-/// "Kohinoor Bangla" ships as `KohinoorBangla.ttc`.
-fn normalise_font(s: &str) -> String {
-    s.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase()
-}
-
-#[cfg(target_os = "macos")]
-fn font_dirs() -> Vec<PathBuf> {
-    let mut v = vec![
-        PathBuf::from("/System/Library/Fonts"),
-        PathBuf::from("/System/Library/Fonts/Supplemental"),
-        PathBuf::from("/Library/Fonts"),
-    ];
-    if let Ok(home) = std::env::var("HOME") {
-        v.push(PathBuf::from(home).join("Library").join("Fonts"));
+/// Standard base64, no padding assumptions. Small enough not to be worth a crate.
+fn base64_decode(s: &str) -> Option<Vec<u8>> {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut rev = [255u8; 256];
+    for (i, c) in T.iter().enumerate() {
+        rev[*c as usize] = i as u8;
     }
-    v
-}
-
-#[cfg(target_os = "windows")]
-fn font_dirs() -> Vec<PathBuf> {
-    let mut v = vec![PathBuf::from(r"C:\Windows\Fonts")];
-    if let Ok(local) = std::env::var("LOCALAPPDATA") {
-        v.push(PathBuf::from(local).join("Microsoft").join("Windows").join("Fonts"));
+    let mut out = Vec::with_capacity(s.len() / 4 * 3);
+    let mut acc = 0u32;
+    let mut bits = 0u32;
+    for b in s.bytes() {
+        if b == b'=' || b.is_ascii_whitespace() {
+            continue;
+        }
+        let v = rev[b as usize];
+        if v == 255 {
+            return None;
+        }
+        acc = (acc << 6) | v as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
     }
-    v
-}
-
-#[cfg(test)]
-pub fn font_installed_for_test(family: &str) -> bool {
-    font_installed(family)
-}
-
-#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-fn font_dirs() -> Vec<PathBuf> {
-    vec![
-        PathBuf::from("/usr/share/fonts"),
-        PathBuf::from("/usr/local/share/fonts"),
-    ]
+    Some(out)
 }
 
 fn settings_path(app: &AppHandle) -> Result<PathBuf, FfmpegError> {
@@ -504,6 +466,54 @@ pub fn assembly_plan(
     timeline::plan(&clip_inputs, &line_inputs)
 }
 
+/// What the captions should say and when, so the editor can draw them.
+///
+/// A separate call because the drawing has to happen in the webview — the only
+/// renderer in this app that gets Bengali right — and the timings come from the
+/// same planner the cut does. The editor draws these and hands them back to
+/// `assembly_render`, so the pictures and the `.srt` come from one list.
+#[tauri::command]
+pub fn assembly_caption_cues(
+    clips: Vec<ClipSpec>,
+    voiced: Vec<VoicedSpec>,
+    intro: Option<IntroSpec>,
+    intro_fade_ms: Option<u32>,
+) -> Vec<crate::subtitles::Cue> {
+    let mut items = assembly_plan(clips, voiced.iter().map(clone_spec).collect());
+    if let Some(spec) = intro.as_ref().filter(|i| !i.shots.is_empty()) {
+        // The montage occupies the first slot, so everything after it shifts.
+        let intro_ms: u64 = spec.shots.iter().map(|s| s.duration_ms).sum();
+        items = timeline::with_intro(&items, intro_ms, intro_fade_ms.unwrap_or(0));
+    }
+    let sample: String = voiced.iter().map(|v| v.text.as_str()).collect::<Vec<_>>().join(" ");
+    let script = crate::subtitles::dominant_script(&sample);
+    crate::subtitles::cues_for(script, &items, |it| {
+        if it.clip_id == timeline::INTRO_CLIP_ID {
+            intro.as_ref().and_then(|i| i.text.clone())
+        } else {
+            voiced
+                .iter()
+                .find(|v| v.clip_id == it.clip_id && v.segment_index == it.segment_index)
+                .map(|v| v.text.clone())
+        }
+    })
+}
+
+fn clone_spec(v: &VoicedSpec) -> VoicedSpec {
+    VoicedSpec {
+        clip_id: v.clip_id.clone(),
+        segment_index: v.segment_index,
+        text: v.text.clone(),
+        audio_path: v.audio_path.clone(),
+        duration_ms: v.duration_ms,
+        skipped: v.skipped.clone(),
+        speech_end_ms: v.speech_end_ms,
+        edited: v.edited,
+        source_start_ms: v.source_start_ms,
+        source_clip_id: v.source_clip_id.clone(),
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssembleResult {
@@ -558,6 +568,8 @@ pub async fn assembly_render(
     // which font can draw it, and how those captions should look.
     language: Option<String>,
     subtitle_style: Option<ffmpeg::SubtitleStyle>,
+    // Captions as the editor drew them: words, timings, and a picture each.
+    captions: Option<Vec<CaptionImage>>,
 ) -> Result<AssembleResult, FfmpegError> {
     let source_audio_gain = source_audio_gain.unwrap_or(0.0);
     let info = ffmpeg::detect(&load_settings(&app))?;
@@ -754,64 +766,40 @@ pub async fn assembly_render(
         }
     }
 
-    // --- subtitles ------------------------------------------------------------
+    // --- captions -------------------------------------------------------------
     //
-    // Built from the timeline that is about to be rendered, so the timings are
-    // the cut's own rather than an estimate of it, and written whatever the
-    // toggle says. Burning them in is the part that needs libass.
+    // Drawn by the editor, not here. Neither of ffmpeg's text tools can render
+    // Bengali — libass does no complex shaping at all and `drawtext` leaves ি
+    // and ে after their consonant — and both were caught by comparing against
+    // the same string rendered by a browser. The webview draws it correctly, so
+    // it draws them and this places the pictures.
+    //
+    // The `.srt` beside the video is written from the same captions, so the
+    // file and the burned-in words cannot drift apart.
+    let captions = captions.unwrap_or_default();
     let subs_path = dir.join("render").join(format!("cut-{stem}.srt"));
-    let told = language.unwrap_or_else(|| "en".into());
-    // What the captions are actually written in, read from the words rather
-    // than from the setting. The setting is separate state and can be wrong —
-    // it was, because it did not survive a restart, so a Bengali script came
-    // back as English and every caption was drawn in a Latin font that cannot
-    // place a Bengali vowel sign.
-    let sample: String = voiced.iter().map(|v| v.text.as_str()).collect::<Vec<_>>().join(" ");
-    let detected = crate::subtitles::dominant_script(&sample);
-    let lang = if detected == "en" { told.as_str() } else { detected };
-    let lang = lang.to_string();
-
-    let cues = crate::subtitles::cues_for(&lang, &items, |it| {
-        if it.clip_id == timeline::INTRO_CLIP_ID {
-            intro.as_ref().and_then(|i| i.text.clone())
-        } else {
-            voiced
-                .iter()
-                .find(|v| v.clip_id == it.clip_id && v.segment_index == it.segment_index)
-                .map(|v| v.text.clone())
-        }
-    });
     let mut subtitle_path = None;
     let mut subtitle_error = None;
-    if !cues.is_empty() {
-        let doc = crate::subtitles::to_srt(&cues, Some(crate::subtitles::wrap_chars(&lang)));
-        match std::fs::write(&subs_path, doc) {
+
+    if !captions.is_empty() {
+        let cues: Vec<crate::subtitles::Cue> = captions
+            .iter()
+            .map(|c| crate::subtitles::Cue {
+                start_ms: c.start_ms,
+                end_ms: c.end_ms,
+                text: c.text.clone(),
+            })
+            .collect();
+        match std::fs::write(&subs_path, crate::subtitles::to_srt(&cues, None)) {
             Ok(()) => subtitle_path = Some(subs_path.to_string_lossy().to_string()),
             Err(e) => subtitle_error = Some(format!("Could not write the subtitle file: {e}")),
         }
-    }
 
-    if subtitles.unwrap_or(false) && !cues.is_empty() {
-        if !info.caps.drawtext {
-            subtitle_error = Some(
-                "This copy of ffmpeg was built without libfreetype, so it cannot draw text \
-                 into the picture. The subtitle file was still saved next to the video."
-                    .into(),
-            );
-        } else {
-            // Each caption's words go to their own file, and the font is copied
-            // in beside them, so every path in the filter graph is a bare
-            // filename in the working directory. `drawtext` takes its arguments
-            // through the filtergraph parser, where a colon separates options
-            // and a comma separates filters — a caption containing either, or a
-            // quote, or a project folder with a colon in its name, would need
-            // escaping twice over and would fail on somebody else's sentence.
-            let render_dir = dir.join("render");
-            let subs_dir = render_dir.join(format!("subs-{stem}"));
-            match write_burn_in(&subs_dir, &subs_dir_name(&stem), &cues, &lang) {
-                Ok((burn_in, font)) => {
-                    settings.burn_in = burn_in;
-                    settings.subtitle_font = Some(font);
+        if subtitles.unwrap_or(false) {
+            let subs_dir = dir.join("render").join(subs_dir_name(&stem));
+            match write_captions(&subs_dir, &subs_dir_name(&stem), &captions) {
+                Ok(burn) => {
+                    settings.burn_in = burn;
                     settings.subtitle_style = subtitle_style.unwrap_or_default();
                 }
                 Err(e) => subtitle_error = Some(e),

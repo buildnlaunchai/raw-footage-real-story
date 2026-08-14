@@ -44,20 +44,22 @@ pub struct FfmpegCaps {
     /// comes out washed out and grey — silently, which is the worst kind.
     pub zscale: bool,
     pub tonemap: bool,
-    /// libfreetype, via the `drawtext` filter — how captions are drawn.
+    /// libfreetype, via the `drawtext` filter.
     ///
-    /// Chosen over libass, which is what ffmpeg's `subtitles` filter uses,
-    /// because libass does no complex shaping in the builds people actually
-    /// have: Bengali vowel signs land after their consonant, Arabic letters do
-    /// not join, Devanagari does not reorder. Every font produced the same
-    /// wrong output. `drawtext` shapes all three correctly, given a plain
-    /// `.ttf` — which is why the fonts are bundled.
+    /// Not used, and deliberately not required. It was tried, and it draws
+    /// Bengali wrong: ক্রেডিট comes out ক্রডেটি, because it leaves ি and ে
+    /// after the consonant they belong in front of. libass, behind the
+    /// `subtitles` filter, is worse — it does no complex shaping at all, so
+    /// Arabic does not join and Devanagari does not reorder either. Every font
+    /// produced the same output from both, which is how we know it is the
+    /// tools.
     ///
-    /// Homebrew's plain `ffmpeg` formula has neither this nor libass, so the
-    /// most ordinary install on macOS cannot draw a single character.
+    /// Captions are drawn by the app's own webview and composited as pictures,
+    /// so neither filter is needed. Kept here only because its absence still
+    /// says something about how complete a build is — and because Homebrew's
+    /// plain `ffmpeg` formula has neither, which is worth being able to see.
     pub drawtext: bool,
-    /// libass. No longer used to draw captions, but its absence still says
-    /// something about how complete a build is.
+    /// libass. Not used either, and for a worse version of the same reason.
     pub subtitles: bool,
 }
 
@@ -218,9 +220,14 @@ fn resolve_auto(stem: &str) -> Option<PathBuf> {
 /// A limited explicit choice is reported through [`FfmpegCaps`] instead.
 ///
 /// For automatic discovery only, the most capable build wins. On macOS the
-/// common case is Homebrew's `ffmpeg` on PATH — no zscale, no libass —
-/// alongside keg-only `ffmpeg-full`, which has both. Picking the former means
-/// every HDR clip silently loses its colour and no subtitle can be drawn.
+/// common case is Homebrew's `ffmpeg` on PATH — no zscale — alongside keg-only
+/// `ffmpeg-full`, which has it. Picking the former means every HDR clip
+/// silently loses its colour and comes out washed out and grey.
+///
+/// Tone-mapping is the only thing weighed. Text filters used to be, back when
+/// captions were drawn by ffmpeg, and that was how a build was chosen for a
+/// job it does badly: the fuller build won on having `drawtext`, and then drew
+/// Bengali wrong. Captions are pictures now, which every build can place.
 fn resolve_ffmpeg(saved: Option<&String>) -> Option<PathBuf> {
     if let Some(explicit) = resolve_explicit("FFMPEG_PATH", saved) {
         return Some(explicit);
@@ -232,7 +239,7 @@ fn resolve_ffmpeg(saved: Option<&String>) -> Option<PathBuf> {
             continue;
         }
         let caps = probe_caps(&candidate);
-        let score = u8::from(caps.zscale) + u8::from(caps.drawtext);
+        let score = u8::from(caps.zscale) + u8::from(caps.tonemap);
         // Nothing scores higher, so stop paying for probes.
         if score == 2 {
             return Some(candidate);
@@ -680,19 +687,19 @@ fn tonemap_chain(caps: &FfmpegCaps) -> &'static str {
     }
 }
 
-/// One caption, ready to draw: where its text file is and when it is on screen.
+/// One caption, already drawn, waiting to be placed.
 ///
-/// The words travel as a *file* rather than inline in the filter string.
-/// `drawtext` takes its argument through the filtergraph parser, where a colon
-/// separates options and a comma separates filters — so a caption containing
-/// either, or a quote, or a backslash, would need escaping twice over and
-/// would fail at render time on somebody else's sentence. A file has no such
-/// problem: it is read verbatim.
+/// A picture rather than text, because neither of ffmpeg's text tools can
+/// draw Bengali: libass does no complex shaping at all, and `drawtext` leaves
+/// ি and ে after their consonant — ক্রেডিট comes out ক্রডেটি. Both were checked
+/// against the same string rendered by a browser, glyph for glyph. The webview
+/// draws it correctly, so the app draws it and ffmpeg only places the result,
+/// which needs no font, shaper or text library at all.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BurnCue {
-    /// File holding the caption's text, relative to the render directory.
-    pub text_file: String,
+    /// PNG file, relative to the render directory, transparent around the text.
+    pub image: String,
     pub start_ms: u64,
     pub end_ms: u64,
 }
@@ -911,6 +918,15 @@ pub fn render_rough_cut(
         cmd.arg("-i").arg(&it.audio);
     }
 
+    // Inputs are numbered by the order they are added, so the music bed is
+    // added here — before the caption images — and merely *used* further down.
+    // Adding it beside the code that mixes it would renumber every caption.
+    let music = settings.music_path.as_deref().filter(|p| Path::new(p).is_file());
+    let music_idx = items.len() * 2;
+    if let Some(path) = music {
+        cmd.arg("-stream_loop").arg("-1").arg("-i").arg(path);
+    }
+
     let mut filter = String::new();
     for (i, it) in items.iter().enumerate() {
         let v = i * 2;
@@ -1111,44 +1127,37 @@ pub fn render_rough_cut(
         (format!("[{vprev}]"), format!("[{aprev}]"))
     };
 
-    // Captions last, so they are drawn over the finished picture rather than
-    // into a shot a later dissolve then fades out from under them.
+    // Captions last, so they sit over the finished picture rather than inside
+    // a shot a later dissolve fades out from under them.
     //
-    // Drawn with `drawtext`, not with libass. libass — what ffmpeg's
-    // `subtitles` filter uses — does no complex shaping in the builds people
-    // have: Bengali vowel signs land after their consonant (ভেতরের renders
-    // ভতেররে), Arabic letters do not join, Devanagari does not reorder. Every
-    // font produced the same wrong output, and a hand-written .ass failed too,
-    // so it is libass rather than anything upstream of it. `drawtext` shapes
-    // all three correctly from a plain .ttf, which is why the fonts ship with
-    // the app.
-    //
-    // One filter per caption, switched on for its own window. A film of a few
-    // hundred captions makes a long graph and ffmpeg handles it; the
-    // alternative, a filter that reads a file, is the one that cannot shape.
+    // Placed as pictures, not drawn as text. Neither of ffmpeg's text tools can
+    // render Bengali: libass does no complex shaping at all — Arabic does not
+    // join and Devanagari does not reorder either — and `drawtext` still puts
+    // ি and ে after their consonant. Both were compared against the same string
+    // rendered by a browser, which is what caught them. The app draws each
+    // caption in its own webview, which is provably correct, and ffmpeg does
+    // the one thing it is reliable at: putting an image somewhere.
     let vout = if settings.burn_in.is_empty() {
         vout
     } else {
         let st = &settings.subtitle_style;
-        let font = settings.subtitle_font.clone().unwrap_or_default();
-        // Sizes here are real pixels, unlike an ASS style — `drawtext` draws
-        // straight into the frame with no canvas in between.
-        let font_size = (height as f32 * st.size).round().max(10.0) as u32;
         let margin_v = (height as f32 * st.bottom).round().max(4.0) as u32;
-        let colour = ass_to_drawtext_colour(&st.colour);
+        let first_image = items.len() * 2 + usize::from(music.is_some());
+
+        for cue in &settings.burn_in {
+            cmd.arg("-i").arg(&cue.image);
+        }
 
         let mut prev = vout;
         for (i, cue) in settings.burn_in.iter().enumerate() {
-            let label = format!("[sub{i}]");
+            let idx = first_image + i;
+            let label = format!("[cap{i}]");
+            // Centred, and sitting the requested distance off the bottom. The
+            // image carries its own padding, so `overlay_h` is the whole
+            // caption including any plate behind it.
             filter.push_str(&format!(
-                "{prev}drawtext=fontfile={font}:textfile={}:\
-                 fontsize={font_size}:fontcolor={colour}:\
-                 x=(w-text_w)/2:y=h-{margin_v}-text_h:\
-                 borderw=2:bordercolor=black@0.85:shadowx=1:shadowy=1:\
-                 box={}:boxcolor=black@0.55:boxborderw=12:\
+                "{prev}[{idx}:v]overlay=x=(W-w)/2:y=H-{margin_v}-h:\
                  enable='between(t\\,{:.3}\\,{:.3})'{label};",
-                cue.text_file,
-                u8::from(st.box_behind),
                 cue.start_ms as f64 / 1000.0,
                 cue.end_ms as f64 / 1000.0,
             ));
@@ -1157,12 +1166,11 @@ pub fn render_rough_cut(
         prev
     };
 
-    // Optional music bed under the narration.
-    let aout = match settings.music_path.as_deref().filter(|p| Path::new(p).is_file()) {
+    // Optional music bed under the narration. Added as an input *before* the
+    // caption images, which is why they count from `items * 2 + music`.
+    let aout = match music {
         None => aout,
-        Some(music) => {
-            cmd.arg("-stream_loop").arg("-1").arg("-i").arg(music);
-            let music_idx = items.len() * 2;
+        Some(_) => {
             let gain = settings.music_gain.clamp(0.0, 1.0);
             filter.push_str(&format!(
                 "[{music_idx}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,\

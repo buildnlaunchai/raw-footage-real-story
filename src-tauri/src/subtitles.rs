@@ -17,7 +17,8 @@
 use crate::timeline::{TimelineItem, TAIL_MS};
 
 /// One caption: what is said, and the window it is on screen for.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Cue {
     pub start_ms: u64,
     pub end_ms: u64,
