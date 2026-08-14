@@ -33,6 +33,8 @@ export interface LibraryClip {
    */
   segments: { startSec: number; endSec: number; text: string }[];
   addedAt: string;
+  /** When the camera recorded it, where the file says. Unix milliseconds. */
+  capturedAtMs: number | null;
   /**
    * Where this clip sits in its project's running order, from zero.
    *
@@ -65,6 +67,37 @@ export async function listLibrary(): Promise<LibraryClip[]> {
  */
 export async function reorderClips(projectId: string, clipIds: string[]): Promise<void> {
   await invoke("clip_reorder", { projectId, clipIds });
+}
+
+/**
+ * Read the recording time out of clips that have not got one stored.
+ *
+ * Everything imported before this was recorded carries nothing, which is the
+ * whole existing library. Runs once per project, in the background.
+ */
+export async function backfillCaptureTimes(projectId: string): Promise<number> {
+  try {
+    return await invoke<number>("clip_backfill_capture", { projectId });
+  } catch {
+    // A project whose media has moved simply keeps its blank dates.
+    return 0;
+  }
+}
+
+/**
+ * When a clip was filmed, as a date and a time on separate lines.
+ *
+ * Null where the file carries no recording time — shown as such rather than
+ * quietly substituting the import date, which is a different fact.
+ */
+export function formatShotAt(ms: number | null): { date: string; time: string } | null {
+  if (ms == null) return null;
+  const d = new Date(ms);
+  if (Number.isNaN(d.getTime())) return null;
+  return {
+    date: d.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }),
+    time: d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" }),
+  };
 }
 
 /**

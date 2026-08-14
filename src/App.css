@@ -3674,3 +3674,26 @@ kbd {
 .tl-field input[type="range"] { width: 100%; }
 
 .tl-pick-hint { margin-top: 0.9rem; }
+
+/* What the last reorder did — and, when the two signals disagreed, that the
+   dates in the list are not to be believed. */
+.order-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  background: var(--card-2);
+  border: 1px solid var(--line);
+  border-left: 3px solid #e4572e;
+  border-radius: var(--r-md);
+  padding: 0.7rem 0.9rem;
+  margin: 0 0 0.9rem;
+  font-size: 0.88rem;
+  color: var(--ink-2);
+}
+
+.order-note span { flex: 1; }
+
+.lib-when-unknown {
+  color: var(--ink-dim);
+  font-style: italic;
+}

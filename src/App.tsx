@@ -37,6 +37,7 @@ import {
 import { CheckIcon, FilterIcon, SaveIcon, SearchIcon, SortIcon } from "./components/Icons";
 import {
   allowMedia,
+  backfillCaptureTimes,
   formatSpan,
   listLibrary,
   reorderClips,
@@ -47,6 +48,7 @@ import {
   type StorageUsage,
 } from "./lib/library";
 import { listProjects, type ProjectSummary } from "./lib/project";
+import { describeOrdering, sortByShootingOrder } from "./lib/shootingOrder";
 import { invoke } from "@tauri-apps/api/core";
 import { AssemblyPanel } from "./components/AssemblyPanel";
 import {
@@ -195,6 +197,8 @@ function App() {
   const [storage, setStorage] = useState<StorageUsage | null>(null);
   const [userName, setUserName] = useState("");
   const [refreshing, setRefreshing] = useState(false);
+  /** What the last reorder did, and whether the file dates can be believed. */
+  const [orderNote, setOrderNote] = useState<string | null>(null);
 
   /** What this machine has. Null until the first probe returns. */
   const [probe, setProbe] = useState<Probe | null>(null);
@@ -604,6 +608,16 @@ function App() {
         setTimelineDoc({ ...DEFAULT_TIMELINE, ...(last.timelineDoc ?? {}) });
       }
       setDirty(false);
+
+      // Everything imported before recording times existed carries none, which
+      // is the whole existing library. Read them out of the files in the
+      // background so the dates fill in rather than staying blank forever.
+      void backfillCaptureTimes(id).then(async (filled) => {
+        if (filled > 0) {
+          setManifest(await openProject(id));
+          await refreshLibraryRef.current?.();
+        }
+      });
     } catch (err) {
       setError(errorText(err));
     } finally {
@@ -752,9 +766,14 @@ function App() {
         // sorted by — routinely newest first — and the running order decides
         // both what the script narrates and how the cut is assembled, so
         // importing a trip newest-first builds a film that runs backwards.
-        added.sort(byCaptureOrder);
+        //
+        // Sorted as a batch rather than pairwise: whether these files are one
+        // camera's numbered run is a fact about the set, not about any two of
+        // them, and it is the fact that decides which signal to trust.
+        const ordered = sortByShootingOrder(added);
+        setOrderNote(describeOrdering(added));
 
-        const next = { ...current, clips: [...current.clips, ...added] };
+        const next = { ...current, clips: [...current.clips, ...ordered] };
         setManifest(next);
 
         // Written straight away rather than left dirty. Importing already put
@@ -1413,37 +1432,17 @@ function App() {
   }
 
   /**
-   * The order things happened in.
-   *
-   * Capture time where the file carries it, which phones and cameras do; the
-   * filename otherwise, compared so that IMG_9 sorts before IMG_10 rather than
-   * after it, which is what plain string comparison would do to a trip.
-   */
-  function byCaptureOrder(a: ProjectClip, b: ProjectClip): number {
-    if (a.capturedAtMs != null && b.capturedAtMs != null) {
-      if (a.capturedAtMs !== b.capturedAtMs) return a.capturedAtMs - b.capturedAtMs;
-    } else if (a.capturedAtMs != null) {
-      return -1;
-    } else if (b.capturedAtMs != null) {
-      return 1;
-    }
-    return (a.fileName ?? "").localeCompare(b.fileName ?? "", undefined, {
-      numeric: true,
-      sensitivity: "base",
-    });
-  }
-
-  /**
    * Put the whole collection back into the order it was shot in.
    *
-   * Offered rather than done automatically: footage imported before capture
-   * time was read has none, and a collection somebody has already dragged into
-   * shape must not be rearranged behind their back.
+   * Offered rather than done behind the user's back: a collection somebody has
+   * already dragged into shape must not rearrange itself, and the basis used
+   * is reported because when the two signals disagree that is worth saying.
    */
   async function onSortByCapture() {
     if (!manifest) return;
-    const sorted = [...manifest.clips].sort(byCaptureOrder);
+    const sorted = sortByShootingOrder(manifest.clips);
     setManifest({ ...manifest, clips: sorted });
+    setOrderNote(describeOrdering(manifest.clips));
     try {
       await reorderClips(manifest.project.id, sorted.map((c) => c.id));
       setAssembly(null);
@@ -1634,6 +1633,7 @@ function App() {
       segmentCount: c.segments.length,
       segments: c.segments,
       addedAt: manifest.project.createdAt,
+      capturedAtMs: c.capturedAtMs ?? null,
       // Position in the manifest is the running order, exactly as the Rust
       // side derives it — the open collection is served from memory, so the
       // index has to come from the same array either way.
@@ -2477,7 +2477,7 @@ function App() {
                 </select>
               </label>
 
-              {onFootageTab && manifest && manifest.clips.length > 1 && (
+              {onFootageTab && manifest && manifest.clips.length > 2 && (
                 <button
                   type="button"
                   className="lib-tool"
@@ -2534,6 +2534,20 @@ function App() {
                 </button>
               )}
             </header>
+
+            {orderNote && onFootageTab && (
+              <p className="order-note" role="status">
+                <span>{orderNote}</span>
+                <button
+                  type="button"
+                  className="describer-remove"
+                  onClick={() => setOrderNote(null)}
+                  aria-label="Dismiss"
+                >
+                  ✕
+                </button>
+              </p>
+            )}
 
             {view === "project" && (
               <nav className="lib-tabs" aria-label="Stages">

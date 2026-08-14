@@ -8,7 +8,7 @@
 import {
   containerOf,
   formatDuration,
-  formatWhen,
+  formatShotAt,
   tagHue,
   type LibraryClip,
 } from "../lib/library";
@@ -266,14 +266,14 @@ export function VideoTable({
             {reorder && <th className="lib-order" scope="col"><span className="visually-hidden">Order</span>#</th>}
             <th>Video</th>
             <th>Description</th>
-            <th className="lib-when">Added</th>
+            <th className="lib-when">Shot</th>
             <th className="lib-act-cell"><span className="visually-hidden">Remove</span></th>
           </tr>
         </thead>
         <tbody>
           {clips.map((c, i) => {
             const k = key(c);
-            const when = formatWhen(c.addedAt);
+            const shot = formatShotAt(c.capturedAtMs);
             const hue = tagHue(c.projectId);
             const spec = [
               containerOf(c.fileName),
@@ -444,9 +444,20 @@ export function VideoTable({
                   )}
                 </td>
 
+                {/* When it was filmed, not when it was imported. The import
+                    date told you about your own afternoon; this tells you
+                    about the trip, and is what the running order is built on. */}
                 <td className="lib-when">
-                  {when.date}
-                  <span>{when.time}</span>
+                  {shot ? (
+                    <>
+                      {shot.date}
+                      <span>{shot.time}</span>
+                    </>
+                  ) : (
+                    <span className="lib-when-unknown" title="This file carries no recording time">
+                      not recorded
+                    </span>
+                  )}
                 </td>
 
                 {/* Delete only. Play is the thumbnail and describe is the

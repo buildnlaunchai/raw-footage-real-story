@@ -16,6 +16,7 @@
     "src/lib/pipeline.ts",
     "src/lib/readiness.ts",
     "src/lib/intro.ts",
-    "src/lib/timeline.ts"
+    "src/lib/timeline.ts",
+    "src/lib/shootingOrder.ts"
   ]
 }

@@ -394,6 +394,8 @@ pub struct LibraryClip {
     /// When the clip entered the library. Falls back to the project's own time
     /// for clips imported before this was tracked.
     pub added_at: String,
+    /// When the camera recorded it, where the file says. Unix milliseconds.
+    pub captured_at_ms: Option<i64>,
     /// Where this clip sits in its project's running order, from zero.
     ///
     /// The order *is* the position in `project.json`'s `clips` array — there is
@@ -434,6 +436,7 @@ pub fn to_library_clip(p: &ProjectFile, c: &project::ProjectClip, sequence: usiz
         deleted_at: c.deleted_at.clone(),
         description: c.combined_text(),
         segment_count: c.segments.len(),
+        captured_at_ms: c.captured_at_ms,
         sequence,
         segments: c.segments.clone(),
         added_at: p.project.created_at.clone(),
@@ -452,6 +455,53 @@ pub fn library_list(app: AppHandle) -> Result<Vec<LibraryClip>, StoreError> {
         }
     }
     Ok(out)
+}
+
+/// Read the recording time out of every clip that has not got one stored.
+///
+/// Footage imported before this was recorded carries nothing, and the whole
+/// library is that footage. Probing is a few milliseconds per file, so it runs
+/// once, in the background, and writes what it finds back — the alternative is
+/// a date column that stays empty for everything anybody already owns.
+///
+/// Returns how many clips gained a time.
+#[tauri::command]
+pub fn clip_backfill_capture(app: AppHandle, project_id: String) -> Result<usize, StoreError> {
+    let info = crate::ffmpeg::detect(&crate::assembly::settings_for(&app))
+        .map_err(|e| StoreError::new("NO_FFMPEG", e.message))?;
+    let path = project_dir(&app, &project_id)?.join("project.json");
+    let mut manifest = load_from(&path)?;
+
+    let mut filled = 0usize;
+    for clip in manifest.clips.iter_mut() {
+        if clip.captured_at_ms.is_some() && clip.has_audio.is_some() {
+            continue;
+        }
+        let Some(src) = clip.source_path.clone() else { continue };
+        // Relative paths are stored relative to the project folder.
+        let full = if Path::new(&src).is_absolute() {
+            PathBuf::from(&src)
+        } else {
+            project_dir(&app, &project_id)?.join(&src)
+        };
+        if !full.is_file() {
+            continue;
+        }
+        if let Ok(media) = crate::ffmpeg::probe_media(&info.ffprobe, &full) {
+            if clip.captured_at_ms.is_none() && media.created_at_ms.is_some() {
+                clip.captured_at_ms = media.created_at_ms;
+                filled += 1;
+            }
+            if clip.has_audio.is_none() {
+                clip.has_audio = Some(media.has_audio);
+            }
+        }
+    }
+
+    if filled > 0 || manifest.clips.iter().any(|c| c.has_audio.is_some()) {
+        save_to(&path, &manifest)?;
+    }
+    Ok(filled)
 }
 
 /// Put a project's clips into the given order.
