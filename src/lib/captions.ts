@@ -68,15 +68,29 @@ export const CAPTION_FACES = [
 export function loadCaptionFont(family: string, urls: string[]): Promise<void> {
   if (!fontReady) {
     fontReady = (async () => {
+      let loaded = 0;
       for (const url of urls) {
         try {
           const face = new FontFace(family, `url("${url}")`);
           await face.load();
           document.fonts.add(face);
-        } catch {
+          loaded++;
+        } catch (err) {
           // One missing face is not worth failing the rest for; the remaining
           // ones and the system stack still cover most text.
+          console.warn(`caption font failed to load: ${url}`, err);
         }
+      }
+      // Said out loud rather than swallowed. This has already gone wrong once:
+      // the asset protocol's scope did not include the app's own resources, so
+      // every face was refused and captions silently fell back to the system
+      // stack — correct on a Mac, boxes on a machine with no Bengali font, and
+      // invisible either way.
+      if (loaded === 0 && urls.length > 0) {
+        console.warn(
+          "no bundled caption font loaded — captions will use whatever fonts " +
+            "this machine has, which may not cover the script",
+        );
       }
     })();
   }
