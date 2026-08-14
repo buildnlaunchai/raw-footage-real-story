@@ -771,6 +771,11 @@ fn boundary_fades(settings: &RenderSettings, items: &[RenderItem]) -> Vec<u32> {
         .collect()
 }
 
+#[cfg(test)]
+pub fn boundary_fades_for_test(settings: &RenderSettings, items: &[RenderItem]) -> Vec<u32> {
+    boundary_fades(settings, items)
+}
+
 /// Assemble the rough cut in a single pass.
 ///
 /// Each input is normalised inline — scaled and letterboxed rather than

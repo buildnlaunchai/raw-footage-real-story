@@ -1387,3 +1387,148 @@ fn a_transition_can_be_set_on_one_boundary_alone() {
     assert_ne!(nearest(mid), nearest(before), "the second boundary should blend");
     assert!(mid.1 > 20 && mid.2 > 20, "expected a green/blue blend, saw {mid:?}");
 }
+
+/// Boundary numbering survives an opening montage.
+///
+/// The montage becomes item zero, so every boundary the timeline named moves
+/// along one. Getting this wrong puts a dissolve one cut early, and only in
+/// films that happen to have an opening — which is exactly the kind of bug
+/// that ships.
+#[test]
+fn timeline_transitions_stay_on_their_own_boundaries_behind_an_intro() {
+    use crate::ffmpeg::boundary_fades_for_test as fades;
+
+    let items: Vec<ffmpeg::RenderItem> = (0..4)
+        .map(|i| ffmpeg::RenderItem {
+            video: PathBuf::from("/x.mp4"),
+            audio: PathBuf::from("/x.wav"),
+            item: timeline::TimelineItem {
+                clip_id: format!("c{i}"),
+                segment_index: 0,
+                source_in_ms: 0,
+                source_out_ms: 6_000,
+                timeline_start_ms: i as u64 * 6_000,
+                timeline_duration_ms: 6_000,
+                stretch: 1.0,
+                fit: timeline::Fit::Exact,
+            },
+            is_hdr: false,
+            has_audio: false,
+        })
+        .collect();
+
+    // Without an opening: the timeline's list maps straight onto boundaries.
+    let plain = RenderSettings { transitions: vec![0, 500, 0], ..Default::default() };
+    assert_eq!(fades(&plain, &items), vec![0, 500, 0]);
+
+    // With one, the command prepends a placeholder for the montage's own
+    // boundary, which `intro_fade_ms` governs instead.
+    let with_intro = RenderSettings {
+        transitions: vec![0, 0, 500, 0],
+        intro_fade_ms: 600,
+        ..Default::default()
+    };
+    assert_eq!(
+        fades(&with_intro, &items),
+        vec![600, 0, 500],
+        "the dissolve must stay between the same two shots",
+    );
+}
+
+/// Everything the timeline can do, in one render.
+///
+/// The individual paths are covered above. This is the one that catches them
+/// interfering: a replayed shot whose own audio must replay with it, under a
+/// dissolve, under a music bed, with captions burned over the result.
+#[test]
+fn a_fully_edited_timeline_renders() {
+    let Some(fx) = Fixture::new("tl-all") else {
+        eprintln!("ffmpeg not available; skipping");
+        return;
+    };
+    let info = ffmpeg::detect(&FfmpegSettings::default()).expect("detect");
+    let settings_base = RenderSettings { width: 320, height: 180, fps: 30, ..Default::default() };
+
+    // Shot one is far too short for its line, so it caps and replays — with
+    // its own sound, which has to replay too or the picture loops over silence.
+    let short = clip_with_tone(&fx, "short", "red", 2_000);
+    let long = clip_with_tone(&fx, "long", "green", 12_000);
+    let narration = fx.dir.join("nar.wav");
+    tts::write_wav(&narration, &vec![0f32; 6 * 24_000]).expect("wav");
+
+    let items = timeline::plan(
+        &[
+            timeline::ClipInput::whole("a", Some(2_000)),
+            timeline::ClipInput::whole("b", Some(12_000)),
+        ],
+        &[
+            timeline::LineInput::whole("a", 6_000),
+            timeline::LineInput::whole("b", 6_000),
+        ],
+    );
+    assert_eq!(items[0].fit, timeline::Fit::Replayed, "the fixture must exercise the cap");
+
+    let render_items = vec![
+        ffmpeg::RenderItem {
+            video: short,
+            audio: narration.clone(),
+            item: items[0].clone(),
+            is_hdr: false,
+            has_audio: true,
+        },
+        ffmpeg::RenderItem {
+            video: long,
+            audio: narration.clone(),
+            item: items[1].clone(),
+            is_hdr: false,
+            has_audio: true,
+        },
+    ];
+
+    // A caption over the whole thing.
+    let cues = crate::subtitles::cues(&items, |_| Some("বন্দরটা থেমে গেছে।".into()));
+    let srt = fx.dir.join("cut-all.srt");
+    std::fs::write(&srt, crate::subtitles::to_srt(&cues, Some(crate::subtitles::WRAP_CHARS)))
+        .expect("srt");
+
+    // And a music bed, made here rather than depending on the bundled ones.
+    let music = fx.dir.join("bed.m4a");
+    let status = std::process::Command::new(&fx.ffmpeg)
+        .args(["-y", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=220:duration=20"])
+        .arg(&music)
+        .status()
+        .expect("bed");
+    assert!(status.success());
+
+    let settings = RenderSettings {
+        transitions: vec![500],
+        source_audio_gain: 0.3,
+        music_path: Some(music.to_string_lossy().to_string()),
+        music_gain: 0.2,
+        subtitle_path: info.caps.subtitles.then(|| srt.to_string_lossy().to_string()),
+        ..settings_base
+    };
+    let out = fx.dir.join("everything.mp4");
+    ffmpeg::render_rough_cut(&fx.ffmpeg, &render_items, &settings, &info.caps, &out)
+        .expect("every timeline feature at once");
+
+    // Both slots, less the one dissolve.
+    let want = items[0].timeline_duration_ms + items[1].timeline_duration_ms - 500;
+    let total = ffmpeg::probe_duration_ms(&fx.ffprobe, &out).expect("probe");
+    println!("\n  total {total}ms (want {want}ms)");
+    assert!(total.abs_diff(want) < 250, "wanted {want}ms, got {total}ms");
+
+    // There is sound, and it is not just the music: the clips' tone is in it.
+    let db = ffmpeg::mean_volume_db(&fx.ffmpeg, &out).expect("volume");
+    println!("  mean volume {db:.1}dB");
+    assert!(db > -40.0, "the mix came out near-silent at {db}dB");
+
+    // Picture throughout, including the replayed stretch of shot one.
+    for at in [300u64, 3_000, 5_500, 8_000] {
+        let rgb = ffmpeg::frame_rgb(&fx.ffmpeg, &out, at).expect("frame");
+        assert!(
+            rgb.0 as u32 + rgb.1 as u32 + rgb.2 as u32 > 40,
+            "black frame at {at}ms: {rgb:?}",
+        );
+    }
+}

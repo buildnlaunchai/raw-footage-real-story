@@ -618,6 +618,13 @@ pub async fn assembly_render(
                 // cannot be swallowed whole by the dissolve into it.
                 settings.intro_fade_ms = ffmpeg::clamp_crossfade(spec.fade_ms, &render_items);
                 items = timeline::with_intro(&items, intro_ms, settings.intro_fade_ms);
+                // The montage becomes item zero, so every boundary the
+                // timeline named has moved along one. Without this shift a
+                // dissolve set between shots four and five lands between three
+                // and four, and only in films that happen to have an opening.
+                if !settings.transitions.is_empty() {
+                    settings.transitions.insert(0, 0);
+                }
             }
             Err(e) => intro_error = Some(e.message.clone()),
         }
