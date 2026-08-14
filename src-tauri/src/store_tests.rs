@@ -618,3 +618,63 @@ fn an_empty_order_leaves_the_film_alone() {
     let out = crate::store::reordered(clips, &[]);
     assert_eq!(ids(&out), ["a", "b", "c"]);
 }
+
+/// Everything the editor stores survives the trip through Rust and back.
+///
+/// The bug this exists for: `VideoProject` had no field for the timeline's
+/// edits, and serde drops what it does not know. So every reorder, trim,
+/// footage swap, per-shot sound setting, music choice and caption style was
+/// discarded the moment the project was saved — silently, with the timeline
+/// reopening empty and no error anywhere.
+#[test]
+fn the_timelines_edits_survive_a_save() {
+    let raw = serde_json::json!({
+        "id": "video-1",
+        "title": "Thailand Day 1",
+        "createdAt": NOW,
+        "updatedAt": NOW,
+        "selection": [],
+        "script": null,
+        "audio": null,
+        "timeline": [],
+        "language": "bn",
+        "timelineDoc": {
+            "order": ["c2#0", "c0#0"],
+            "edits": { "c0#0": { "enabled": false, "sound": { "enabled": true, "gain": 0.4 } } },
+            "originalAudio": { "enabled": true, "gain": 0.25 },
+            "music": { "enabled": true, "gain": 0.1, "path": "/m.wav", "bedId": null, "label": "m.wav" },
+            "subtitles": true,
+            "subtitleStyle": { "size": 0.05, "bottom": 0.12, "colour": "#ffe14d", "boxBehind": true }
+        },
+        "render": null,
+        "pronunciations": {}
+    });
+
+    let video: VideoProject = serde_json::from_value(raw.clone()).expect("parses");
+    assert_eq!(video.language.as_deref(), Some("bn"), "the script's language is kept");
+    let doc = video.timeline_doc.clone().expect("the edits are kept");
+
+    // And back out again, unchanged — a round trip is what a save actually is.
+    let out = serde_json::to_value(&video).expect("serialises");
+    assert_eq!(out["timelineDoc"], raw["timelineDoc"], "the edits came back different");
+    assert_eq!(out["language"], raw["language"]);
+
+    // Spot-check the parts a user would notice losing.
+    assert_eq!(doc["subtitleStyle"]["colour"], "#ffe14d");
+    assert_eq!(doc["order"][0], "c2#0");
+    assert_eq!(doc["edits"]["c0#0"]["sound"]["gain"], 0.4);
+    assert_eq!(doc["music"]["path"], "/m.wav");
+}
+
+/// A project saved before any of this existed still opens.
+#[test]
+fn a_video_with_no_timeline_edits_still_loads() {
+    let raw = serde_json::json!({
+        "id": "video-1", "title": "Old", "createdAt": NOW, "updatedAt": NOW,
+        "selection": [], "script": null, "audio": null, "timeline": [],
+        "render": null, "pronunciations": {}
+    });
+    let video: VideoProject = serde_json::from_value(raw).expect("older projects still parse");
+    assert!(video.timeline_doc.is_none());
+    assert!(video.language.is_none());
+}

@@ -216,6 +216,20 @@ pub struct VideoProject {
     pub audio: Option<AudioSection>,
     #[serde(default)]
     pub timeline: Vec<TimelineItem>,
+    /// The timeline's edits: what was reordered, trimmed, swapped, silenced or
+    /// dropped by hand, plus the audio tracks and how captions look.
+    ///
+    /// Held opaquely because the shape belongs to the editor and this side has
+    /// no opinion about it. It is *typed* here rather than left off, though,
+    /// because serde drops fields it does not know: without this every edit
+    /// somebody made was discarded the moment the project was saved, silently,
+    /// and the timeline reopened empty.
+    #[serde(default)]
+    pub timeline_doc: Option<serde_json::Value>,
+    /// The language the script was written in. Decides how captions are
+    /// wrapped and which font can draw them, so it has to survive a restart.
+    #[serde(default)]
+    pub language: Option<String>,
     pub render: Option<RenderSection>,
     /// Word -> phoneme or replacement text, for words the phonemiser cannot
     /// pronounce. Lives per video because a correction is a creative choice
@@ -235,6 +249,8 @@ impl VideoProject {
             script: None,
             audio: None,
             timeline: Vec::new(),
+            timeline_doc: None,
+            language: None,
             render: None,
             pronunciations: BTreeMap::new(),
         }

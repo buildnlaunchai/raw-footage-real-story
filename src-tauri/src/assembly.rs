@@ -717,7 +717,17 @@ pub async fn assembly_render(
     // the cut's own rather than an estimate of it, and written whatever the
     // toggle says. Burning them in is the part that needs libass.
     let subs_path = dir.join("render").join(format!("cut-{stem}.srt"));
-    let lang = language.unwrap_or_else(|| "en".into());
+    let told = language.unwrap_or_else(|| "en".into());
+    // What the captions are actually written in, read from the words rather
+    // than from the setting. The setting is separate state and can be wrong —
+    // it was, because it did not survive a restart, so a Bengali script came
+    // back as English and every caption was drawn in a Latin font that cannot
+    // place a Bengali vowel sign.
+    let sample: String = voiced.iter().map(|v| v.text.as_str()).collect::<Vec<_>>().join(" ");
+    let detected = crate::subtitles::dominant_script(&sample);
+    let lang = if detected == "en" { told.as_str() } else { detected };
+    let lang = lang.to_string();
+
     let cues = crate::subtitles::cues_for(&lang, &items, |it| {
         if it.clip_id == timeline::INTRO_CLIP_ID {
             intro.as_ref().and_then(|i| i.text.clone())

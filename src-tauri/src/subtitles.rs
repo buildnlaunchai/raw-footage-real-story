@@ -149,6 +149,35 @@ pub fn wrap_chars(language: &str) -> usize {
 /// The Latin default, kept for callers with no language to hand.
 pub const WRAP_CHARS: usize = 42;
 
+/// Which script a caption is actually written in.
+///
+/// Read from the text rather than taken from the language setting. The setting
+/// is a separate piece of state that can be wrong — it was: it did not survive
+/// a restart, so a Bengali script reopened as English and every caption was
+/// drawn in a Latin font that cannot place a Bengali vowel sign. The text
+/// cannot be wrong about what it is.
+pub fn dominant_script(text: &str) -> &'static str {
+    let mut counts = [0usize; 8];
+    for c in text.chars() {
+        let i = match c as u32 {
+            0x0980..=0x09FF => 0, // Bengali
+            0x0900..=0x097F => 1, // Devanagari
+            0x0600..=0x06FF | 0x0750..=0x077F => 2, // Arabic
+            0x0E00..=0x0E7F => 3, // Thai
+            0x3040..=0x30FF => 4, // Hiragana and Katakana
+            0xAC00..=0xD7AF | 0x1100..=0x11FF => 5, // Hangul
+            0x4E00..=0x9FFF | 0x3400..=0x4DBF => 6, // Han
+            _ => continue,
+        };
+        counts[i] += 1;
+    }
+    let (best, n) = counts.iter().enumerate().max_by_key(|(_, n)| **n).unwrap();
+    if *n == 0 {
+        return "en";
+    }
+    ["bn", "hi", "ar", "th", "ja", "ko", "zh", "en"][best]
+}
+
 /// A font that can actually draw this language.
 ///
 /// libass defaults to Arial, which has not a single Bengali glyph. What follows
@@ -393,6 +422,31 @@ mod tests {
         assert_eq!(font_for("bn", only_arial), "Arial");
         let nothing = |_: &str| false;
         assert_eq!(font_for("bn", nothing), "Arial");
+    }
+
+    #[test]
+    fn the_script_is_read_from_the_words_themselves() {
+        // The setting is separate state and was wrong: it did not survive a
+        // restart, so a Bengali script reopened as English and every caption
+        // was drawn in a Latin font. The text cannot be wrong about what it is.
+        assert_eq!(dominant_script("ক্রেডিট কার্ড থাকলে এই লাউঞ্জ বিনা খরচে"), "bn");
+        assert_eq!(dominant_script("The harbour did not so much freeze as stop."), "en");
+        assert_eq!(dominant_script("港口并没有结冰"), "zh");
+        assert_eq!(dominant_script("ここは空港のラウンジです"), "ja");
+        assert_eq!(dominant_script("ท่าเรือไม่ได้แข็งตัว"), "th");
+        assert_eq!(dominant_script("المطار"), "ar");
+    }
+
+    #[test]
+    fn a_few_latin_words_do_not_make_a_bengali_line_english() {
+        // Place names, brands and numbers turn up inside every script.
+        assert_eq!(dominant_script("এটা UCB Imperial Lounge, ঢাকা বিমানবন্দরে"), "bn");
+    }
+
+    #[test]
+    fn text_with_no_letters_at_all_falls_back_rather_than_panicking() {
+        assert_eq!(dominant_script(""), "en");
+        assert_eq!(dominant_script("123 ... !!!"), "en");
     }
 
     #[test]

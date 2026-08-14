@@ -613,6 +613,9 @@ function App() {
           setHook(last.script.hook ?? null);
         }
         setTimelineDoc({ ...DEFAULT_TIMELINE, ...(last.timelineDoc ?? {}) });
+        // The script's language decides how captions wrap and which font can
+        // draw them, so a Bengali project must not reopen as English.
+        if (last.language) setLanguage(last.language);
       }
       setDirty(false);
 
@@ -675,6 +678,7 @@ function App() {
         // narration every time, so storing them would only create a second
         // copy free to disagree with the first.
         timelineDoc,
+        language,
         render: existing?.render ?? null,
         pronunciations,
       };
@@ -685,7 +689,7 @@ function App() {
           : [...m.videos, video],
       };
     },
-    [title, lines, wordCount, hook, voiced, voice, pronunciations, timelineDoc],
+    [title, lines, wordCount, hook, voiced, voice, pronunciations, timelineDoc, language],
   );
 
   const onSave = useCallback(async () => {

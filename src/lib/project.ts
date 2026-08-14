@@ -105,6 +105,15 @@ export interface VideoProject {
    * free to disagree with the first.
    */
   timelineDoc?: unknown;
+  /**
+   * The language the script was written in.
+   *
+   * Kept because it decides how captions wrap and which font can draw them,
+   * and it did not survive a restart: a Bengali project reopened as English
+   * and every caption came out in a Latin font that cannot place a Bengali
+   * vowel sign.
+   */
+  language?: string | null;
   render: unknown | null;
   pronunciations: Record<string, string>;
 }
