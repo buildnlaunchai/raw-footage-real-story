@@ -96,6 +96,8 @@ import { TimelinePanel } from "./components/TimelinePanel";
 import {
   applyEdits,
   DEFAULT_TIMELINE,
+  soundGains,
+  toAssColour,
   transitionsFor,
   type PlannedShot,
   type TimelineDoc,
@@ -1315,6 +1317,15 @@ function App() {
         sourceAudioGain: timelineDoc.originalAudio.enabled
           ? timelineDoc.originalAudio.gain
           : 0,
+        soundGains: soundGains(shots, timelineDoc.originalAudio),
+        language,
+        subtitleStyle: {
+          size: timelineDoc.subtitleStyle.size,
+          bottom: timelineDoc.subtitleStyle.bottom,
+          colour: toAssColour(timelineDoc.subtitleStyle.colour),
+          boxBehind: timelineDoc.subtitleStyle.boxBehind,
+          font: "",
+        },
         intro: introSpec,
         subtitles: timelineDoc.subtitles,
         onProgress: setRenderProgress,
@@ -2251,6 +2262,32 @@ function App() {
 
             {ffmpeg && (
               <>
+              {/* The opening lives here rather than in Settings: it is a
+                  decision about this film, made while looking at it, not a
+                  preference that outlives the project. */}
+              <div className="panel tl-opening-row">
+                <label className="tl-track-toggle">
+                  <input
+                    type="checkbox"
+                    checked={introEnabled}
+                    onChange={(e) => {
+                      const on = e.currentTarget.checked;
+                      setIntroEnabled(on);
+                      void storeIntroEnabled(on);
+                      setAssembly(null);
+                    }}
+                  />
+                  <strong>Opening</strong>
+                </label>
+                <span className="hint tl-track-hint">
+                  {hook
+                    ? introPending
+                      ? `“${hook.slice(0, 60)}${hook.length > 60 ? "…" : ""}” — not recorded yet.`
+                      : `“${hook.slice(0, 60)}${hook.length > 60 ? "…" : ""}” over ${introShots.length} shot${introShots.length === 1 ? "" : "s"}.`
+                    : "One spoken line over a quick montage, before the film starts. Written with the script."}
+                </span>
+              </div>
+
               {planned.length > 0 && (
                 <TimelinePanel
                   planned={planned}
@@ -2264,6 +2301,7 @@ function App() {
                   onRender={() => void onRender()}
                   onPickMusic={() => void onPickMusic()}
                   beds={MUSIC_BEDS}
+                  subtitles={timelineDoc.subtitles ? timelineDoc.subtitleStyle : null}
                 />
               )}
 
@@ -2384,14 +2422,7 @@ function App() {
               <h1>Settings</h1>
               <span className="lib-head-count">how the script is written</span>
             </header>
-            <SettingsPanel
-              language={language}
-              introEnabled={introEnabled}
-              onIntroEnabledChange={(on) => {
-                setIntroEnabled(on);
-                void storeIntroEnabled(on);
-              }}
-            />
+            <SettingsPanel language={language} />
           </>
         ) : view === "home" ? (
           // Left empty on purpose, pending a decision about what belongs here.

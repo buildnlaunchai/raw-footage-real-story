@@ -11,7 +11,7 @@
  * narration and cannot be dragged, because stretching a voice to fit a picture
  * is the one thing this app will not do.
  */
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   applyEdits,
   maxTransitionMs,
@@ -21,6 +21,8 @@ import {
   withEdit,
   hasMusic,
   withOrder,
+  SUBTITLE_COLOURS,
+  type SubtitleStyle,
   type PlannedShot,
   type Shot,
   type TimelineDoc,
@@ -41,6 +43,8 @@ interface Props {
   onPickMusic: () => void;
   /** The bundled beds, offered beside "choose a file". */
   beds: { id: string; label: string; hint: string }[];
+  /** How captions will look, so the viewer can show them before a render. */
+  subtitles: SubtitleStyle | null;
   children?: React.ReactNode;
 }
 
@@ -62,9 +66,21 @@ export function TimelinePanel({
   onRender,
   onPickMusic,
   beds,
+  subtitles,
   children,
 }: Props) {
   const [zoom, setZoom] = useState(1);
+  /**
+   * Playback runs off the shot list rather than a rendered file, so it works
+   * before anything has been assembled — which is when the edits are being
+   * made. One <video> is moved from clip to clip and seeked, and the narration
+   * plays alongside it from its own element.
+   */
+  const [playing, setPlaying] = useState(false);
+  const [head, setHead] = useState(0);
+  const video = useRef<HTMLVideoElement | null>(null);
+  const voice = useRef<HTMLAudioElement | null>(null);
+  const startedAt = useRef<{ wall: number; head: number } | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   // `insertAt` is a gap index, not a shot: "before the shot at this index".
   // Dropping onto a shot cannot distinguish left-of from right-of, which is
@@ -80,6 +96,8 @@ export function TimelinePanel({
   const width = Math.max(320, (total / 1000) * pps);
   const byId = new Map(clips.map((c) => [c.id, c]));
   const current = selected ? shots.find((s) => s.key === selected) : undefined;
+  /** The shot under the playhead, for the caption preview. */
+  const underHead = at(head)?.shot;
 
   function edit(key: string, patch: Parameters<typeof withEdit>[2]) {
     onChange(withEdit(doc, key, patch));
@@ -102,6 +120,72 @@ export function TimelinePanel({
   function destination(fromKey: string, insertAt: number): number {
     const from = live.findIndex((s) => s.key === fromKey);
     return (insertAt > from ? insertAt - 1 : insertAt) + 1;
+  }
+
+  /** Which shot is on screen at a given moment, and how far into it. */
+  function at(ms: number): { shot: Shot; into: number } | null {
+    for (const s of live) {
+      if (ms >= s.startMs && ms < s.startMs + s.durationMs) {
+        return { shot: s, into: ms - s.startMs };
+      }
+    }
+    return null;
+  }
+
+  // The clock. One rAF loop advances the playhead from wall time rather than
+  // from the video element, because the video is swapped at every cut and its
+  // own currentTime restarts each time.
+  useEffect(() => {
+    if (!playing) return;
+    let frame = 0;
+    const tick = () => {
+      const s = startedAt.current;
+      if (s) {
+        const now = s.head + (performance.now() - s.wall);
+        if (now >= total) {
+          setPlaying(false);
+          setHead(total);
+        } else {
+          setHead(now);
+        }
+      }
+      frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, [playing, total]);
+
+  // Keep the picture and the voice pointed at wherever the playhead is.
+  useEffect(() => {
+    const cur = at(head);
+    const v = video.current;
+    if (!v || !cur) return;
+    const clip = byId.get(cur.shot.sourceClipId);
+    const src = clip?.sourcePath ? audioUrl(clip.sourcePath) : "";
+    if (src && !v.src.endsWith(encodeURI(clip!.sourcePath!).split("/").pop() ?? "")) {
+      v.src = src;
+    }
+    // Where in the source file this moment falls. A slowed shot advances
+    // through its source more slowly than the playhead advances through the
+    // film, which is what the stretch accounts for.
+    const want = (cur.shot.sourceInMs + cur.into) / 1000;
+    if (Math.abs(v.currentTime - want) > 0.35) v.currentTime = want;
+    if (playing && v.paused) void v.play().catch(() => setPlaying(false));
+    if (!playing && !v.paused) v.pause();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [head, playing]);
+
+  function toggle() {
+    if (playing) {
+      setPlaying(false);
+      startedAt.current = null;
+      video.current?.pause();
+      voice.current?.pause();
+    } else {
+      startedAt.current = { wall: performance.now(), head: head >= total ? 0 : head };
+      if (head >= total) setHead(0);
+      setPlaying(true);
+    }
   }
 
   const ticks: number[] = [];
@@ -138,6 +222,63 @@ export function TimelinePanel({
 
       {children}
 
+      {/* A viewer that plays the cut as it stands, before anything has been
+          rendered — which is exactly when the edits are being made. Captions
+          are drawn over it in HTML at the size and height the burn-in will
+          use, so their placement can be judged before committing to a render. */}
+      <div className="tl-viewer">
+        <div className="tl-stage">
+          <video ref={video} className="tl-video" playsInline />
+          {subtitles && underHead && (
+            <div
+              className="tl-caption"
+              style={{
+                bottom: `${subtitles.bottom * 100}%`,
+                fontSize: `${subtitles.size * 100}cqh`,
+                color: subtitles.colour,
+                background: subtitles.boxBehind ? "rgba(0,0,0,0.6)" : undefined,
+                padding: subtitles.boxBehind ? "0.15em 0.5em" : undefined,
+              }}
+            >
+              {underHead.text}
+            </div>
+          )}
+        </div>
+        <div className="tl-transport">
+          <button type="button" className="primary-button small" onClick={toggle}>
+            {playing ? "❚❚ Pause" : "▶ Play"}
+          </button>
+          <button
+            type="button"
+            className="ghost-button small"
+            onClick={() => {
+              setPlaying(false);
+              startedAt.current = null;
+              setHead(0);
+            }}
+            title="Back to the start"
+          >
+            ↺
+          </button>
+          <input
+            className="tl-seek"
+            type="range"
+            min={0}
+            max={Math.max(1, total)}
+            value={Math.min(head, total)}
+            aria-label="Playhead"
+            onChange={(e) => {
+              const v = Number(e.currentTarget.value);
+              setHead(v);
+              startedAt.current = { wall: performance.now(), head: v };
+            }}
+          />
+          <span className="tl-clock">
+            {clock(head)} / {clock(total)}
+          </span>
+        </div>
+      </div>
+
       {drag && (
         <div className="tl-drag-note" role="status">
           Moving shot {live.findIndex((s) => s.key === drag.key) + 1} → position{" "}
@@ -147,6 +288,14 @@ export function TimelinePanel({
 
       <div className="tl-scroll">
         <div className="tl-inner" style={{ width }}>
+          {/* Where the viewer above is, drawn across every track. */}
+          {total > 0 && (
+            <span
+              className="tl-head"
+              style={{ left: `calc(6.5rem + ${(head / 1000) * pps}px)` }}
+              aria-hidden="true"
+            />
+          )}
           {/* ── ruler ───────────────────────────────────────────────────── */}
           <div className="tl-ruler" aria-hidden="true">
             {ticks.map((t) => (
@@ -341,10 +490,81 @@ export function TimelinePanel({
             />
             <strong>Subtitles</strong>
           </label>
-          <span className="hint">
-            Drawn into the picture, in the language the script was written in. A .srt
-            is saved beside the video either way.
-          </span>
+
+          {doc.subtitles ? (
+            <>
+              <label className="tl-sub-field">
+                Size
+                <input
+                  type="range"
+                  min={18}
+                  max={60}
+                  value={Math.round(1 / doc.subtitleStyle.size)}
+                  // Inverted: the slider reads "bigger to the right", and the
+                  // stored value is a divisor of the frame height.
+                  onChange={(e) =>
+                    onChange({
+                      ...doc,
+                      subtitleStyle: { ...doc.subtitleStyle, size: 1 / (78 - Number(e.currentTarget.value)) },
+                    })
+                  }
+                />
+              </label>
+              <label className="tl-sub-field">
+                Height
+                <input
+                  type="range"
+                  min={2}
+                  max={30}
+                  value={Math.round(doc.subtitleStyle.bottom * 100)}
+                  onChange={(e) =>
+                    onChange({
+                      ...doc,
+                      subtitleStyle: {
+                        ...doc.subtitleStyle,
+                        bottom: Number(e.currentTarget.value) / 100,
+                      },
+                    })
+                  }
+                />
+              </label>
+              {SUBTITLE_COLOURS.map((c) => (
+                <button
+                  key={c.value}
+                  type="button"
+                  className={`tl-swatch${doc.subtitleStyle.colour === c.value ? " is-selected" : ""}`}
+                  style={{ background: c.value }}
+                  title={c.label}
+                  aria-label={c.label}
+                  onClick={() =>
+                    onChange({ ...doc, subtitleStyle: { ...doc.subtitleStyle, colour: c.value } })
+                  }
+                />
+              ))}
+              <label className="tl-track-toggle">
+                <input
+                  type="checkbox"
+                  checked={doc.subtitleStyle.boxBehind}
+                  onChange={(e) =>
+                    onChange({
+                      ...doc,
+                      subtitleStyle: { ...doc.subtitleStyle, boxBehind: e.currentTarget.checked },
+                    })
+                  }
+                />
+                Plate
+              </label>
+              <span className="hint tl-track-hint">
+                Shown on the viewer above exactly where it will be burned in. A .srt is
+                saved beside the video either way.
+              </span>
+            </>
+          ) : (
+            <span className="hint tl-track-hint">
+              Drawn into the picture, in the language the script was written in. A .srt
+              is saved beside the video either way.
+            </span>
+          )}
         </div>
       </div>
 
@@ -354,6 +574,7 @@ export function TimelinePanel({
           shot={current}
           shots={shots}
           clips={clips}
+          trackGain={doc.originalAudio.gain}
           onEdit={edit}
           onClose={() => setSelected(null)}
         />
@@ -414,12 +635,14 @@ function ShotEditor({
   shot,
   shots,
   clips,
+  trackGain,
   onEdit,
   onClose,
 }: {
   shot: Shot;
   shots: Shot[];
   clips: ProjectClip[];
+  trackGain: number;
   onEdit: (key: string, patch: Parameters<typeof withEdit>[2]) => void;
   onClose: () => void;
 }) {
@@ -504,6 +727,54 @@ function ShotEditor({
               : "Zero is a hard cut. A dissolve shortens the film by its own length."}
           </span>
         </label>
+
+        {/* This shot's own sound. Per shot because "keep the sound" is
+            rarely a decision about a film — it is a decision about the two
+            clips with something worth hearing in them. */}
+        <div className="tl-field">
+          <span className="field-label">
+            This clip's sound
+            {shot.sound ? "" : " · following the track"}
+          </span>
+          <div className="voiced-controls">
+            <button
+              type="button"
+              className={`style-chip small${shot.sound?.enabled === true ? " is-selected" : ""}`}
+              onClick={() => onEdit(shot.key, { sound: { enabled: true, gain: shot.sound?.gain ?? undefined } })}
+            >
+              On
+            </button>
+            <button
+              type="button"
+              className={`style-chip small${shot.sound?.enabled === false ? " is-selected" : ""}`}
+              onClick={() => onEdit(shot.key, { sound: { enabled: false } })}
+            >
+              Off
+            </button>
+            <button
+              type="button"
+              className={`style-chip small${shot.sound === null ? " is-selected" : ""}`}
+              onClick={() => onEdit(shot.key, { sound: undefined })}
+              title="Use whatever the Clip sound track is set to"
+            >
+              Follow track
+            </button>
+          </div>
+          {shot.sound?.enabled && (
+            <input
+              type="range"
+              min={0}
+              max={100}
+              value={Math.round((shot.sound.gain ?? trackGain) * 100)}
+              aria-label="This clip's sound level"
+              onChange={(e) =>
+                onEdit(shot.key, {
+                  sound: { enabled: true, gain: Number(e.currentTarget.value) / 100 },
+                })
+              }
+            />
+          )}
+        </div>
 
         <div className="tl-field">
           <span className="field-label">In the film</span>

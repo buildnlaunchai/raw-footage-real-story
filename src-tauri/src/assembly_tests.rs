@@ -102,7 +102,7 @@ fn assembles_a_rough_cut_with_correct_order_and_timing() {
         let samples = vec![0f32; (lines[i].duration_ms as usize * 24_000) / 1000];
         tts::write_wav(&audio, &samples).expect("silence wav");
 
-        render_items.push(RenderItem { video, audio, item: item.clone(), is_hdr: false, has_audio: false });
+        render_items.push(RenderItem { video, audio, item: item.clone(), is_hdr: false, has_audio: false, sound_gain: None });
     }
 
     let out = fx.dir.join("rough-cut.mp4");
@@ -190,7 +190,7 @@ fn rotation_survives_filter_complex() {
     let settings = RenderSettings { width: 1920, height: 1080, fps: 30, ..Default::default() };
     ffmpeg::render_rough_cut(
         &fx.ffmpeg,
-        &[RenderItem { video: rotated, audio, item: items[0].clone(), is_hdr: false, has_audio: false }],
+        &[RenderItem { video: rotated, audio, item: items[0].clone(), is_hdr: false, has_audio: false, sound_gain: None }],
         &settings,
         &ffmpeg::FfmpegCaps::default(),
         &out,
@@ -355,6 +355,7 @@ fn handles_awkward_sources_and_normalises_them() {
             item: item.clone(),
             is_hdr: false,
             has_audio: false,
+            sound_gain: None,
         });
     }
 
@@ -527,6 +528,7 @@ fn one_clip_used_twice_shows_two_different_moments() {
             item: item.clone(),
             is_hdr: false,
             has_audio: false,
+            sound_gain: None,
         });
     }
 
@@ -644,7 +646,7 @@ fn output_has_the_expected_streams_and_format() {
     let out = fx.dir.join("out.mp4");
     ffmpeg::render_rough_cut(
         &fx.ffmpeg,
-        &[RenderItem { video, audio, item: items[0].clone(), is_hdr: false, has_audio: false }],
+        &[RenderItem { video, audio, item: items[0].clone(), is_hdr: false, has_audio: false, sound_gain: None }],
         &settings,
         &ffmpeg::FfmpegCaps::default(),
         &out,
@@ -693,7 +695,7 @@ fn crossfade_shortens_the_cut_and_still_shows_every_clip() {
             .expect("placeholder");
         let audio = fx.dir.join(format!("a{i}.wav"));
         tts::write_wav(&audio, &vec![0f32; 1_800 * 24]).expect("wav");
-        render_items.push(RenderItem { video, audio, item: item.clone(), is_hdr: false, has_audio: false });
+        render_items.push(RenderItem { video, audio, item: item.clone(), is_hdr: false, has_audio: false, sound_gain: None });
     }
 
     let plain = timeline::total_duration_ms(&items);
@@ -755,6 +757,7 @@ fn crossfade_is_capped_so_short_clips_still_resolve() {
             },
             is_hdr: false,
             has_audio: false,
+            sound_gain: None,
         })
         .collect();
 
@@ -795,7 +798,7 @@ fn music_bed_is_mixed_under_the_narration() {
         // Silent narration: anything audible in the output must be the bed.
         let audio = fx.dir.join(format!("a{i}.wav"));
         tts::write_wav(&audio, &vec![0f32; 2_000 * 24]).expect("wav");
-        render_items.push(RenderItem { video, audio, item: item.clone(), is_hdr: false, has_audio: false });
+        render_items.push(RenderItem { video, audio, item: item.clone(), is_hdr: false, has_audio: false, sound_gain: None });
     }
 
     let out = fx.dir.join("with-music.mp4");
@@ -917,6 +920,7 @@ fn intro_montage_cuts_hard_inside_and_dissolves_into_the_film() {
             },
             is_hdr: false,
                     has_audio: false,
+                    sound_gain: None,
                 },
         ffmpeg::RenderItem {
             video: body.clone(),
@@ -933,6 +937,7 @@ fn intro_montage_cuts_hard_inside_and_dissolves_into_the_film() {
             },
             is_hdr: false,
                     has_audio: false,
+                    sound_gain: None,
                 },
     ];
 
@@ -1007,6 +1012,7 @@ fn the_opening_dissolve_is_not_the_body_crossfade() {
             },
             is_hdr: false,
             has_audio: false,
+            sound_gain: None,
         });
     }
 
@@ -1060,6 +1066,7 @@ fn a_clip_too_short_for_its_line_is_capped_and_replayed() {
         item: items[0].clone(),
         is_hdr: false,
                                         has_audio: false,
+                                        sound_gain: None,
                                     }];
     let out = fx.dir.join("capped.mp4");
     ffmpeg::render_rough_cut(
@@ -1138,6 +1145,7 @@ fn subtitles_are_drawn_into_the_picture() {
         item: items[0].clone(),
         is_hdr: false,
                                         has_audio: false,
+                                        sound_gain: None,
                                     }];
 
     // Non-Latin on purpose. Bengali needs conjunct shaping and reordering that
@@ -1294,6 +1302,7 @@ fn a_clips_own_sound_can_be_mixed_under_the_narration() {
         item: items[0].clone(),
         is_hdr: false,
         has_audio,
+        sound_gain: None,
     }];
 
     let off = fx.dir.join("off.mp4");
@@ -1360,6 +1369,7 @@ fn a_transition_can_be_set_on_one_boundary_alone() {
             },
             is_hdr: false,
             has_audio: false,
+            sound_gain: None,
         });
     }
 
@@ -1414,6 +1424,7 @@ fn timeline_transitions_stay_on_their_own_boundaries_behind_an_intro() {
             },
             is_hdr: false,
             has_audio: false,
+            sound_gain: None,
         })
         .collect();
 
@@ -1475,6 +1486,7 @@ fn a_fully_edited_timeline_renders() {
             item: items[0].clone(),
             is_hdr: false,
             has_audio: true,
+            sound_gain: None,
         },
         ffmpeg::RenderItem {
             video: long,
@@ -1482,6 +1494,7 @@ fn a_fully_edited_timeline_renders() {
             item: items[1].clone(),
             is_hdr: false,
             has_audio: true,
+            sound_gain: None,
         },
     ];
 
@@ -1568,6 +1581,7 @@ fn bengali_captions_use_a_font_that_can_draw_them() {
         item: items[0].clone(),
         is_hdr: false,
         has_audio: false,
+        sound_gain: None,
     }];
 
     // Conjuncts and a vowel sign that has to reorder around its consonant —

@@ -3727,3 +3727,112 @@ kbd {
   color: var(--ink-dim);
   font-style: italic;
 }
+
+/* ── timeline viewer ───────────────────────────────────────────────────── */
+/*
+   Plays the cut as it currently stands, before anything is rendered — which
+   is exactly when the edits are being made. The caption is drawn over it in
+   HTML at the same fraction of the frame height the burn-in uses, so where it
+   sits can be judged without paying for a render to find out.
+*/
+
+.tl-viewer {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-bottom: 0.9rem;
+}
+
+.tl-stage {
+  position: relative;
+  background: #000;
+  border-radius: var(--r-md);
+  overflow: hidden;
+  aspect-ratio: 16 / 9;
+  max-height: 46vh;
+  container-type: size;
+}
+
+.tl-video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+.tl-caption {
+  position: absolute;
+  left: 6%;
+  right: 6%;
+  text-align: center;
+  line-height: 1.25;
+  font-weight: 600;
+  text-shadow:
+    0 0 3px #000,
+    0 1px 2px #000;
+  border-radius: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tl-transport {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.tl-seek {
+  flex: 1;
+}
+
+.tl-clock {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.82rem;
+  color: var(--ink-dim);
+  white-space: nowrap;
+}
+
+/* The playhead, drawn across every track. */
+.tl-head {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: #ff5f43;
+  pointer-events: none;
+  z-index: 3;
+}
+
+.tl-sub-field {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.8rem;
+  color: var(--ink-dim);
+}
+
+.tl-sub-field input[type="range"] {
+  width: 6rem;
+}
+
+.tl-swatch {
+  width: 1.35rem;
+  height: 1.35rem;
+  border-radius: 50%;
+  border: 2px solid var(--line);
+  cursor: pointer;
+  padding: 0;
+}
+
+.tl-swatch.is-selected {
+  border-color: #e4572e;
+  box-shadow: 0 0 0 2px #e4572e55;
+}
+
+.tl-opening-row {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  flex-wrap: wrap;
+}

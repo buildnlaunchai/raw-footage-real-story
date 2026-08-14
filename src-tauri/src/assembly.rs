@@ -461,6 +461,8 @@ pub async fn assembly_render(
     // How loud each clip's own sound sits under the narration (zero is off),
     // and a dissolve length per boundary where the timeline has an opinion.
     source_audio_gain: Option<f32>,
+    // One level per shot, where the timeline has an opinion about each.
+    sound_gains: Option<Vec<f32>>,
     transitions: Option<Vec<u32>>,
     // The script's language, which decides how wide a caption line may be and
     // which font can draw it, and how those captions should look.
@@ -552,10 +554,14 @@ pub async fn assembly_render(
                 ),
             })?;
 
+        // This shot's own level, where the timeline set one.
+        let shot_gain = sound_gains.as_ref().and_then(|g| g.get(i).copied());
+        let wants_sound = shot_gain.unwrap_or(source_audio_gain) > 0.0;
+
         // Probed rather than remembered when the clip's own sound is wanted:
         // footage imported before this was recorded carries no answer, and
         // getting it wrong fails the whole render rather than degrading.
-        let source_has_audio = source_audio_gain > 0.0
+        let source_has_audio = wants_sound
             && spec.and_then(|c| c.has_audio).unwrap_or_else(|| {
                 ffmpeg::probe_media(&info.ffprobe, &video).map(|m| m.has_audio).unwrap_or(false)
             });
@@ -569,6 +575,7 @@ pub async fn assembly_render(
             // wanted: footage imported before this was recorded carries no
             // answer, and getting it wrong fails the whole render.
             has_audio: source_has_audio,
+            sound_gain: shot_gain,
         });
     }
 
@@ -638,6 +645,7 @@ pub async fn assembly_render(
                         is_hdr: false,
                         // The montage is rendered mute; its sound is the hook.
                         has_audio: false,
+                        sound_gain: Some(0.0),
                     },
                 );
                 // Clamped against the assembled list, so a one-second first line

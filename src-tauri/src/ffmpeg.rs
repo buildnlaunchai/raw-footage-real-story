@@ -623,6 +623,12 @@ pub struct RenderItem {
     /// fails the entire render rather than degrading, so this must be what the
     /// probe found and never what seems likely.
     pub has_audio: bool,
+    /// How loud this shot's own sound sits under the narration. Zero is off.
+    ///
+    /// Per shot, not per film: keeping the sound is a decision about the two
+    /// clips with something worth hearing in them, not about all of them.
+    /// `None` takes `RenderSettings::source_audio_gain`.
+    pub sound_gain: Option<f32>,
 }
 
 /// Filter fragment converting HDR to SDR, or empty when it cannot be done well.
@@ -925,7 +931,7 @@ pub fn render_rough_cut(
         // for it and the file actually has a track. Referencing `:a` on a
         // silent file does not degrade — it fails the whole render — so this
         // is driven by what the probe found rather than by hope.
-        let src_gain = settings.source_audio_gain.clamp(0.0, 4.0);
+        let src_gain = it.sound_gain.unwrap_or(settings.source_audio_gain).clamp(0.0, 4.0);
         if src_gain > 0.0 && it.has_audio {
             // Trimmed like the picture, and slowed to match it: a shot at 2x
             // slower with its audio at normal speed drifts a whole second

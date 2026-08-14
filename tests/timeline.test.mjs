@@ -168,3 +168,54 @@ test("merging edits keeps fields the new one does not mention", () => {
   assert.equal(d.edits["c0#0"].sourceInMs, 500);
   assert.equal(d.edits["c0#0"].transitionMs, 300);
 });
+
+// --- each shot's own sound -------------------------------------------------
+//
+// "Keep the clip's sound" is rarely a decision about a film. It is a decision
+// about the two clips with something worth hearing in them and the twenty with
+// wind noise, so it has to be answerable per shot.
+
+import { anySound, soundGains } from "../.test-build/lib/timeline.js";
+
+const track = (over = {}) => ({ enabled: true, gain: 0.3, ...over });
+
+test("a shot with no opinion takes the track's setting", () => {
+  const shots = applyEdits(plan(3), doc());
+  assert.deepEqual(soundGains(shots, track()), [0.3, 0.3, 0.3]);
+  assert.deepEqual(soundGains(shots, track({ enabled: false })), [0, 0, 0]);
+});
+
+test("a shot can keep its sound while the track is off", () => {
+  // The common case in reverse: one clip worth hearing in an otherwise
+  // narrated film.
+  const d = withEdit(doc(), "c1#0", { sound: { enabled: true, gain: 0.8 } });
+  const shots = applyEdits(plan(3), d);
+  assert.deepEqual(soundGains(shots, track({ enabled: false })), [0, 0.8, 0]);
+  assert.equal(anySound(shots, track({ enabled: false })), true);
+});
+
+test("a shot can be silenced while the track is on", () => {
+  const d = withEdit(doc(), "c1#0", { sound: { enabled: false } });
+  const shots = applyEdits(plan(3), d);
+  assert.deepEqual(soundGains(shots, track()), [0.3, 0, 0.3]);
+});
+
+test("a shot that says nothing about its level borrows the track's", () => {
+  const d = withEdit(doc(), "c0#0", { sound: { enabled: true } });
+  const shots = applyEdits(plan(2), d);
+  assert.deepEqual(soundGains(shots, track({ gain: 0.42 })), [0.42, 0.42]);
+});
+
+test("levels are listed only for the shots in the film", () => {
+  const d = withEdit(doc(), "c1#0", { enabled: false });
+  const shots = applyEdits(plan(3), d);
+  assert.deepEqual(soundGains(shots, track()), [0.3, 0.3], "the dropped shot has no slot");
+});
+
+test("nothing wanting sound is worth knowing", () => {
+  // The renderer probes every clip for an audio track when sound is on, and
+  // a silent film should not pay for that.
+  const shots = applyEdits(plan(3), doc());
+  assert.equal(anySound(shots, track({ enabled: false })), false);
+  assert.equal(anySound(shots, track()), true);
+});

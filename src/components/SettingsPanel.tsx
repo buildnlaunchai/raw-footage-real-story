@@ -9,18 +9,14 @@
 import { useEffect, useState } from "react";
 import { defaultWritingInstructions } from "../lib/scriptComposerCore";
 import { getWritingInstructions, setWritingInstructions } from "../lib/scriptProviders";
-import { HOOK_MAX_WORDS, HOOK_MIN_WORDS } from "../lib/scriptComposer";
 import { languageFor, LANGUAGES } from "../lib/languages";
 
 interface Props {
   /** The language whose built-in wording to show as the starting point. */
   language: string;
-  /** Whether new scripts get an opening line and a montage under it. */
-  introEnabled: boolean;
-  onIntroEnabledChange: (enabled: boolean) => void;
 }
 
-export function SettingsPanel({ language, introEnabled, onIntroEnabledChange }: Props) {
+export function SettingsPanel({ language }: Props) {
   const [stored, setStored] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [preview, setPreview] = useState(language);
@@ -99,34 +95,6 @@ export function SettingsPanel({ language, introEnabled, onIntroEnabledChange }: 
           )}
           {saved && <span className="hint">Saved at {saved}</span>}
         </div>
-      </div>
-
-      <div className="panel">
-        <div className="panel-head">
-          <h2>The opening</h2>
-          <span className="hint">{introEnabled ? "On" : "Off"}</span>
-        </div>
-        <p className="hint" style={{ marginTop: 0 }}>
-          A film normally starts with one spoken line — {HOOK_MIN_WORDS} to{" "}
-          {HOOK_MAX_WORDS} words — over a quick montage of shots, which then
-          dissolves into the first narrated moment. The line is written after the
-          script and counts towards no word target of its own, and the montage
-          favours footage the story does not otherwise use.
-        </p>
-        <label className="voice-row" style={{ gap: "0.6rem" }}>
-          <input
-            type="checkbox"
-            checked={introEnabled}
-            onChange={(e) => onIntroEnabledChange(e.currentTarget.checked)}
-          />
-          <span>Give new videos an opening</span>
-        </label>
-        <p className="hint" style={{ marginBottom: 0 }}>
-          Turning this off stops new scripts being given one, and leaves it out
-          of anything you render from now on — including videos that already
-          have an opening written. The line itself is kept, so turning this back
-          on restores it.
-        </p>
       </div>
 
       <div className="panel">

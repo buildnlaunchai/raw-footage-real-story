@@ -43,6 +43,25 @@ export interface ShotEdit {
   transitionMs?: number;
   /** False drops the shot, and its line, from the film. */
   enabled?: boolean;
+  /**
+   * This shot's own sound, overriding the track's setting.
+   *
+   * Per shot because "keep the sound" is rarely a decision about a film — it
+   * is a decision about the two clips with something worth hearing in them and
+   * the twenty with wind noise.
+   */
+  sound?: { enabled: boolean; gain?: number };
+  /**
+   * Show only part of this shot's slot, because it was split.
+   *
+   * A split does not create a new line — the narration is one recording and
+   * cannot be cut in half. It creates a second *shot* over the same line, so
+   * the picture can change part way through a sentence while the voice runs
+   * on. `splitAtMs` is measured from the start of the slot.
+   */
+  splitAtMs?: number;
+  /** Which half of a split this shot is. Absent when it was never split. */
+  splitHalf?: "first" | "second";
 }
 
 export interface AudioTrack {
@@ -65,6 +84,51 @@ export function hasMusic(m: MusicTrack): boolean {
   return Boolean(m.path || m.bedId);
 }
 
+/**
+ * How burned-in captions look.
+ *
+ * Exposed rather than fixed because a caption sits on top of somebody's
+ * footage: the size that reads on a phone buries a wide landscape shot, and
+ * white on white snow is not a caption at all.
+ */
+export interface SubtitleStyle {
+  /** Text height as a fraction of the frame height. */
+  size: number;
+  /** How far above the bottom edge it sits, as a fraction of the height. */
+  bottom: number;
+  /** `&HBBGGRR` — ASS colour order, which is not RGB. */
+  colour: string;
+  /** A dark plate behind the text rather than only an outline. */
+  boxBehind: boolean;
+}
+
+export const DEFAULT_SUBTITLE_STYLE: SubtitleStyle = {
+  // Measured against the frame rather than fixed in points: 1/26 of the height
+  // is about 41px on 1080p, which reads on a laptop without dominating a phone.
+  size: 1 / 26,
+  // The lower third — clear of the bottom edge and of anything a player draws
+  // over it, without climbing into the picture.
+  bottom: 0.085,
+  colour: "#ffffff",
+  boxBehind: false,
+};
+
+/** The colours offered, as names a person would use. */
+export const SUBTITLE_COLOURS = [
+  { label: "White", value: "#ffffff" },
+  { label: "Yellow", value: "#ffe14d" },
+  { label: "Soft grey", value: "#e6e6e6" },
+];
+
+/** `#rrggbb` to the `&HBBGGRR` that ASS wants. Not a byte swap by accident. */
+export function toAssColour(hex: string): string {
+  const h = hex.replace("#", "");
+  const r = h.slice(0, 2);
+  const g = h.slice(2, 4);
+  const b = h.slice(4, 6);
+  return `&H00${b}${g}${r}`.toUpperCase();
+}
+
 export interface TimelineDoc {
   /** Shot order, by key. Absent keys keep their planned position, at the end. */
   order: string[];
@@ -74,6 +138,7 @@ export interface TimelineDoc {
   music: MusicTrack;
   /** Draw the script into the picture. */
   subtitles: boolean;
+  subtitleStyle: SubtitleStyle;
 }
 
 export const DEFAULT_TIMELINE: TimelineDoc = {
@@ -84,6 +149,7 @@ export const DEFAULT_TIMELINE: TimelineDoc = {
   originalAudio: { enabled: false, gain: 0.25 },
   music: { enabled: false, gain: 0.1, path: null, bedId: null, label: null },
   subtitles: false,
+  subtitleStyle: DEFAULT_SUBTITLE_STYLE,
 };
 
 /** One shot as the timeline shows it, after the edits are applied. */
@@ -103,6 +169,15 @@ export interface Shot {
   text: string;
   /** True when the shot shows footage the line was not written for. */
   swapped: boolean;
+  /**
+   * This shot's own sound, when it has an opinion. Null means "whatever the
+   * track says".
+   *
+   * `gain` stays null when the shot only said on-or-off: resolving it here
+   * *and* in `soundGains` meant two sources for one number, free to disagree
+   * — which they did.
+   */
+  sound: { enabled: boolean; gain: number | null } | null;
 }
 
 export interface PlannedShot {
@@ -159,6 +234,9 @@ export function applyEdits(planned: PlannedShot[], doc: TimelineDoc): Shot[] {
       enabled,
       text: p.text,
       swapped: sourceClipId !== p.clipId,
+      sound: edit.sound
+        ? { enabled: edit.sound.enabled, gain: edit.sound.gain ?? null }
+        : null,
     };
     out.push(shot);
     // A disabled shot occupies no time, but stays in the list so it can be
@@ -228,4 +306,30 @@ export function maxTransitionMs(a: Shot | undefined, b: Shot | undefined): numbe
   // renderer — a dissolve eats time from both sides, and two overlapping fades
   // on a short shot can leave no un-faded frames at all.
   return Math.min(1_500, Math.floor(Math.min(a.durationMs, b.durationMs) / 3));
+}
+
+/**
+ * How loud each shot's own sound should be, in the order the renderer wants.
+ *
+ * A shot with no opinion takes the track's setting; one with an opinion
+ * overrides it, including turning itself off while the track is on. Zero means
+ * silent, which is how the renderer already reads it.
+ */
+export function soundGains(shots: Shot[], track: AudioTrack): number[] {
+  return shots
+    .filter((s) => s.enabled)
+    .map((s) => {
+      if (s.sound) return s.sound.enabled ? (s.sound.gain ?? track.gain) : 0;
+      return track.enabled ? track.gain : 0;
+    });
+}
+
+/**
+ * Whether any shot wants its own sound at all.
+ *
+ * The renderer probes each clip for an audio track when this is on, which
+ * costs a little, so it is worth knowing that the answer is no.
+ */
+export function anySound(shots: Shot[], track: AudioTrack): boolean {
+  return soundGains(shots, track).some((g) => g > 0);
 }

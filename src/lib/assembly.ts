@@ -260,6 +260,18 @@ export interface RenderOptions {
   sourceAudioGain?: number;
   /** A dissolve length per boundary, from the timeline. */
   transitions?: number[];
+  /** One level per shot, where the timeline has an opinion about each. */
+  soundGains?: number[];
+  /** The script's language: decides caption width and which font can draw it. */
+  language?: string;
+  /** How burned-in captions look. */
+  subtitleStyle?: {
+    size: number;
+    bottom: number;
+    colour: string;
+    boxBehind: boolean;
+    font: string;
+  };
   /** Which clip's footage each line shows, where the timeline swapped it. */
   sourceClipIds?: Map<string, string>;
   onProgress?: (p: RenderProgress) => void;
@@ -294,6 +306,9 @@ export async function renderRoughCut(
       subtitles: opts.subtitles ?? false,
       sourceAudioGain: opts.sourceAudioGain ?? 0,
       transitions: opts.transitions ?? [],
+      soundGains: opts.soundGains ?? [],
+      language: opts.language ?? "en",
+      subtitleStyle: opts.subtitleStyle ?? null,
     });
   } catch (err) {
     throw asError(err);
