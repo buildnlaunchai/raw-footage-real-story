@@ -615,6 +615,8 @@ pub async fn assembly_render(
                 width: None,
                 height: None,
                 codec: None,
+                has_audio: None,
+                captured_at_ms: None,
                 favorite: false,
                 deleted_at: None,
                 segments: if c.description.trim().is_empty() {

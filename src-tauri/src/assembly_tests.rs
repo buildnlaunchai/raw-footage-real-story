@@ -1186,3 +1186,58 @@ fn subtitles_are_drawn_into_the_picture() {
     let late_burned = ffmpeg::frame_rgb_region(&fx.ffmpeg, &burned, 4_150, x, y, w, h).expect("late");
     assert_eq!(late_plain, late_burned, "the caption outlived its line");
 }
+
+/// The order footage was shot in, read from the files themselves.
+#[test]
+fn capture_time_is_read_and_is_the_order_things_happened() {
+    let Some(fx) = Fixture::new("capture-time") else {
+        eprintln!("ffmpeg not available; skipping");
+        return;
+    };
+
+    // Written with an explicit creation_time, the way a camera does.
+    let mut made = Vec::new();
+    for (i, stamp) in ["2026-08-13T09:15:00.000000Z", "2026-08-13T09:20:30.000000Z"]
+        .iter()
+        .enumerate()
+    {
+        let path = fx.dir.join(format!("shot{i}.mp4"));
+        let status = std::process::Command::new(&fx.ffmpeg)
+            .args(["-y", "-v", "error", "-f", "lavfi", "-i", "color=c=red:s=64x64:d=1", "-r", "30"])
+            .args(["-metadata", &format!("creation_time={stamp}")])
+            .arg(&path)
+            .status()
+            .expect("write clip");
+        assert!(status.success());
+        made.push(path);
+    }
+
+    let first = ffmpeg::probe_media(&fx.ffprobe, &made[0]).expect("probe");
+    let second = ffmpeg::probe_media(&fx.ffprobe, &made[1]).expect("probe");
+    let (a, b) = (first.created_at_ms.expect("first"), second.created_at_ms.expect("second"));
+    println!("\n  created {a} then {b} (+{}ms)", b - a);
+
+    assert!(b > a, "the later clip must sort later");
+    assert_eq!(b - a, 5 * 60_000 + 30_000, "five and a half minutes apart, exactly");
+    // Sanity: mid-2026, not 1970 and not the year 56000.
+    assert!(a > 1_770_000_000_000 && a < 1_900_000_000_000, "implausible epoch: {a}");
+}
+
+/// The date maths, without paying ffmpeg to make a file for each case.
+#[test]
+fn iso_timestamps_parse_to_the_right_instant() {
+    use ffmpeg::parse_iso8601_ms_for_test as parse;
+    // Epoch itself.
+    assert_eq!(parse("1970-01-01T00:00:00.000000Z"), Some(0));
+    // A leap day, which is where hand-rolled date maths usually breaks.
+    assert_eq!(parse("2024-02-29T00:00:00.000000Z"), Some(1_709_164_800_000));
+    // A century year that is a leap year, and one that is not.
+    assert_eq!(parse("2000-03-01T00:00:00.000000Z"), Some(951_868_800_000));
+    assert_eq!(parse("1900-03-01T00:00:00.000000Z"), Some(-2_203_891_200_000));
+    // Sub-second precision survives.
+    assert_eq!(parse("2026-08-13T09:15:00.500000Z"), Some(1_786_612_500_500));
+    // Rubbish is refused rather than guessed at.
+    assert_eq!(parse(""), None);
+    assert_eq!(parse("not a date"), None);
+    assert_eq!(parse("2026-08-13"), None);
+}

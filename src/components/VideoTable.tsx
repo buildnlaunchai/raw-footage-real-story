@@ -13,8 +13,8 @@ import {
   type LibraryClip,
 } from "../lib/library";
 import { audioUrl } from "../lib/voiceover";
-import { useState } from "react";
-import { PencilIcon, PlayCircleIcon, TrashIcon } from "./Icons";
+import { useRef, useState } from "react";
+import { PencilIcon, TrashIcon } from "./Icons";
 
 interface Props {
   clips: LibraryClip[];
@@ -52,8 +52,18 @@ export function VideoTable({
   reorder,
 }: Props) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [dragging, setDragging] = useState<string | null>(null);
-  const [over, setOver] = useState<string | null>(null);
+  /**
+   * Reordering by pointer rather than by HTML5 drag-and-drop.
+   *
+   * The first version used `draggable` on the handle and never fired: WebKit —
+   * which is the webview this ships in — refuses to begin a drag unless
+   * `dataTransfer.setData` is called during dragstart, and a `<button>` brings
+   * its own native drag behaviour besides. Pointer events have none of that,
+   * work identically on a trackpad and a touchscreen, and give the row-follows-
+   * your-finger feedback the drag API cannot.
+   */
+  const [drag, setDrag] = useState<{ key: string; y: number; overKey: string | null } | null>(null);
+  const rowRefs = useRef(new Map<string, HTMLTableRowElement>());
   const key = (c: LibraryClip) => `${c.projectId}/${c.clipId}`;
 
   // Selection is scoped to what is on screen. Carrying it across a page or a
@@ -100,6 +110,43 @@ export function VideoTable({
     move(k, key(clips[j]));
   }
 
+  /** Which row the pointer is currently over, by its position on screen. */
+  function rowAt(clientY: number): string | null {
+    for (const [k, el] of rowRefs.current) {
+      const r = el.getBoundingClientRect();
+      if (clientY >= r.top && clientY <= r.bottom) return k;
+    }
+    return null;
+  }
+
+  function startDrag(k: string, e: React.PointerEvent) {
+    if (!reorder) return;
+    e.preventDefault();
+    // Capture on the handle, so the drag survives the pointer leaving the row
+    // — which it does immediately, because the row moves out from under it.
+    e.currentTarget.setPointerCapture(e.pointerId);
+    setDrag({ key: k, y: e.clientY, overKey: k });
+  }
+
+  function moveDrag(e: React.PointerEvent) {
+    if (!drag) return;
+    const overKey = rowAt(e.clientY) ?? drag.overKey;
+    setDrag({ ...drag, y: e.clientY, overKey });
+    // Keep the row being dropped onto in view when dragging past either end.
+    const el = overKey ? rowRefs.current.get(overKey) : null;
+    const r = el?.getBoundingClientRect();
+    if (r && (r.top < 90 || r.bottom > window.innerHeight - 60)) {
+      el?.scrollIntoView({ block: "nearest" });
+    }
+  }
+
+  function endDrag() {
+    if (!drag) return;
+    const { key: from, overKey } = drag;
+    setDrag(null);
+    if (overKey && overKey !== from) move(from, overKey);
+  }
+
   return (
     <div>
       {picked.length > 0 && (
@@ -142,9 +189,8 @@ export function VideoTable({
             {reorder && <th className="lib-order" scope="col"><span className="visually-hidden">Order</span>#</th>}
             <th>Video</th>
             <th>Description</th>
-            <th>Duration</th>
-            <th>Date added</th>
-            <th>Actions</th>
+            <th className="lib-when">Added</th>
+            <th className="lib-act-cell"><span className="visually-hidden">Remove</span></th>
           </tr>
         </thead>
         <tbody>
@@ -164,45 +210,35 @@ export function VideoTable({
             return (
               <tr
                 key={k}
+                ref={(el) => {
+                  if (el) rowRefs.current.set(k, el);
+                  else rowRefs.current.delete(k);
+                }}
                 data-picked={selected.has(k) || undefined}
-                data-dragging={dragging === k || undefined}
-                data-dropzone={over === k && dragging !== k || undefined}
-                onDragOver={(e) => {
-                  if (!dragging) return;
-                  e.preventDefault();
-                  setOver(k);
-                }}
-                onDrop={(e) => {
-                  if (!dragging) return;
-                  e.preventDefault();
-                  move(dragging, k);
-                  setDragging(null);
-                  setOver(null);
-                }}
+                data-dragging={drag?.key === k || undefined}
+                data-dropzone={
+                  (drag && drag.overKey === k && drag.key !== k) || undefined
+                }
               >
                 {reorder && (
                   <td className="lib-order">
                     <button
                       type="button"
                       className="drag-handle"
-                      draggable
-                      onDragStart={(e) => {
-                        setDragging(k);
-                        e.dataTransfer.effectAllowed = "move";
-                      }}
-                      onDragEnd={() => {
-                        setDragging(null);
-                        setOver(null);
-                      }}
+                      onPointerDown={(e) => startDrag(k, e)}
+                      onPointerMove={moveDrag}
+                      onPointerUp={endDrag}
+                      onPointerCancel={() => setDrag(null)}
                       onKeyDown={(e) => {
-                        // In a reversed view, up on screen is later in the film.
-                        const dir = reorder.reversed ? -1 : 1;
+                        // Up on screen is one step earlier in the film — except
+                        // in the reversed view, where up is one step later.
+                        const up = reorder.reversed ? 1 : -1;
                         if (e.key === "ArrowUp") {
                           e.preventDefault();
-                          nudge(k, -1 * dir * dir);
+                          nudge(k, up);
                         } else if (e.key === "ArrowDown") {
                           e.preventDefault();
-                          nudge(k, 1);
+                          nudge(k, -up);
                         }
                       }}
                       title="Drag to reorder, or use the arrow keys"
@@ -286,41 +322,25 @@ export function VideoTable({
                   )}
                 </td>
 
-                <td className="lib-when">{formatDuration(c.durationMs)}</td>
-
                 <td className="lib-when">
                   {when.date}
                   <span>{when.time}</span>
                 </td>
 
-                <td>
-                  <div className="lib-actions">
-                    <button
-                      type="button"
-                      className="lib-act"
-                      onClick={() => onPlay(c)}
-                      title="Play"
-                    >
-                      <PlayCircleIcon />
-                    </button>
-                    <button
-                      type="button"
-                      className="lib-act"
-                      onClick={() => onDescribe(c)}
-                      title="Describe this clip"
-                    >
-                      <PencilIcon />
-                    </button>
-                    <button
-                      type="button"
-                      className="lib-act lib-act-danger"
-                      onClick={() => onDelete([c])}
-                      title="Remove from the library (the video file itself is left alone)"
-                      aria-label={`Remove ${c.fileName}`}
-                    >
-                      <TrashIcon />
-                    </button>
-                  </div>
+                {/* Delete only. Play is the thumbnail and describe is the
+                    description cell, so the other two buttons here were a
+                    third copy of each — and they were the reason the table
+                    needed scrolling sideways to reach anything. */}
+                <td className="lib-act-cell">
+                  <button
+                    type="button"
+                    className="lib-act lib-act-danger"
+                    onClick={() => onDelete([c])}
+                    title="Remove from the library (the video file itself is left alone)"
+                    aria-label={`Remove ${c.fileName}`}
+                  >
+                    <TrashIcon />
+                  </button>
                 </td>
               </tr>
             );

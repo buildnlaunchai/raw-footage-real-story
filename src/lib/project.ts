@@ -29,6 +29,16 @@ export interface ProjectClip {
   width?: number | null;
   height?: number | null;
   codec?: string | null;
+  /** Whether the file carries a sound track of its own. */
+  hasAudio?: boolean;
+  /**
+   * When the camera recorded it, where the file says. Unix milliseconds.
+   *
+   * Kept so the running order can be restored to the order things happened —
+   * a file picker hands paths over in whatever order the Finder was sorted by,
+   * and a film assembled in that order runs backwards.
+   */
+  capturedAtMs?: number | null;
   /** Starred in the library. */
   favorite?: boolean;
   /** Set when the clip is in the trash; it keeps its description until purged. */

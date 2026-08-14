@@ -650,6 +650,8 @@ mod library_rows {
             width: Some(1920),
             height: Some(1080),
             codec: Some("hevc".into()),
+            has_audio: Some(true),
+            captured_at_ms: None,
             favorite: false,
             deleted_at: None,
             segments,

@@ -323,6 +323,13 @@ pub struct MediaInfo {
     pub rotation: i32,
     pub color_transfer: String,
     pub is_hdr: bool,
+    /// When the camera recorded this, in Unix milliseconds, where the file says.
+    ///
+    /// The order footage was shot in is the order it happened in, and that is
+    /// the only ordering a trip has of its own. A file picker hands paths over
+    /// in whatever order the Finder was sorted by, which is routinely newest
+    /// first — and a film assembled in that order runs backwards.
+    pub created_at_ms: Option<i64>,
 }
 
 impl MediaInfo {
@@ -407,8 +414,17 @@ pub fn probe_media(ffprobe: &str, media: &Path) -> Result<MediaInfo, FfmpegError
         .map(|s| (s * 1000.0).round() as u64)
         .unwrap_or(0);
 
+    // `creation_time` is UTC ISO-8601 on everything that writes it — phones,
+    // cameras, and most editors. Parsed by hand because the whole date crate
+    // would be here for this one field.
+    let created_at_ms = json["format"]["tags"]["creation_time"]
+        .as_str()
+        .or_else(|| video["tags"]["creation_time"].as_str())
+        .and_then(parse_iso8601_ms);
+
     Ok(MediaInfo {
         duration_ms,
+        created_at_ms,
         width: video["width"].as_u64().unwrap_or(0) as u32,
         height: video["height"].as_u64().unwrap_or(0) as u32,
         codec: video["codec_name"].as_str().unwrap_or("unknown").to_string(),
@@ -418,6 +434,39 @@ pub fn probe_media(ffprobe: &str, media: &Path) -> Result<MediaInfo, FfmpegError
         color_transfer,
         is_hdr,
     })
+}
+
+/// `2026-08-13T22:41:07.000000Z` to Unix milliseconds.
+///
+/// Only the shape cameras actually write. Anything else returns None and the
+/// caller falls back to the file's own timestamp, which is worse but present.
+fn parse_iso8601_ms(s: &str) -> Option<i64> {
+    let (date, rest) = s.split_once('T')?;
+    let mut d = date.split('-');
+    let (y, mo, da): (i64, i64, i64) =
+        (d.next()?.parse().ok()?, d.next()?.parse().ok()?, d.next()?.parse().ok()?);
+    let time = rest.trim_end_matches('Z');
+    let time = time.split(['+', '-']).next()?;
+    let mut t = time.split(':');
+    let (h, mi): (i64, i64) = (t.next()?.parse().ok()?, t.next()?.parse().ok()?);
+    let secs: f64 = t.next().unwrap_or("0").parse().ok()?;
+
+    // Days since the epoch, by the civil-from-days algorithm — no leap-second
+    // nonsense and no dependency.
+    let y_adj = if mo <= 2 { y - 1 } else { y };
+    let era = if y_adj >= 0 { y_adj } else { y_adj - 399 } / 400;
+    let yoe = y_adj - era * 400;
+    let mp = (mo + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + da - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+
+    Some(((days * 86_400 + h * 3_600 + mi * 60) as f64 * 1000.0 + secs * 1000.0) as i64)
+}
+
+#[cfg(test)]
+pub fn parse_iso8601_ms_for_test(s: &str) -> Option<i64> {
+    parse_iso8601_ms(s)
 }
 
 /// Decide whether a file is usable, and say plainly what is wrong if not.

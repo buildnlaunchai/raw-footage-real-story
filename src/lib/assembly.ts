@@ -278,6 +278,8 @@ export type MediaVerdict = "accepted" | "warning" | "rejected";
 
 export interface MediaInfo {
   durationMs: number;
+  /** When the camera recorded it, where the file says. Unix milliseconds. */
+  createdAtMs: number | null;
   width: number;
   height: number;
   codec: string;

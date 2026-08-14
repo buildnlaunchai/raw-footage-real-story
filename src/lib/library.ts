@@ -186,3 +186,19 @@ export function tagHue(projectId: string): number {
   for (let i = 0; i < projectId.length; i++) h = (h * 31 + projectId.charCodeAt(i)) % 360;
   return h;
 }
+
+/**
+ * A span of footage, as a person would say it: "1h 12m", "4m 30s", "12s".
+ *
+ * Not the zero-padded clock the per-clip column uses. A total is read for its
+ * size, and "01:12:04" makes you count digits to learn it is about an hour.
+ */
+export function formatSpan(ms: number): string {
+  const total = Math.round(ms / 1000);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) return m > 0 ? `${h}h ${m}m` : `${h}h`;
+  if (m > 0) return s > 0 ? `${m}m ${s}s` : `${m}m`;
+  return `${s}s`;
+}

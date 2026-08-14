@@ -94,6 +94,12 @@ pub struct ProjectClip {
     pub height: Option<u32>,
     #[serde(default)]
     pub codec: Option<String>,
+    /// Whether the file carries a sound track of its own.
+    #[serde(default)]
+    pub has_audio: Option<bool>,
+    /// When the camera recorded it, in Unix milliseconds, where the file says.
+    #[serde(default)]
+    pub captured_at_ms: Option<i64>,
     /// Starred in the library.
     #[serde(default)]
     pub favorite: bool,
@@ -380,6 +386,8 @@ fn migrate_v1(value: serde_json::Value) -> Result<ProjectFile, String> {
             width: None,
             height: None,
             codec: None,
+            has_audio: None,
+            captured_at_ms: None,
             favorite: false,
             deleted_at: None,
             segments,

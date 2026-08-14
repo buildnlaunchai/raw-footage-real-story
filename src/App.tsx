@@ -37,6 +37,7 @@ import {
 import { CheckIcon, FilterIcon, SaveIcon, SearchIcon, SortIcon } from "./components/Icons";
 import {
   allowMedia,
+  formatSpan,
   listLibrary,
   reorderClips,
   purgeClip,
@@ -155,6 +156,13 @@ function App() {
   // Home is intentionally empty for now, so the app opens on the library
   // rather than on a blank page.
   const [view, setView] = useState<LibraryView>("all");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem("sidebarCollapsed") === "1";
+    } catch {
+      return false;
+    }
+  });
   /** Which stage is showing inside a collection. */
   const [tab, setTab] = useState<StageId>("footage");
 
@@ -686,11 +694,20 @@ function App() {
             width: r.info?.width ?? null,
             height: r.info?.height ?? null,
             codec: r.info?.codec ?? null,
+            hasAudio: r.info?.hasAudio ?? false,
+            capturedAtMs: r.info?.createdAtMs ?? null,
             favorite: false,
             deletedAt: null,
             segments: [],
           }));
         if (added.length === 0) return;
+
+        // In the order they were shot, not the order the picker handed them
+        // over. macOS returns a Finder selection in whatever the window was
+        // sorted by — routinely newest first — and the running order decides
+        // both what the script narrates and how the cut is assembled, so
+        // importing a trip newest-first builds a film that runs backwards.
+        added.sort(byCaptureOrder);
 
         const next = { ...current, clips: [...current.clips, ...added] };
         setManifest(next);
@@ -1248,6 +1265,47 @@ function App() {
     }
   }
 
+  /**
+   * The order things happened in.
+   *
+   * Capture time where the file carries it, which phones and cameras do; the
+   * filename otherwise, compared so that IMG_9 sorts before IMG_10 rather than
+   * after it, which is what plain string comparison would do to a trip.
+   */
+  function byCaptureOrder(a: ProjectClip, b: ProjectClip): number {
+    if (a.capturedAtMs != null && b.capturedAtMs != null) {
+      if (a.capturedAtMs !== b.capturedAtMs) return a.capturedAtMs - b.capturedAtMs;
+    } else if (a.capturedAtMs != null) {
+      return -1;
+    } else if (b.capturedAtMs != null) {
+      return 1;
+    }
+    return (a.fileName ?? "").localeCompare(b.fileName ?? "", undefined, {
+      numeric: true,
+      sensitivity: "base",
+    });
+  }
+
+  /**
+   * Put the whole collection back into the order it was shot in.
+   *
+   * Offered rather than done automatically: footage imported before capture
+   * time was read has none, and a collection somebody has already dragged into
+   * shape must not be rearranged behind their back.
+   */
+  async function onSortByCapture() {
+    if (!manifest) return;
+    const sorted = [...manifest.clips].sort(byCaptureOrder);
+    setManifest({ ...manifest, clips: sorted });
+    try {
+      await reorderClips(manifest.project.id, sorted.map((c) => c.id));
+      setAssembly(null);
+      await refreshLibraryRef.current?.();
+    } catch (err) {
+      setError(errorText(err));
+    }
+  }
+
   // --- library -------------------------------------------------------------
 
   const refreshLibrary = useCallback(async () => {
@@ -1493,6 +1551,9 @@ function App() {
   const pageRows = reordering
     ? tableRows
     : tableRows.slice((safePage - 1) * PER_PAGE, safePage * PER_PAGE);
+
+  /** How much footage the list below adds up to. */
+  const shownDurationMs = tableRows.reduce((n, c) => n + (c.durationMs ?? 0), 0);
 
   const counts = { all: liveLibrary.filter((c) => !c.deletedAt).length };
 
@@ -2175,6 +2236,18 @@ function App() {
         attention={needsAttention}
         usable={canImport}
         onOpenReadiness={() => setView("readiness")}
+        collapsed={sidebarCollapsed}
+        onToggleCollapsed={() => {
+          const next = !sidebarCollapsed;
+          setSidebarCollapsed(next);
+          // Remembered, because someone who wants the room wants it every
+          // time, not once per launch.
+          try {
+            localStorage.setItem("sidebarCollapsed", next ? "1" : "0");
+          } catch {
+            /* private mode or a full disk; the choice just will not stick */
+          }
+        }}
       />
 
       <main className="lib-main">
@@ -2248,9 +2321,22 @@ function App() {
             <header className="lib-head">
               <h1>{VIEW_TITLE[view]}</h1>
               <span className="lib-head-count">
-                {view === "all" || onFootageTab
-                  ? `${tableRows.length} video${tableRows.length === 1 ? "" : "s"}`
-                  : STAGES[tab].produces}
+                {view === "all" || onFootageTab ? (
+                  <>
+                    {tableRows.length} video{tableRows.length === 1 ? "" : "s"}
+                    {shownDurationMs > 0 && (
+                      <>
+                        {" · "}
+                        <strong title="Total length of the footage listed below">
+                          {formatSpan(shownDurationMs)}
+                        </strong>
+                        {" of footage"}
+                      </>
+                    )}
+                  </>
+                ) : (
+                  STAGES[tab].produces
+                )}
               </span>
 
               <label className="lib-search">
@@ -2302,6 +2388,17 @@ function App() {
                   <option value="described">Undescribed first</option>
                 </select>
               </label>
+
+              {onFootageTab && manifest && manifest.clips.length > 1 && (
+                <button
+                  type="button"
+                  className="lib-tool"
+                  onClick={() => void onSortByCapture()}
+                  title="Put the whole collection back into the order it was filmed in, using each file's own recording time"
+                >
+                  Shooting order
+                </button>
+              )}
 
               {onFootageTab && manifest && (
                 <button

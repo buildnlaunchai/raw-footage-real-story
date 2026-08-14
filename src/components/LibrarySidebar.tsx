@@ -37,6 +37,8 @@ interface Props {
   /** False when a blocking dependency is missing. */
   usable: boolean;
   onOpenReadiness: () => void;
+  collapsed: boolean;
+  onToggleCollapsed: () => void;
 }
 
 const NAV: { id: LibraryView; label: string; Icon: typeof HomeIcon }[] = [
@@ -61,6 +63,8 @@ export function LibrarySidebar({
   attention,
   usable,
   onOpenReadiness,
+  collapsed,
+  onToggleCollapsed,
 }: Props) {
   const countFor = (id: LibraryView) => (id === "all" ? counts.all : null);
 
@@ -70,8 +74,20 @@ export function LibrarySidebar({
   const used = storage ? storage.appBytes + storage.footageBytes : 0;
 
   return (
-    <aside className="lib-side">
-      <p className="lib-brand">Raw Footage</p>
+    <aside className="lib-side" data-collapsed={collapsed || undefined}>
+      <div className="lib-brand-row">
+        {!collapsed && <p className="lib-brand">Raw Footage</p>}
+        <button
+          type="button"
+          className="lib-collapse"
+          onClick={onToggleCollapsed}
+          title={collapsed ? "Show the sidebar" : "Hide the sidebar"}
+          aria-label={collapsed ? "Show the sidebar" : "Hide the sidebar"}
+          aria-expanded={!collapsed}
+        >
+          {collapsed ? "»" : "«"}
+        </button>
+      </div>
 
       <ul className="lib-nav">
         {NAV.map(({ id, label, Icon }) => {
@@ -83,9 +99,10 @@ export function LibrarySidebar({
                 className="lib-nav-item"
                 aria-current={view === id}
                 onClick={() => onView(id)}
+                title={collapsed ? label : undefined}
               >
                 <Icon size={19} />
-                {label}
+                <span className="lib-label">{label}</span>
                 {n !== null && n > 0 && <span className="lib-count">{n}</span>}
               </button>
             </li>
@@ -165,11 +182,23 @@ export function LibrarySidebar({
             : "Everything ready"}
       </button>
 
-      <div className="lib-storage">
-        <p className="lib-storage-label">Storage</p>
+      <div
+        className="lib-storage"
+        title={
+          "What this app is keeping on this Mac: the footage you imported into " +
+          "collections, plus thumbnails, narration audio and rendered videos. " +
+          "Your original video files are left where they are and are not counted twice."
+        }
+      >
+        <p className="lib-storage-label">Used by this app</p>
         <p className="lib-storage-value">
           {storage ? formatBytes(used) : "—"}
-          {total ? ` of ${formatBytes(total)}` : ""}
+          {total ? (
+            <span className="lib-storage-free">
+              {" · "}
+              {formatBytes(total - used)} free on this Mac
+            </span>
+          ) : null}
         </p>
 
         {storage && (
@@ -200,7 +229,7 @@ export function LibrarySidebar({
             </div>
             <p className="lib-storage-foot">
               <span>{formatBytes(storage.footageBytes)} footage</span>
-              <span>{formatBytes(storage.appBytes)} app</span>
+              <span>{formatBytes(storage.appBytes)} audio &amp; renders</span>
             </p>
           </>
         )}
