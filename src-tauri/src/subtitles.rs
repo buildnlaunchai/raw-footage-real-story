@@ -36,7 +36,16 @@ pub const MIN_CUE_MS: u64 = 900;
 /// which is the pair everything in this app addresses a line by. Items with no
 /// text — a montage, a clip nobody narrated — get no caption rather than an
 /// empty one.
-pub fn cues(items: &[TimelineItem], mut text_for: impl FnMut(&TimelineItem) -> Option<String>) -> Vec<Cue> {
+pub fn cues(items: &[TimelineItem], text_for: impl FnMut(&TimelineItem) -> Option<String>) -> Vec<Cue> {
+    cues_for("en", items, text_for)
+}
+
+/// As above, sized for the script the captions are written in.
+pub fn cues_for(
+    language: &str,
+    items: &[TimelineItem],
+    mut text_for: impl FnMut(&TimelineItem) -> Option<String>,
+) -> Vec<Cue> {
     let mut out: Vec<Cue> = Vec::new();
     for item in items {
         let Some(text) = text_for(item).map(|t| t.trim().to_string()).filter(|t| !t.is_empty())
@@ -57,7 +66,7 @@ pub fn cues(items: &[TimelineItem], mut text_for: impl FnMut(&TimelineItem) -> O
         // shared out by length, which is a good enough stand-in for how long
         // each part takes to say — the parts come from one continuous
         // recording, so nothing here can drift out of step with the audio.
-        let parts = split_for_reading(&text, MAX_CUE_CHARS);
+        let parts = split_for_reading(&text, max_cue_chars(language));
         let total: usize = parts.iter().map(|p| p.chars().count()).sum::<usize>().max(1);
         let window = spoken_end.saturating_sub(start);
         let mut cursor = start;
@@ -72,8 +81,18 @@ pub fn cues(items: &[TimelineItem], mut text_for: impl FnMut(&TimelineItem) -> O
     out
 }
 
-/// The most a single caption may carry: two lines at the wrap width.
-pub const MAX_CUE_CHARS: usize = WRAP_CHARS * 2;
+/// The most a single caption may carry.
+///
+/// One line's worth, not two. A caption is read in the half-second it is on
+/// screen, and a second line doubles what the eye has to take in while the
+/// picture is also asking for attention — so a long line becomes two captions
+/// in sequence instead of one tall block sitting over the footage.
+pub fn max_cue_chars(language: &str) -> usize {
+    wrap_chars(language)
+}
+
+/// The Latin default, kept for callers with no language to hand.
+pub const MAX_CUE_CHARS: usize = WRAP_CHARS;
 
 /// Break a line into caption-sized pieces on word boundaries.
 ///
@@ -109,13 +128,68 @@ fn stamp(ms: u64) -> String {
     format!("{h:02}:{m:02}:{s:02},{:03}", ms % 1_000)
 }
 
-/// How many characters a caption line may run to before it is broken.
+/// How many characters a caption may run to, per script.
 ///
-/// Two shortish lines read faster than one long one, and a caption wider than
-/// the frame is simply lost. Counted in characters rather than pixels because
-/// the renderer, not this, knows the frame size — and because the failure this
-/// prevents is a wall of text, which no exact measurement is needed to see.
+/// A number counted in characters cannot be one number. Bengali and Devanagari
+/// glyphs are far wider than Latin ones and carry more per character; Chinese,
+/// Japanese and Thai more again. Forty-two Latin characters is a comfortable
+/// line; forty-two Bengali characters is roughly twice the width of the frame,
+/// which is how a caption ends up wrapped over four lines covering the picture.
+pub fn wrap_chars(language: &str) -> usize {
+    match language {
+        // No spaces, and one character is a whole word's worth.
+        "zh" | "ja" => 18,
+        "th" => 26,
+        // Bengali, Devanagari, Arabic: wide glyphs, dense meaning.
+        "bn" | "hi" | "ar" | "ta" | "te" | "ml" | "kn" | "gu" | "pa" | "or" => 28,
+        _ => 42,
+    }
+}
+
+/// The Latin default, kept for callers with no language to hand.
 pub const WRAP_CHARS: usize = 42;
+
+/// A font that can actually draw this language.
+///
+/// libass defaults to Arial, which has not a single Bengali glyph. What follows
+/// is per-glyph fontconfig substitution, and the result for a conjunct script
+/// is at best a different font per character and at worst a row of boxes. So
+/// the font is named outright.
+///
+/// Candidates are tried in order and the first one present wins; the list ends
+/// with something universal so a caption is never simply missing.
+pub fn font_for(language: &str, exists: impl Fn(&str) -> bool) -> String {
+    let candidates: &[&str] = match language {
+        // Sangam first, and not by reputation. Rendered side by side through
+        // libass, Kohinoor Bangla and Bangla MN both *drop the pre-base vowel
+        // sign* — শেষ comes out শষ, ভেতরে comes out ভতরে — while Sangam places
+        // it correctly. Kohinoor is Apple's modern Bengali face and the obvious
+        // choice; it is wrong here, which is only visible by looking at the
+        // pixels. See the images in `bengali_captions_use_a_font_that_can_draw_them`.
+        "bn" => &["Bangla Sangam MN", "Noto Sans Bengali", "Nirmala UI", "Kohinoor Bangla"],
+        "hi" | "mr" | "ne" => &["Kohinoor Devanagari", "Devanagari MT", "Nirmala UI", "Noto Sans Devanagari"],
+        "ar" => &["Geeza Pro", "Al Nile", "Segoe UI", "Noto Naskh Arabic"],
+        "th" => &["Thonburi", "Leelawadee UI", "Noto Sans Thai"],
+        "zh" => &["PingFang SC", "Heiti SC", "Microsoft YaHei", "Noto Sans CJK SC"],
+        "ja" => &["Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic", "Noto Sans CJK JP"],
+        "ko" => &["Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans CJK KR"],
+        _ => &["Helvetica Neue", "Helvetica", "Arial"],
+    };
+    candidates
+        .iter()
+        .find(|f| exists(f))
+        // Arial Unicode MS covers nearly everything and ships with macOS and
+        // Office; past that, whatever fontconfig finds beats naming nothing.
+        .map(|f| f.to_string())
+        .unwrap_or_else(|| {
+            for last in ["Arial Unicode MS", "Helvetica", "Arial"] {
+                if exists(last) {
+                    return last.to_string();
+                }
+            }
+            "Arial".to_string()
+        })
+}
 
 /// Break a caption into at most two balanced lines.
 ///
@@ -266,24 +340,67 @@ mod tests {
     }
 
     #[test]
-    fn a_line_too_long_to_read_at_once_becomes_two_captions() {
-        // Ninety-one characters will not fit two readable lines, and one
-        // caption that wide runs off the frame. Two in sequence is what a
-        // subtitler would do.
+    fn a_long_line_becomes_several_single_line_captions() {
+        // One line each, in sequence. Two stacked lines double what the eye
+        // has to take in while the picture is also asking for attention, and
+        // four of them — which is what a wide script produced — cover it.
         let text = "The harbour did not so much freeze as stop, boats caught mid-turn where the water took them";
-        assert!(text.chars().count() > MAX_CUE_CHARS);
         let items = [item("a", 0, 8_000)];
         let out = cues(&items, |_| Some(text.into()));
 
-        assert_eq!(out.len(), 2, "{out:?}");
-        assert!(out.iter().all(|c| c.text.chars().count() <= MAX_CUE_CHARS), "{out:?}");
+        assert!(out.len() >= 2, "{out:?}");
+        assert!(
+            out.iter().all(|c| c.text.chars().count() <= MAX_CUE_CHARS),
+            "every caption fits one line: {out:?}",
+        );
         assert_eq!(out[0].start_ms, 0, "the first starts with the shot");
-        assert_eq!(out[0].end_ms, out[1].start_ms, "and they meet, with no gap");
-        assert_eq!(out[1].end_ms, 8_000 - TAIL_MS, "the last ends with the words");
+        assert_eq!(out.last().unwrap().end_ms, 8_000 - TAIL_MS, "the last ends with the words");
+        for pair in out.windows(2) {
+            assert_eq!(pair[0].end_ms, pair[1].start_ms, "no gap between them");
+        }
+        assert_eq!(
+            out.iter().map(|c| c.text.clone()).collect::<Vec<_>>().join(" "),
+            text,
+            "every word, in order",
+        );
+    }
 
-        // Every word, in order, across the two.
-        let rejoined = format!("{} {}", out[0].text, out[1].text);
-        assert_eq!(rejoined, text);
+    #[test]
+    fn a_wide_script_gets_a_shorter_line_than_a_narrow_one() {
+        // The bug this fixes: one character count for every language. Forty-two
+        // Bengali characters is about twice the width of the frame, so a caption
+        // wrapped at the Latin width covered the picture.
+        assert!(wrap_chars("bn") < wrap_chars("en"));
+        assert!(wrap_chars("zh") < wrap_chars("bn"));
+        assert_eq!(wrap_chars("fr"), wrap_chars("en"), "unknown scripts take the Latin width");
+    }
+
+    #[test]
+    fn bengali_is_never_set_in_a_font_without_bengali_in_it() {
+        // libass defaults to Arial, which has not one Bengali glyph, and then
+        // substitutes per character — which for a conjunct script is at best a
+        // different font per letter.
+        let have = |f: &str| matches!(f, "Bangla Sangam MN" | "Helvetica" | "Arial");
+        assert_eq!(font_for("bn", have), "Bangla Sangam MN");
+        assert_eq!(font_for("en", have), "Helvetica");
+    }
+
+    #[test]
+    fn a_language_with_nothing_installed_still_gets_a_font() {
+        // Never nothing: a caption that fails to draw is worse than one drawn
+        // in a substitute.
+        let only_arial = |f: &str| f == "Arial";
+        assert_eq!(font_for("bn", only_arial), "Arial");
+        let nothing = |_: &str| false;
+        assert_eq!(font_for("bn", nothing), "Arial");
+    }
+
+    #[test]
+    fn the_first_installed_candidate_wins() {
+        let all = |_: &str| true;
+        assert_eq!(font_for("bn", all), "Bangla Sangam MN");
+        let no_sangam = |f: &str| f != "Bangla Sangam MN";
+        assert_eq!(font_for("bn", no_sangam), "Noto Sans Bengali");
     }
 
     #[test]

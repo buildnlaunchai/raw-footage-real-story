@@ -1405,8 +1405,38 @@ select {
   gap: 0.55rem;
 }
 
+/* These had no rule at all, so they fell through to the browser's default
+   button chrome — a white background under text coloured for a dark one,
+   which left the titles all but invisible. */
+.idea-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.2rem;
+  width: 100%;
+  text-align: left;
+  background: var(--card-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: 0.75rem 0.95rem;
+  color: var(--ink);
+  font: inherit;
+  cursor: pointer;
+}
+
+.idea-item:hover {
+  border-color: color-mix(in srgb, #e4572e 55%, var(--line));
+  background: var(--card-3, #202028);
+}
+
+.idea-item.is-selected {
+  border-color: #e4572e;
+  box-shadow: inset 0 0 0 1px #e4572e;
+}
+
 .idea-title {
   font-weight: 600;
+  color: var(--ink);
 }
 
 .project-list {

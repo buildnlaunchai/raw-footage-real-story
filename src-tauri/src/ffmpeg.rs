@@ -644,6 +644,43 @@ fn tonemap_chain(caps: &FfmpegCaps) -> &'static str {
     }
 }
 
+/// How burned-in captions look.
+///
+/// Exposed rather than fixed because a caption sits on top of somebody's
+/// footage: the size that reads on a phone buries a wide landscape shot, and
+/// white on white snow is not a caption at all.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubtitleStyle {
+    /// Height of the text as a fraction of the frame height.
+    pub size: f32,
+    /// How far the baseline sits above the bottom edge, as a fraction of height.
+    pub bottom: f32,
+    /// `&HBBGGRR` — ASS colour order, which is not RGB.
+    pub colour: String,
+    /// A dark plate behind the text rather than only an outline.
+    pub box_behind: bool,
+    /// The font family. Empty means "choose one that can draw this language".
+    pub font: String,
+}
+
+impl Default for SubtitleStyle {
+    fn default() -> Self {
+        Self {
+            // Measured against the frame, not fixed in points: 1/26 of the
+            // height is about 41px on 1080p, which reads on a laptop and does
+            // not dominate a phone.
+            size: 1.0 / 26.0,
+            // The lower third: clear of the bottom edge and of anything a
+            // player draws over it, without climbing into the picture.
+            bottom: 0.085,
+            colour: "&H00FFFFFF".into(),
+            box_behind: false,
+            font: String::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RenderSettings {
@@ -686,6 +723,9 @@ pub struct RenderSettings {
     /// boundary without making every cut in the film a dissolve.
     #[serde(default)]
     pub transitions: Vec<u32>,
+    /// How the burned-in captions look and where they sit.
+    #[serde(default)]
+    pub subtitle_style: SubtitleStyle,
     /// A subtitle file to burn into the picture.
     ///
     /// The file is written whatever this is set to — it is useful on its own,
@@ -714,6 +754,7 @@ impl Default for RenderSettings {
             intro_fade_ms: 0,
             source_audio_gain: 0.0,
             transitions: Vec::new(),
+            subtitle_style: SubtitleStyle::default(),
             music_path: None,
             music_gain: default_music_gain(),
             subtitle_path: None,
@@ -1018,14 +1059,27 @@ pub fn render_rough_cut(
                 cmd.current_dir(dir);
             }
             let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-            // Sized from the frame rather than fixed: 24pt is unreadable on a
-            // phone-shot 1080-wide portrait clip and enormous on a 4K one.
-            let font = (height as f64 / 22.0).round().max(16.0) as u32;
+            let st = &settings.subtitle_style;
+            // Everything measured against the frame rather than fixed in
+            // points: 24pt is unreadable on a phone-shot portrait clip and
+            // dominates a 4K one.
+            let font_size = (height as f32 * st.size).round().max(14.0) as u32;
+            let margin_v = (height as f32 * st.bottom).round().max(8.0) as u32;
+            // Side margins keep a caption off the very edges, which is where a
+            // long line otherwise runs to.
+            let margin_h = (width as f32 * 0.06).round() as u32;
+            let border = if st.box_behind { 3 } else { 1 };
+            let font_name = if st.font.is_empty() {
+                String::new()
+            } else {
+                format!("FontName={},", st.font)
+            };
             filter.push_str(&format!(
-                "{vout}subtitles=filename={name}:force_style='FontSize={font},\
-                 PrimaryColour=&H00FFFFFF,OutlineColour=&H90000000,BorderStyle=1,\
-                 Outline=2,Shadow=1,MarginV={}'[subv];",
-                (height as f64 / 18.0).round().max(12.0) as u32,
+                "{vout}subtitles=filename={name}:force_style='{font_name}FontSize={font_size},\
+                 PrimaryColour={},OutlineColour=&H90000000,BackColour=&H90000000,\
+                 BorderStyle={border},Outline=2,Shadow=1,Alignment=2,\
+                 MarginV={margin_v},MarginL={margin_h},MarginR={margin_h}'[subv];",
+                st.colour,
             ));
             "[subv]".to_string()
         }

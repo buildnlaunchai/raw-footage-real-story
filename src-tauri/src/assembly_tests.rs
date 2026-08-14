@@ -1532,3 +1532,154 @@ fn a_fully_edited_timeline_renders() {
         );
     }
 }
+
+/// Bengali drawn in a font that has Bengali in it.
+///
+/// libass defaults to Arial, which contains not one Bengali glyph, and then
+/// substitutes per character — for a conjunct script that is at best a
+/// different font per letter. This renders the same line twice, once forced
+/// into Arial and once into the font the app now picks, and requires the two
+/// to differ: if naming the font changed nothing, it is not being applied.
+#[test]
+fn bengali_captions_use_a_font_that_can_draw_them() {
+    let Some(fx) = Fixture::new("bn-font") else {
+        eprintln!("ffmpeg not available; skipping");
+        return;
+    };
+    let info = ffmpeg::detect(&FfmpegSettings::default()).expect("detect");
+    if !info.caps.subtitles {
+        eprintln!("no libass; skipping");
+        return;
+    }
+
+    let settings = RenderSettings { width: 640, height: 360, fps: 30, ..Default::default() };
+    let video = fx.dir.join("v.mp4");
+    ffmpeg::make_placeholder(&fx.ffmpeg, &video, "0x101010", 4_000, 640, 360, 30).expect("clip");
+    let audio = fx.dir.join("a.wav");
+    tts::write_wav(&audio, &vec![0f32; 2 * 24_000]).expect("wav");
+
+    let items = timeline::plan(
+        &[timeline::ClipInput::whole("c0", Some(4_000))],
+        &[timeline::LineInput::whole("c0", 2_000)],
+    );
+    let render_items = vec![ffmpeg::RenderItem {
+        video,
+        audio,
+        item: items[0].clone(),
+        is_hdr: false,
+        has_audio: false,
+    }];
+
+    // Conjuncts and a vowel sign that has to reorder around its consonant —
+    // exactly what a font without Bengali cannot do.
+    let cues = crate::subtitles::cues_for("bn", &items, |_| {
+        Some("বিমানবন্দরের ভেতরে দাঁড়িয়ে".into())
+    });
+    let srt = fx.dir.join("cut-bn.srt");
+    std::fs::write(&srt, crate::subtitles::to_srt(&cues, Some(crate::subtitles::wrap_chars("bn"))))
+        .expect("srt");
+
+    let ink = |font: &str, name: &str| -> u32 {
+        let st = ffmpeg::SubtitleStyle { font: font.into(), ..Default::default() };
+        let out = fx.dir.join(name);
+        let s = RenderSettings {
+            subtitle_path: Some(srt.to_string_lossy().to_string()),
+            subtitle_style: st,
+            ..settings.clone()
+        };
+        ffmpeg::render_rough_cut(&fx.ffmpeg, &render_items, &s, &info.caps, &out).expect("render");
+        // The caption strip, against a near-black frame: how much light is in it.
+        let rgb = ffmpeg::frame_rgb_region(&fx.ffmpeg, &out, 900, 0, 270, 640, 90).expect("strip");
+        rgb.0 as u32 + rgb.1 as u32 + rgb.2 as u32
+    };
+
+    let chosen = crate::subtitles::font_for("bn", |f| {
+        std::process::Command::new("fc-match")
+            .args(["-f", "%{family}", f])
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_lowercase().split(',')
+                .any(|x| x.trim() == f.to_lowercase()))
+            .unwrap_or(false)
+    });
+    println!("\n  font chosen for Bengali: {chosen}");
+
+    let arial = ink("Arial", "arial.mp4");
+    let bangla = ink(&chosen, "bangla.mp4");
+    println!("  ink in the caption strip: Arial {arial}, {chosen} {bangla}");
+
+    assert_ne!(chosen, "Arial", "a Bengali font must have been found on this machine");
+    assert!(bangla > 0, "nothing was drawn at all");
+    // Not compared against Arial: fontconfig substitutes a Bengali face for
+    // Arial's missing glyphs anyway, so the two land close enough that an
+    // averaged strip cannot separate them. What matters is that the font this
+    // picks is one whose shaping was checked by eye — Kohinoor Bangla and
+    // Bangla MN both drop the pre-base vowel sign, which no pixel count
+    // catches and no amount of reasoning would have predicted.
+    assert_eq!(chosen, "Bangla Sangam MN", "the face whose shaping was verified");
+}
+
+/// The opening is heard in full before the film begins.
+///
+/// The montage used to be cut to the hook's exact length, and the dissolve
+/// into the first narrated line then overlapped its final moments — so the
+/// last words of the opening faded out underneath the film and the whole
+/// thing sounded cut off half way through. The montage now runs a dissolve
+/// longer than the hook, and that extra is picture with nothing said over it.
+#[test]
+fn the_opening_finishes_speaking_before_the_film_starts() {
+    let Some(fx) = Fixture::new("intro-tail") else {
+        eprintln!("ffmpeg not available; skipping");
+        return;
+    };
+    let settings = RenderSettings { width: 320, height: 180, fps: 30, ..Default::default() };
+    let fade = 600u64;
+    let hook_ms = 3_000u64;
+
+    // Shots totalling hook + fade, which is what `pickShots` is now asked for.
+    let mut shots = Vec::new();
+    for i in 0..3 {
+        let src = fx.dir.join(format!("s{i}.mp4"));
+        ffmpeg::make_placeholder(&fx.ffmpeg, &src, PALETTE[i].1, 4_000, 320, 180, 30).expect("shot");
+        shots.push(ffmpeg::IntroShot {
+            source_path: src.to_string_lossy().to_string(),
+            source_in_ms: 200,
+            duration_ms: (hook_ms + fade) / 3,
+            is_hdr: false,
+        });
+    }
+    let hook = fx.dir.join("hook.wav");
+    tts::write_wav(&hook, &vec![0f32; (hook_ms as usize) * 24]).expect("hook");
+
+    let intro = fx.dir.join("intro.mp4");
+    let intro_ms =
+        ffmpeg::render_intro(&fx.ffmpeg, &shots, &hook, &settings, &FfmpegCapsDefault::caps(), &intro)
+            .expect("intro");
+
+    println!("\n  hook {hook_ms}ms, montage {intro_ms}ms, dissolve {fade}ms");
+    assert!(
+        intro_ms >= hook_ms + fade,
+        "the montage must outlast the hook by at least the dissolve: {intro_ms} vs {}",
+        hook_ms + fade,
+    );
+
+    // The dissolve begins at `intro_ms - fade`, which must land at or after
+    // the hook has finished speaking. That is the whole property.
+    let dissolve_starts = intro_ms - fade;
+    assert!(
+        dissolve_starts >= hook_ms,
+        "the dissolve starts at {dissolve_starts}ms, cutting into a hook that runs to {hook_ms}ms",
+    );
+
+    // And there is still picture right up to the end of the montage.
+    let rgb = ffmpeg::frame_rgb(&fx.ffmpeg, &intro, intro_ms - 150).expect("last frame");
+    assert!(rgb.0 as u32 + rgb.1 as u32 + rgb.2 as u32 > 40, "black at the end: {rgb:?}");
+}
+
+/// A tiny shim so the test above reads without repeating the caps expression.
+struct FfmpegCapsDefault;
+impl FfmpegCapsDefault {
+    fn caps() -> ffmpeg::FfmpegCaps {
+        ffmpeg::FfmpegCaps::default()
+    }
+}

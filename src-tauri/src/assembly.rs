@@ -15,6 +15,28 @@ const PLACEHOLDER_COLORS: &[&str] = &[
     "0xE4572E", "0x17BEBB", "0xFFC914", "0x2E282A", "0x76B041", "0x8332AC", "0x0B6E4F", "0xD7263D",
 ];
 
+/// Whether a font family is present on this machine.
+///
+/// Asked of fontconfig, which is what libass itself consults, so the answer is
+/// the one that will be used rather than a guess from a list of paths. A build
+/// without `fc-match` reports nothing installed, and the caller falls through
+/// to its universal last resort.
+fn font_installed(family: &str) -> bool {
+    std::process::Command::new("fc-match")
+        .arg("-f")
+        .arg("%{family}")
+        .arg(family)
+        .output()
+        .ok()
+        .map(|o| {
+            let got = String::from_utf8_lossy(&o.stdout).to_lowercase();
+            // fc-match always answers with *something*, so a match only counts
+            // when the family it returns is the one that was asked for.
+            got.split(',').any(|f| f.trim() == family.to_lowercase())
+        })
+        .unwrap_or(false)
+}
+
 fn settings_path(app: &AppHandle) -> Result<PathBuf, FfmpegError> {
     let dir = app
         .path()
@@ -440,6 +462,10 @@ pub async fn assembly_render(
     // and a dissolve length per boundary where the timeline has an opinion.
     source_audio_gain: Option<f32>,
     transitions: Option<Vec<u32>>,
+    // The script's language, which decides how wide a caption line may be and
+    // which font can draw it, and how those captions should look.
+    language: Option<String>,
+    subtitle_style: Option<ffmpeg::SubtitleStyle>,
 ) -> Result<AssembleResult, FfmpegError> {
     let source_audio_gain = source_audio_gain.unwrap_or(0.0);
     let info = ffmpeg::detect(&load_settings(&app))?;
@@ -636,7 +662,8 @@ pub async fn assembly_render(
     // the cut's own rather than an estimate of it, and written whatever the
     // toggle says. Burning them in is the part that needs libass.
     let subs_path = dir.join("render").join(format!("cut-{stem}.srt"));
-    let cues = crate::subtitles::cues(&items, |it| {
+    let lang = language.unwrap_or_else(|| "en".into());
+    let cues = crate::subtitles::cues_for(&lang, &items, |it| {
         if it.clip_id == timeline::INTRO_CLIP_ID {
             intro.as_ref().and_then(|i| i.text.clone())
         } else {
@@ -649,7 +676,7 @@ pub async fn assembly_render(
     let mut subtitle_path = None;
     let mut subtitle_error = None;
     if !cues.is_empty() {
-        let doc = crate::subtitles::to_srt(&cues, Some(crate::subtitles::WRAP_CHARS));
+        let doc = crate::subtitles::to_srt(&cues, Some(crate::subtitles::wrap_chars(&lang)));
         match std::fs::write(&subs_path, doc) {
             Ok(()) => subtitle_path = Some(subs_path.to_string_lossy().to_string()),
             Err(e) => subtitle_error = Some(format!("Could not write the subtitle file: {e}")),
@@ -665,6 +692,13 @@ pub async fn assembly_render(
             );
         } else if let Some(p) = subtitle_path.clone() {
             settings.subtitle_path = Some(p);
+            let mut style = subtitle_style.unwrap_or_default();
+            if style.font.is_empty() {
+                // Named outright rather than left to libass, which defaults to
+                // Arial — a font with not one Bengali glyph in it.
+                style.font = crate::subtitles::font_for(&lang, |f| font_installed(f));
+            }
+            settings.subtitle_style = style;
         }
     }
 

@@ -414,7 +414,12 @@ function App() {
         sourcePath: c.sourcePath,
       })),
     );
-    return pickShots(hookAudio.durationMs, candidates, {
+    // The montage runs the hook's length *plus* the dissolve. The dissolve
+    // overlaps the montage with the first narrated line, so a montage cut to
+    // the hook exactly had its last words fading out under the film — the
+    // opening was heard cut off half way through. The extra is picture with
+    // no speech over it, which is precisely what a dissolve should consume.
+    return pickShots(hookAudio.durationMs + INTRO_FADE_MS, candidates, {
       storyClipIds: (lines ?? []).map((l) => l.clipId),
       firstLineClipId: lines?.[0]?.clipId ?? null,
     });
