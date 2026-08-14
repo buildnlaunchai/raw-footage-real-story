@@ -44,14 +44,20 @@ pub struct FfmpegCaps {
     /// comes out washed out and grey — silently, which is the worst kind.
     pub zscale: bool,
     pub tonemap: bool,
-    /// libass. Without it nothing can draw text into the picture, so subtitles
-    /// can only be written as a file alongside the video.
+    /// libfreetype, via the `drawtext` filter — how captions are drawn.
     ///
-    /// Not an incidental gap: Homebrew's plain `ffmpeg` formula is built
-    /// without it, so the most ordinary install on macOS cannot burn a single
-    /// character. Bengali, Arabic and Thai make it load-bearing rather than a
-    /// nicety — they need the shaping and bidi that libass brings with
-    /// harfbuzz and fribidi, which no hand-rolled overlay would get right.
+    /// Chosen over libass, which is what ffmpeg's `subtitles` filter uses,
+    /// because libass does no complex shaping in the builds people actually
+    /// have: Bengali vowel signs land after their consonant, Arabic letters do
+    /// not join, Devanagari does not reorder. Every font produced the same
+    /// wrong output. `drawtext` shapes all three correctly, given a plain
+    /// `.ttf` — which is why the fonts are bundled.
+    ///
+    /// Homebrew's plain `ffmpeg` formula has neither this nor libass, so the
+    /// most ordinary install on macOS cannot draw a single character.
+    pub drawtext: bool,
+    /// libass. No longer used to draw captions, but its absence still says
+    /// something about how complete a build is.
     pub subtitles: bool,
 }
 
@@ -70,6 +76,7 @@ fn probe_caps(ffmpeg: &Path) -> FfmpegCaps {
         zscale: has("zscale"),
         tonemap: has("tonemap"),
         subtitles: has("subtitles"),
+        drawtext: has("drawtext"),
     }
 }
 
@@ -225,7 +232,7 @@ fn resolve_ffmpeg(saved: Option<&String>) -> Option<PathBuf> {
             continue;
         }
         let caps = probe_caps(&candidate);
-        let score = u8::from(caps.zscale) + u8::from(caps.subtitles);
+        let score = u8::from(caps.zscale) + u8::from(caps.drawtext);
         // Nothing scores higher, so stop paying for probes.
         if score == 2 {
             return Some(candidate);
@@ -642,6 +649,20 @@ pub struct RenderItem {
 /// So when zscale is absent we deliberately do nothing and rely on the import
 /// warning. A wrong correction that looks deliberate is harder for a user to
 /// diagnose than no correction at all.
+/// `&HBBGGRR` back to the `0xRRGGBB` that `drawtext` wants.
+///
+/// The two filters disagree about byte order, and a colour that comes out
+/// blue-for-red looks deliberate enough that nobody questions it.
+fn ass_to_drawtext_colour(ass: &str) -> String {
+    let hex = ass.trim_start_matches("&H").trim_start_matches("&h");
+    // &HAABBGGRR — alpha first when present, then blue, green, red.
+    let body = if hex.len() >= 8 { &hex[hex.len() - 6..] } else { hex };
+    if body.len() != 6 {
+        return "white".into();
+    }
+    format!("0x{}{}{}", &body[4..6], &body[2..4], &body[0..2])
+}
+
 /// The canvas libass lays subtitles out on, before scaling to the frame.
 ///
 /// ffmpeg's SRT-to-ASS conversion writes `PlayResX: 384, PlayResY: 288` into
@@ -657,6 +678,23 @@ fn tonemap_chain(caps: &FfmpegCaps) -> &'static str {
     } else {
         ""
     }
+}
+
+/// One caption, ready to draw: where its text file is and when it is on screen.
+///
+/// The words travel as a *file* rather than inline in the filter string.
+/// `drawtext` takes its argument through the filtergraph parser, where a colon
+/// separates options and a comma separates filters — so a caption containing
+/// either, or a quote, or a backslash, would need escaping twice over and
+/// would fail at render time on somebody else's sentence. A file has no such
+/// problem: it is read verbatim.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BurnCue {
+    /// File holding the caption's text, relative to the render directory.
+    pub text_file: String,
+    pub start_ms: u64,
+    pub end_ms: u64,
 }
 
 /// How burned-in captions look.
@@ -741,13 +779,16 @@ pub struct RenderSettings {
     /// How the burned-in captions look and where they sit.
     #[serde(default)]
     pub subtitle_style: SubtitleStyle,
-    /// A subtitle file to burn into the picture.
+    /// The captions to draw into the picture, already timed.
     ///
-    /// The file is written whatever this is set to — it is useful on its own,
-    /// and every site accepts one as an upload. This is only about drawing the
-    /// words into the frames, which needs a build with libass.
+    /// The `.srt` is written whatever this holds — it is useful on its own and
+    /// every site takes one as an upload. This is only about drawing words
+    /// into frames.
     #[serde(default)]
-    pub subtitle_path: Option<String>,
+    pub burn_in: Vec<BurnCue>,
+    /// The font file to draw them with, and the directory holding it.
+    #[serde(default)]
+    pub subtitle_font: Option<String>,
 }
 
 fn default_music_gain() -> f32 {
@@ -772,7 +813,8 @@ impl Default for RenderSettings {
             subtitle_style: SubtitleStyle::default(),
             music_path: None,
             music_gain: default_music_gain(),
-            subtitle_path: None,
+            burn_in: Vec::new(),
+            subtitle_font: None,
         }
     }
 }
@@ -852,6 +894,17 @@ pub fn render_rough_cut(
     let RenderSettings { width, height, fps, .. } = *settings;
     let mut cmd = Command::new(ffmpeg);
     cmd.args(["-y", "-v", "error"]);
+
+    // Caption files and their font are named relative to the directory the cut
+    // is written to, and ffmpeg is run from there. The filtergraph parser
+    // treats a colon as an option separator, so an absolute path through a
+    // folder somebody named "Trip: Bangkok" would break the graph — and only
+    // on their machine.
+    if !settings.burn_in.is_empty() {
+        if let Some(dir) = out.parent() {
+            cmd.current_dir(dir);
+        }
+    }
 
     for it in items {
         cmd.arg("-i").arg(&it.video);
@@ -1058,55 +1111,50 @@ pub fn render_rough_cut(
         (format!("[{vprev}]"), format!("[{aprev}]"))
     };
 
-    // Subtitles last, so they are drawn over the finished picture rather than
-    // into a shot that a later dissolve then fades out from under them.
+    // Captions last, so they are drawn over the finished picture rather than
+    // into a shot a later dissolve then fades out from under them.
     //
-    // The file is named without a path and ffmpeg is run from the directory it
-    // sits in. The filter parses its own argument, so a Windows drive letter or
-    // any of the punctuation macOS allows in a folder name would otherwise have
-    // to be escaped twice over — and getting that wrong fails at render time,
-    // on someone else's machine, with a parse error about a colon.
-    let vout = match settings.subtitle_path.as_deref().filter(|p| Path::new(p).is_file()) {
-        None => vout,
-        Some(subs) => {
-            let path = Path::new(subs);
-            if let Some(dir) = path.parent() {
-                cmd.current_dir(dir);
-            }
-            let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-            let st = &settings.subtitle_style;
-            // Sizes and margins are in *libass's* coordinate space, not the
-            // video's. ffmpeg converts SRT to ASS with `PlayResX: 384,
-            // PlayResY: 288` and libass then scales that whole canvas up to
-            // the frame — so on 1080p every number here is multiplied by 3.75
-            // before it reaches a pixel.
-            //
-            // Sizing against the frame height instead put 41pt text on screen
-            // at 156px and a 92pt bottom margin 345px up, which is how a
-            // caption meant for the lower third ended up enormous and halfway
-            // up the picture. Everything is a fraction of the frame, so the
-            // fraction is applied to the canvas the fraction is measured in.
-            let font_size = (PLAY_RES_Y * st.size).round().max(6.0) as u32;
-            let margin_v = (PLAY_RES_Y * st.bottom).round().max(4.0) as u32;
-            // Side margins keep a caption off the very edges, which is where a
-            // long line otherwise runs to.
-            let margin_h = (PLAY_RES_X * 0.06).round() as u32;
-            let _ = width;
-            let border = if st.box_behind { 3 } else { 1 };
-            let font_name = if st.font.is_empty() {
-                String::new()
-            } else {
-                format!("FontName={},", st.font)
-            };
+    // Drawn with `drawtext`, not with libass. libass — what ffmpeg's
+    // `subtitles` filter uses — does no complex shaping in the builds people
+    // have: Bengali vowel signs land after their consonant (ভেতরের renders
+    // ভতেররে), Arabic letters do not join, Devanagari does not reorder. Every
+    // font produced the same wrong output, and a hand-written .ass failed too,
+    // so it is libass rather than anything upstream of it. `drawtext` shapes
+    // all three correctly from a plain .ttf, which is why the fonts ship with
+    // the app.
+    //
+    // One filter per caption, switched on for its own window. A film of a few
+    // hundred captions makes a long graph and ffmpeg handles it; the
+    // alternative, a filter that reads a file, is the one that cannot shape.
+    let vout = if settings.burn_in.is_empty() {
+        vout
+    } else {
+        let st = &settings.subtitle_style;
+        let font = settings.subtitle_font.clone().unwrap_or_default();
+        // Sizes here are real pixels, unlike an ASS style — `drawtext` draws
+        // straight into the frame with no canvas in between.
+        let font_size = (height as f32 * st.size).round().max(10.0) as u32;
+        let margin_v = (height as f32 * st.bottom).round().max(4.0) as u32;
+        let colour = ass_to_drawtext_colour(&st.colour);
+
+        let mut prev = vout;
+        for (i, cue) in settings.burn_in.iter().enumerate() {
+            let label = format!("[sub{i}]");
             filter.push_str(&format!(
-                "{vout}subtitles=filename={name}:force_style='{font_name}FontSize={font_size},\
-                 PrimaryColour={},OutlineColour=&H90000000,BackColour=&H90000000,\
-                 BorderStyle={border},Outline=2,Shadow=1,Alignment=2,\
-                 MarginV={margin_v},MarginL={margin_h},MarginR={margin_h}'[subv];",
-                st.colour,
+                "{prev}drawtext=fontfile={font}:textfile={}:\
+                 fontsize={font_size}:fontcolor={colour}:\
+                 x=(w-text_w)/2:y=h-{margin_v}-text_h:\
+                 borderw=2:bordercolor=black@0.85:shadowx=1:shadowy=1:\
+                 box={}:boxcolor=black@0.55:boxborderw=12:\
+                 enable='between(t\\,{:.3}\\,{:.3})'{label};",
+                cue.text_file,
+                u8::from(st.box_behind),
+                cue.start_ms as f64 / 1000.0,
+                cue.end_ms as f64 / 1000.0,
             ));
-            "[subv]".to_string()
+            prev = label;
         }
+        prev
     };
 
     // Optional music bed under the narration.

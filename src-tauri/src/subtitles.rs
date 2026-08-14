@@ -178,15 +178,36 @@ pub fn dominant_script(text: &str) -> &'static str {
     ["bn", "hi", "ar", "th", "ja", "ko", "zh", "en"][best]
 }
 
-/// A font that can actually draw this language.
+/// The bundled font file that can draw this script.
 ///
-/// libass defaults to Arial, which has not a single Bengali glyph. What follows
-/// is per-glyph fontconfig substitution, and the result for a conjunct script
-/// is at best a different font per character and at worst a row of boxes. So
-/// the font is named outright.
+/// A file shipped with the app, not a family name looked up on the machine.
+/// Two findings forced that:
 ///
-/// Candidates are tried in order and the first one present wins; the list ends
-/// with something universal so a caption is never simply missing.
+/// - libass, which ffmpeg's `subtitles` filter uses, does no complex shaping in
+///   the builds people have. Bengali vowel signs land after their consonant,
+///   Arabic does not join, Devanagari does not reorder — the same wrong output
+///   from every font tried, so the text is drawn with `drawtext` instead.
+/// - `drawtext` shapes correctly only from a plain `.ttf`. Handed a `.ttc`
+///   collection — which is what every Bengali font on macOS is — it loses the
+///   shaping tables and produces the same mess.
+///
+/// So each script gets a `.ttf` of its own, fetched by `scripts/fetch-fonts.sh`.
+pub fn font_file_for(script: &str) -> &'static str {
+    match script {
+        "bn" => "NotoSansBengali-Regular.ttf",
+        "hi" | "mr" | "ne" => "NotoSansDevanagari-Regular.ttf",
+        "ar" | "fa" | "ur" => "NotoSansArabic-Regular.ttf",
+        "th" => "NotoSansThai-Regular.ttf",
+        // Latin, Greek and Cyrillic, and the fallback for anything not
+        // bundled — Chinese, Japanese and Korean among them, whose fonts are
+        // tens of megabytes each and are left to the system for now.
+        _ => "NotoSans-Regular.ttf",
+    }
+}
+
+/// A font family that can draw this language, for the libass path.
+///
+/// Kept for the `.srt` sidecar's sake and for builds without `drawtext`.
 pub fn font_for(language: &str, exists: impl Fn(&str) -> bool) -> String {
     let candidates: &[&str] = match language {
         // Sangam first, and not by reputation. Rendered side by side through

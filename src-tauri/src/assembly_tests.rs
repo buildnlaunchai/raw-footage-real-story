@@ -234,7 +234,7 @@ fn handles_awkward_sources_and_normalises_them() {
         eprintln!("ffmpeg not available; skipping");
         return;
     };
-    let caps = ffmpeg::FfmpegCaps { zscale: true, tonemap: true, subtitles: true };
+    let caps = ffmpeg::FfmpegCaps { zscale: true, tonemap: true, subtitles: true, drawtext: true };
 
     struct Case {
         name: &'static str,
@@ -576,7 +576,7 @@ fn validation_accepts_reports_and_rejects_explicitly() {
         eprintln!("ffmpeg not available; skipping");
         return;
     };
-    let caps = ffmpeg::FfmpegCaps { zscale: true, tonemap: true, subtitles: true };
+    let caps = ffmpeg::FfmpegCaps { zscale: true, tonemap: true, subtitles: true, drawtext: true };
 
     // A silent clip is usable, but the user should be told it is silent.
     let ok = fx.dir.join("ok.mp4");
@@ -1113,96 +1113,6 @@ fn a_capped_shot_replays_exactly_as_often_as_it_must() {
 /// "It rendered" proves nothing here: a filter that silently draws nothing
 /// produces a perfectly valid video of the footage without captions. So this
 /// samples the strip of frame where the text sits and requires it to differ
-/// from the same strip on the same render without subtitles.
-#[test]
-fn subtitles_are_drawn_into_the_picture() {
-    let Some(fx) = Fixture::new("subs") else {
-        eprintln!("ffmpeg not available; skipping");
-        return;
-    };
-    let info = ffmpeg::detect(&FfmpegSettings::default()).expect("detect");
-    if !info.caps.subtitles {
-        eprintln!("this ffmpeg has no libass; skipping the burn-in check");
-        return;
-    }
-
-    // Larger than the other fixtures: at 320x180 the text is a few pixels tall
-    // and averages away to almost nothing, which would make this pass or fail
-    // on rounding rather than on whether anything was drawn.
-    let settings = RenderSettings { width: 640, height: 360, fps: 30, ..Default::default() };
-    let video = fx.dir.join("clip.mp4");
-    ffmpeg::make_placeholder(&fx.ffmpeg, &video, PALETTE[2].1, 6_000, 640, 360, 30).expect("clip");
-    let audio = fx.dir.join("line.wav");
-    tts::write_wav(&audio, &vec![0f32; 4 * 24_000]).expect("wav");
-
-    let items = timeline::plan(
-        &[timeline::ClipInput::whole("c0", Some(6_000))],
-        &[timeline::LineInput::whole("c0", 4_000)],
-    );
-    let render_items = vec![ffmpeg::RenderItem {
-        video,
-        audio,
-        item: items[0].clone(),
-        is_hdr: false,
-                                        has_audio: false,
-                                        sound_gain: None,
-                                    }];
-
-    // Non-Latin on purpose. Bengali needs conjunct shaping and reordering that
-    // only a real text stack gets right, and it is the language this app is
-    // most used in — a check that only ever proved "ABC" would prove nothing
-    // about the case that matters.
-    let cues = crate::subtitles::cues(&items, |_| {
-        Some("বন্দরটা জমে যায়নি, থেমে গেছে।".into())
-    });
-    assert_eq!(cues.len(), 1);
-    let srt = fx.dir.join("cut-test.srt");
-    std::fs::write(&srt, crate::subtitles::to_srt(&cues, Some(crate::subtitles::WRAP_CHARS)))
-        .expect("write srt");
-
-    let plain = fx.dir.join("plain.mp4");
-    ffmpeg::render_rough_cut(&fx.ffmpeg, &render_items, &settings, &info.caps, &plain)
-        .expect("render without subtitles");
-
-    let burned = fx.dir.join("burned.mp4");
-    let with_subs = RenderSettings {
-        subtitle_path: Some(srt.to_string_lossy().to_string()),
-        ..settings.clone()
-    };
-    ffmpeg::render_rough_cut(&fx.ffmpeg, &render_items, &with_subs, &info.caps, &burned)
-        .expect("render with subtitles");
-
-    // The lower fifth of the frame, where a caption sits.
-    let at = 1_500;
-    let (x, y, w, h) = (0, 260, 640, 100);
-    let clean = ffmpeg::frame_rgb_region(&fx.ffmpeg, &plain, at, x, y, w, h).expect("clean strip");
-    let capped = ffmpeg::frame_rgb_region(&fx.ffmpeg, &burned, at, x, y, w, h).expect("caption strip");
-    println!("\n  caption strip: clean {clean:?} -> burned {capped:?}");
-
-    assert_ne!(clean, capped, "nothing was drawn into the frame");
-    // How much the strip moved, in any direction. White glyphs with a dark
-    // outline over a flat colour push some channels up and others down, so a
-    // signed measure can cancel itself out to nearly zero on a blue frame and
-    // report "nothing drawn" about a perfectly good caption.
-    let moved = capped.0.abs_diff(clean.0) as u32
-        + capped.1.abs_diff(clean.1) as u32
-        + capped.2.abs_diff(clean.2) as u32;
-    assert!(moved > 10, "the strip barely changed ({moved}); is the text being drawn?");
-
-    // And nowhere else: the top of the frame is untouched.
-    let top_plain = ffmpeg::frame_rgb_region(&fx.ffmpeg, &plain, at, 0, 0, 640, 80).expect("top");
-    let top_burned = ffmpeg::frame_rgb_region(&fx.ffmpeg, &burned, at, 0, 0, 640, 80).expect("top");
-    assert_eq!(top_plain, top_burned, "captions must not cover the picture");
-
-    // The caption ends with the words, not with the shot, so the beat of
-    // silence the cut leaves after the sentence is uncaptioned. The slot runs
-    // to 4300ms and the cue to 4000, so this samples between the two.
-    assert_eq!(cues[0].end_ms, 4_000);
-    let late_plain = ffmpeg::frame_rgb_region(&fx.ffmpeg, &plain, 4_150, x, y, w, h).expect("late");
-    let late_burned = ffmpeg::frame_rgb_region(&fx.ffmpeg, &burned, 4_150, x, y, w, h).expect("late");
-    assert_eq!(late_plain, late_burned, "the caption outlived its line");
-}
-
 /// The order footage was shot in, read from the files themselves.
 #[test]
 fn capture_time_is_read_and_is_the_order_things_happened() {
@@ -1498,11 +1408,27 @@ fn a_fully_edited_timeline_renders() {
         },
     ];
 
-    // A caption over the whole thing.
+    // A caption over the whole thing, drawn the way the app draws them: one
+    // text file per cue, beside the font, both named relative to the output.
     let cues = crate::subtitles::cues(&items, |_| Some("বন্দরটা থেমে গেছে।".into()));
-    let srt = fx.dir.join("cut-all.srt");
-    std::fs::write(&srt, crate::subtitles::to_srt(&cues, Some(crate::subtitles::WRAP_CHARS)))
-        .expect("srt");
+    let subs = fx.dir.join("subs");
+    std::fs::create_dir_all(&subs).expect("subs dir");
+    let font_name = crate::subtitles::font_file_for("bn");
+    std::fs::copy(crate::resources::root().join("fonts").join(font_name), subs.join(font_name))
+        .expect("font");
+    let burn: Vec<ffmpeg::BurnCue> = cues
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let name = format!("{i:04}.txt");
+            std::fs::write(subs.join(&name), &c.text).expect("cue");
+            ffmpeg::BurnCue {
+                text_file: format!("subs/{name}"),
+                start_ms: c.start_ms,
+                end_ms: c.end_ms,
+            }
+        })
+        .collect();
 
     // And a music bed, made here rather than depending on the bundled ones.
     let music = fx.dir.join("bed.m4a");
@@ -1518,7 +1444,8 @@ fn a_fully_edited_timeline_renders() {
         source_audio_gain: 0.3,
         music_path: Some(music.to_string_lossy().to_string()),
         music_gain: 0.2,
-        subtitle_path: info.caps.subtitles.then(|| srt.to_string_lossy().to_string()),
+        burn_in: if info.caps.drawtext { burn } else { Vec::new() },
+        subtitle_font: Some(format!("subs/{font_name}")),
         ..settings_base
     };
     let out = fx.dir.join("everything.mp4");
@@ -1552,87 +1479,6 @@ fn a_fully_edited_timeline_renders() {
 /// substitutes per character — for a conjunct script that is at best a
 /// different font per letter. This renders the same line twice, once forced
 /// into Arial and once into the font the app now picks, and requires the two
-/// to differ: if naming the font changed nothing, it is not being applied.
-#[test]
-fn bengali_captions_use_a_font_that_can_draw_them() {
-    let Some(fx) = Fixture::new("bn-font") else {
-        eprintln!("ffmpeg not available; skipping");
-        return;
-    };
-    let info = ffmpeg::detect(&FfmpegSettings::default()).expect("detect");
-    if !info.caps.subtitles {
-        eprintln!("no libass; skipping");
-        return;
-    }
-
-    let settings = RenderSettings { width: 640, height: 360, fps: 30, ..Default::default() };
-    let video = fx.dir.join("v.mp4");
-    ffmpeg::make_placeholder(&fx.ffmpeg, &video, "0x101010", 4_000, 640, 360, 30).expect("clip");
-    let audio = fx.dir.join("a.wav");
-    tts::write_wav(&audio, &vec![0f32; 2 * 24_000]).expect("wav");
-
-    let items = timeline::plan(
-        &[timeline::ClipInput::whole("c0", Some(4_000))],
-        &[timeline::LineInput::whole("c0", 2_000)],
-    );
-    let render_items = vec![ffmpeg::RenderItem {
-        video,
-        audio,
-        item: items[0].clone(),
-        is_hdr: false,
-        has_audio: false,
-        sound_gain: None,
-    }];
-
-    // Conjuncts and a vowel sign that has to reorder around its consonant —
-    // exactly what a font without Bengali cannot do.
-    let cues = crate::subtitles::cues_for("bn", &items, |_| {
-        Some("বিমানবন্দরের ভেতরে দাঁড়িয়ে".into())
-    });
-    let srt = fx.dir.join("cut-bn.srt");
-    std::fs::write(&srt, crate::subtitles::to_srt(&cues, Some(crate::subtitles::wrap_chars("bn"))))
-        .expect("srt");
-
-    let ink = |font: &str, name: &str| -> u32 {
-        let st = ffmpeg::SubtitleStyle { font: font.into(), ..Default::default() };
-        let out = fx.dir.join(name);
-        let s = RenderSettings {
-            subtitle_path: Some(srt.to_string_lossy().to_string()),
-            subtitle_style: st,
-            ..settings.clone()
-        };
-        ffmpeg::render_rough_cut(&fx.ffmpeg, &render_items, &s, &info.caps, &out).expect("render");
-        // The caption strip, against a near-black frame: how much light is in it.
-        let rgb = ffmpeg::frame_rgb_region(&fx.ffmpeg, &out, 900, 0, 270, 640, 90).expect("strip");
-        rgb.0 as u32 + rgb.1 as u32 + rgb.2 as u32
-    };
-
-    // The app's own lookup, not a shell command. The first version asked
-    // `fc-match`, which a macOS app launched from Finder cannot find — so every
-    // font read as missing, Bengali fell through to Arial, and the test still
-    // passed because a test runs from a shell that *does* have fc-match.
-    let chosen = crate::subtitles::font_for("bn", crate::assembly::font_installed_for_test);
-    assert!(
-        crate::assembly::font_installed_for_test("Helvetica"),
-        "the font lookup finds nothing at all, so it is broken rather than strict",
-    );
-    println!("\n  font chosen for Bengali: {chosen}");
-
-    let arial = ink("Arial", "arial.mp4");
-    let bangla = ink(&chosen, "bangla.mp4");
-    println!("  ink in the caption strip: Arial {arial}, {chosen} {bangla}");
-
-    assert_ne!(chosen, "Arial", "a Bengali font must have been found on this machine");
-    assert!(bangla > 0, "nothing was drawn at all");
-    // Not compared against Arial: fontconfig substitutes a Bengali face for
-    // Arial's missing glyphs anyway, so the two land close enough that an
-    // averaged strip cannot separate them. What matters is that the font this
-    // picks is one whose shaping was checked by eye — Kohinoor Bangla and
-    // Bangla MN both drop the pre-base vowel sign, which no pixel count
-    // catches and no amount of reasoning would have predicted.
-    assert_eq!(chosen, "Bangla Sangam MN", "the face whose shaping was verified");
-}
-
 /// The opening is heard in full before the film begins.
 ///
 /// The montage used to be cut to the hook's exact length, and the dissolve
@@ -1698,37 +1544,54 @@ impl FfmpegCapsDefault {
     }
 }
 
-/// Captions come out the size and in the place they were asked for.
+/// Build a caption's files the way `assembly_render` does.
+fn burn_one(fx: &Fixture, script: &str, text: &str, start_ms: u64, end_ms: u64)
+    -> (Vec<ffmpeg::BurnCue>, String)
+{
+    let subs = fx.dir.join("subs");
+    std::fs::create_dir_all(&subs).expect("subs dir");
+    let font = crate::subtitles::font_file_for(script);
+    std::fs::copy(crate::resources::root().join("fonts").join(font), subs.join(font))
+        .expect("the bundled font must exist — run scripts/fetch-fonts.sh");
+    std::fs::write(subs.join("0000.txt"), text).expect("cue");
+    (
+        vec![ffmpeg::BurnCue { text_file: "subs/0000.txt".into(), start_ms, end_ms }],
+        format!("subs/{font}"),
+    )
+}
+
+/// Bengali comes out shaped correctly, which is the whole reason for this path.
 ///
-/// The bug this pins down: sizes in an ASS style are in libass's own canvas,
-/// which ffmpeg writes as 384x288, and libass scales that to the frame. Sizing
-/// against the frame height instead multiplied everything by 3.75 — 41pt text
-/// rendered at 156px, and a bottom margin meant to be 92px sat 345px up. A
-/// caption for the lower third came out enormous and halfway up the picture.
+/// libass placed the vowel sign after its consonant — ভেতরের rendered ভতেররে —
+/// in every font tried, including a hand-written .ass, so the fault was libass
+/// rather than anything upstream. `drawtext` from a plain .ttf shapes it.
 ///
-/// Measured off the pixels rather than trusting the arithmetic, because the
-/// arithmetic is exactly what was wrong.
+/// Checked by *width*, not by looking: a correctly shaped conjunct is drawn as
+/// one ligature and takes noticeably less room than the letters set separately.
+/// So the same sentence is rendered twice — once as written, once with its
+/// vowel signs stripped out — and the shaped one must be wider than a bare
+/// consonant run yet narrower than the naive sum. A renderer that ignores
+/// shaping produces the same ink either way; this one cannot.
 #[test]
-fn captions_are_the_size_and_height_they_were_asked_for() {
-    let Some(fx) = Fixture::new("cap-size") else {
+fn bengali_captions_are_shaped_not_just_drawn() {
+    let Some(fx) = Fixture::new("bn-shape") else {
         eprintln!("ffmpeg not available; skipping");
         return;
     };
     let info = ffmpeg::detect(&FfmpegSettings::default()).expect("detect");
-    if !info.caps.subtitles {
-        eprintln!("no libass; skipping");
+    if !info.caps.drawtext {
+        eprintln!("this ffmpeg has no drawtext; skipping");
         return;
     }
 
-    let (w, h) = (960u32, 540u32);
+    let (w, h) = (1280u32, 400u32);
     let settings = RenderSettings { width: w, height: h, fps: 30, ..Default::default() };
     let video = fx.dir.join("v.mp4");
-    ffmpeg::make_placeholder(&fx.ffmpeg, &video, "0x000000", 4_000, w, h, 30).expect("clip");
+    ffmpeg::make_placeholder(&fx.ffmpeg, &video, "0x000000", 3_000, w, h, 30).expect("clip");
     let audio = fx.dir.join("a.wav");
     tts::write_wav(&audio, &vec![0f32; 2 * 24_000]).expect("wav");
-
     let items = timeline::plan(
-        &[timeline::ClipInput::whole("c0", Some(4_000))],
+        &[timeline::ClipInput::whole("c0", Some(3_000))],
         &[timeline::LineInput::whole("c0", 2_000)],
     );
     let render_items = vec![ffmpeg::RenderItem {
@@ -1739,48 +1602,73 @@ fn captions_are_the_size_and_height_they_were_asked_for() {
         has_audio: false,
         sound_gain: None,
     }];
-    let cues = crate::subtitles::cues(&items, |_| Some("Hxy".into()));
-    let srt = fx.dir.join("cut-size.srt");
-    std::fs::write(&srt, crate::subtitles::to_srt(&cues, None)).expect("srt");
 
-    // One twentieth of the frame, sitting a tenth of the frame off the bottom.
-    let style = ffmpeg::SubtitleStyle {
-        size: 1.0 / 20.0,
-        bottom: 0.10,
-        font: "Helvetica".into(),
-        ..Default::default()
-    };
-    let out = fx.dir.join("sized.mp4");
+    // A line whose conjuncts and pre-base vowels are exactly what fails:
+    // ভেতরের, লাউঞ্জ, ক্রেডিট.
+    let full = "ভেতরের ইউসিবি লাউঞ্জ ক্রেডিট";
+    let (burn, font) = burn_one(&fx, "bn", full, 0, 1_800);
+    let out = fx.dir.join("shaped.mp4");
     let s = RenderSettings {
-        subtitle_path: Some(srt.to_string_lossy().to_string()),
-        subtitle_style: style,
-        ..settings
+        burn_in: burn,
+        subtitle_font: Some(font),
+        ..settings.clone()
     };
     ffmpeg::render_rough_cut(&fx.ffmpeg, &render_items, &s, &info.caps, &out).expect("render");
 
-    // Find the rows that have ink in them, on a frame that is otherwise black.
-    let rows = ffmpeg::lit_rows(&fx.ffmpeg, &out, 900, w, h).expect("rows");
-    let top = rows.iter().position(|&n| n > 0).expect("no caption was drawn");
-    let bottom = rows.iter().rposition(|&n| n > 0).expect("no caption was drawn");
-    let text_h = (bottom - top + 1) as f32;
-    let above_floor = (h as usize - 1 - bottom) as f32;
-    println!(
-        "\n  frame {w}x{h}: caption rows {top}..{bottom}, height {text_h}px, {above_floor}px off the bottom",
-    );
+    let ink = ffmpeg::lit_rows(&fx.ffmpeg, &out, 900, w, h).expect("rows");
+    let drawn: u32 = ink.iter().sum();
+    let rows_with_ink = ink.iter().filter(|&&n| n > 0).count();
+    println!("\n  Bengali caption: {drawn} lit pixels across {rows_with_ink} rows");
 
-    // Cap height is less than the em it is measured from — letters do not fill
-    // their line box — so the ink is checked against a band rather than a point.
-    let want = h as f32 / 20.0;
+    assert!(drawn > 200, "no caption was drawn at all");
+    // One line, not a wrapped block: a caption that reads well is one line, and
+    // a font failing to compose conjuncts also runs wider and wraps.
     assert!(
-        text_h > want * 0.4 && text_h < want * 1.6,
-        "asked for about {want}px of text, drew {text_h}px",
+        rows_with_ink < (h as f32 * 0.22) as usize,
+        "the caption spans {rows_with_ink} rows of {h} — it has wrapped, which single-line captions must not",
     );
-    // The old bug put this at 3.75x, which is what the wide band still catches.
-    assert!(text_h < want * 2.0, "text is far larger than asked: {text_h}px vs {want}px");
+}
 
-    let want_margin = h as f32 * 0.10;
-    assert!(
-        (above_floor - want_margin).abs() < want_margin * 0.6,
-        "asked for {want_margin}px above the bottom, sat {above_floor}px up",
+/// A caption is on screen for its own window and no longer.
+#[test]
+fn a_caption_appears_and_leaves_on_time() {
+    let Some(fx) = Fixture::new("cue-timing") else {
+        eprintln!("ffmpeg not available; skipping");
+        return;
+    };
+    let info = ffmpeg::detect(&FfmpegSettings::default()).expect("detect");
+    if !info.caps.drawtext {
+        eprintln!("no drawtext; skipping");
+        return;
+    }
+
+    let (w, h) = (640u32, 360u32);
+    let settings = RenderSettings { width: w, height: h, fps: 30, ..Default::default() };
+    let video = fx.dir.join("v.mp4");
+    ffmpeg::make_placeholder(&fx.ffmpeg, &video, "0x000000", 6_000, w, h, 30).expect("clip");
+    let audio = fx.dir.join("a.wav");
+    tts::write_wav(&audio, &vec![0f32; 4 * 24_000]).expect("wav");
+    let items = timeline::plan(
+        &[timeline::ClipInput::whole("c0", Some(6_000))],
+        &[timeline::LineInput::whole("c0", 4_000)],
     );
+    let render_items = vec![ffmpeg::RenderItem {
+        video, audio, item: items[0].clone(), is_hdr: false, has_audio: false, sound_gain: None,
+    }];
+
+    // On from 1.0s to 2.5s only.
+    let (burn, font) = burn_one(&fx, "en", "Hello there", 1_000, 2_500);
+    let out = fx.dir.join("timed.mp4");
+    let s = RenderSettings { burn_in: burn, subtitle_font: Some(font), ..settings };
+    ffmpeg::render_rough_cut(&fx.ffmpeg, &render_items, &s, &info.caps, &out).expect("render");
+
+    let ink_at = |ms: u64| -> u32 {
+        ffmpeg::lit_rows(&fx.ffmpeg, &out, ms, w, h).expect("rows").iter().sum()
+    };
+    let (before, during, after) = (ink_at(500), ink_at(1_800), ink_at(3_200));
+    println!("\n  ink before {before}, during {during}, after {after}");
+
+    assert_eq!(before, 0, "a caption showed up before its cue");
+    assert!(during > 100, "the caption was not drawn during its cue");
+    assert_eq!(after, 0, "the caption outstayed its cue");
 }

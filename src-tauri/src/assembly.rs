@@ -15,6 +15,49 @@ const PLACEHOLDER_COLORS: &[&str] = &[
     "0xE4572E", "0x17BEBB", "0xFFC914", "0x2E282A", "0x76B041", "0x8332AC", "0x0B6E4F", "0xD7263D",
 ];
 
+/// Where a take's caption files live, relative to the render directory.
+fn subs_dir_name(stem: &str) -> String {
+    format!("subs-{stem}")
+}
+
+/// Write one text file per caption, and copy the font in beside them.
+///
+/// Returns the cues with paths relative to the render directory, and the
+/// font's filename — ffmpeg is run from that directory, so everything in the
+/// filter graph is a bare name with nothing to escape.
+fn write_burn_in(
+    subs_dir: &Path,
+    rel: &str,
+    cues: &[crate::subtitles::Cue],
+    script: &str,
+) -> Result<(Vec<ffmpeg::BurnCue>, String), String> {
+    std::fs::create_dir_all(subs_dir).map_err(|e| format!("Could not make room for the captions: {e}"))?;
+
+    let font_name = crate::subtitles::font_file_for(script);
+    let bundled = crate::resources::root().join("fonts").join(font_name);
+    if !bundled.is_file() {
+        return Err(format!(
+            "The caption font {font_name} is missing from this build. \
+             The subtitle file was still saved next to the video."
+        ));
+    }
+    std::fs::copy(&bundled, subs_dir.join(font_name))
+        .map_err(|e| format!("Could not place the caption font: {e}"))?;
+
+    let mut out = Vec::with_capacity(cues.len());
+    for (i, cue) in cues.iter().enumerate() {
+        let name = format!("{i:04}.txt");
+        std::fs::write(subs_dir.join(&name), &cue.text)
+            .map_err(|e| format!("Could not write a caption: {e}"))?;
+        out.push(ffmpeg::BurnCue {
+            text_file: format!("{rel}/{name}"),
+            start_ms: cue.start_ms,
+            end_ms: cue.end_ms,
+        });
+    }
+    Ok((out, format!("{rel}/{font_name}")))
+}
+
 /// Whether a font family is present on this machine.
 ///
 /// By looking at the font directories rather than by asking `fc-match`. The
@@ -748,22 +791,31 @@ pub async fn assembly_render(
         }
     }
 
-    if subtitles.unwrap_or(false) {
-        if !info.caps.subtitles {
+    if subtitles.unwrap_or(false) && !cues.is_empty() {
+        if !info.caps.drawtext {
             subtitle_error = Some(
-                "This copy of ffmpeg was built without libass, so it cannot draw text into \
-                 the picture. The subtitle file was still saved next to the video."
+                "This copy of ffmpeg was built without libfreetype, so it cannot draw text \
+                 into the picture. The subtitle file was still saved next to the video."
                     .into(),
             );
-        } else if let Some(p) = subtitle_path.clone() {
-            settings.subtitle_path = Some(p);
-            let mut style = subtitle_style.unwrap_or_default();
-            if style.font.is_empty() {
-                // Named outright rather than left to libass, which defaults to
-                // Arial — a font with not one Bengali glyph in it.
-                style.font = crate::subtitles::font_for(&lang, |f| font_installed(f));
+        } else {
+            // Each caption's words go to their own file, and the font is copied
+            // in beside them, so every path in the filter graph is a bare
+            // filename in the working directory. `drawtext` takes its arguments
+            // through the filtergraph parser, where a colon separates options
+            // and a comma separates filters — a caption containing either, or a
+            // quote, or a project folder with a colon in its name, would need
+            // escaping twice over and would fail on somebody else's sentence.
+            let render_dir = dir.join("render");
+            let subs_dir = render_dir.join(format!("subs-{stem}"));
+            match write_burn_in(&subs_dir, &subs_dir_name(&stem), &cues, &lang) {
+                Ok((burn_in, font)) => {
+                    settings.burn_in = burn_in;
+                    settings.subtitle_font = Some(font);
+                    settings.subtitle_style = subtitle_style.unwrap_or_default();
+                }
+                Err(e) => subtitle_error = Some(e),
             }
-            settings.subtitle_style = style;
         }
     }
 

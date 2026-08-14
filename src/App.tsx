@@ -1326,6 +1326,8 @@ function App() {
         subtitleStyle: {
           size: timelineDoc.subtitleStyle.size,
           bottom: timelineDoc.subtitleStyle.bottom,
+          // Still ASS order on the wire: the renderer converts, and one
+          // conversion in one place beats two that can disagree.
           colour: toAssColour(timelineDoc.subtitleStyle.colour),
           boxBehind: timelineDoc.subtitleStyle.boxBehind,
           font: "",

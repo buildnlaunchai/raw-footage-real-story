@@ -194,3 +194,9 @@ web timeline editor.
 project file this app exports and takes it to a finished edit. Hub embedded-mode
 integration (signed JWT, `aud` enforcement, cookie transport — see `TEMPLATE.md`)
 also lands then. The code here keeps that seam clear rather than implementing it.
+
+## Fonts
+
+Captions are drawn with fonts bundled in `src-tauri/resources/fonts`, fetched
+by `scripts/fetch-fonts.sh` and pinned by SHA-256. Run it once after cloning;
+`npm run tauri build` will otherwise produce a build that cannot draw captions.
