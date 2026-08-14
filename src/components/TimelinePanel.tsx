@@ -66,7 +66,10 @@ export function TimelinePanel({
 }: Props) {
   const [zoom, setZoom] = useState(1);
   const [selected, setSelected] = useState<string | null>(null);
-  const [drag, setDrag] = useState<{ key: string; overKey: string | null } | null>(null);
+  // `insertAt` is a gap index, not a shot: "before the shot at this index".
+  // Dropping onto a shot cannot distinguish left-of from right-of, which is
+  // most of what makes a reorder hard to predict.
+  const [drag, setDrag] = useState<{ key: string; x: number; insertAt: number } | null>(null);
   const lane = useRef<HTMLDivElement | null>(null);
   const shotRefs = useRef(new Map<string, HTMLDivElement>());
 
@@ -85,12 +88,20 @@ export function TimelinePanel({
   // --- reordering, on pointer events for the same reason the footage list is:
   // WebKit will not start an HTML5 drag without setData, and a captured
   // pointer keeps working once the row has moved out from under it.
-  function shotAt(clientX: number): string | null {
-    for (const [k, el] of shotRefs.current) {
+  function gapAt(clientX: number): number {
+    for (let i = 0; i < live.length; i++) {
+      const el = shotRefs.current.get(live[i].key);
+      if (!el) continue;
       const r = el.getBoundingClientRect();
-      if (clientX >= r.left && clientX <= r.right) return k;
+      if (clientX < r.left + r.width / 2) return i;
     }
-    return null;
+    return live.length;
+  }
+
+  /** Where a dragged shot would end up, numbered as the timeline shows it. */
+  function destination(fromKey: string, insertAt: number): number {
+    const from = live.findIndex((s) => s.key === fromKey);
+    return (insertAt > from ? insertAt - 1 : insertAt) + 1;
   }
 
   const ticks: number[] = [];
@@ -127,6 +138,13 @@ export function TimelinePanel({
 
       {children}
 
+      {drag && (
+        <div className="tl-drag-note" role="status">
+          Moving shot {live.findIndex((s) => s.key === drag.key) + 1} → position{" "}
+          <strong>{destination(drag.key, drag.insertAt)}</strong>
+        </div>
+      )}
+
       <div className="tl-scroll">
         <div className="tl-inner" style={{ width }}>
           {/* ── ruler ───────────────────────────────────────────────────── */}
@@ -157,21 +175,31 @@ export function TimelinePanel({
                     style={{ width: w, left: (s.startMs / 1000) * pps }}
                     data-selected={selected === s.key || undefined}
                     data-dragging={drag?.key === s.key || undefined}
-                    data-dropzone={
-                      (drag && drag.overKey === s.key && drag.key !== s.key) || undefined
+                    data-insert={
+                      drag
+                        ? drag.insertAt === i
+                          ? "before"
+                          : drag.insertAt === live.length && i === live.length - 1
+                            ? "after"
+                            : undefined
+                        : undefined
                     }
                     onPointerDown={(e) => {
                       setSelected(s.key);
                       e.currentTarget.setPointerCapture(e.pointerId);
-                      setDrag({ key: s.key, overKey: s.key });
+                      setDrag({ key: s.key, x: e.clientX, insertAt: gapAt(e.clientX) });
                     }}
                     onPointerMove={(e) => {
                       if (!drag) return;
-                      setDrag({ ...drag, overKey: shotAt(e.clientX) ?? drag.overKey });
+                      setDrag({ ...drag, x: e.clientX, insertAt: gapAt(e.clientX) });
                     }}
                     onPointerUp={() => {
-                      if (drag?.overKey && drag.overKey !== drag.key) {
-                        onChange(withOrder(doc, moved(shots, drag.key, drag.overKey)));
+                      if (drag) {
+                        const from = live.findIndex((x) => x.key === drag.key);
+                        const to = drag.insertAt > from ? drag.insertAt - 1 : drag.insertAt;
+                        if (to !== from && live[to]) {
+                          onChange(withOrder(doc, moved(shots, drag.key, live[to].key)));
+                        }
                       }
                       setDrag(null);
                     }}

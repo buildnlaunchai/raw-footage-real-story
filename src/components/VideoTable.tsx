@@ -13,7 +13,7 @@ import {
   type LibraryClip,
 } from "../lib/library";
 import { audioUrl } from "../lib/voiceover";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { PencilIcon, TrashIcon } from "./Icons";
 
 interface Props {
@@ -62,8 +62,23 @@ export function VideoTable({
    * work identically on a trackpad and a touchscreen, and give the row-follows-
    * your-finger feedback the drag API cannot.
    */
-  const [drag, setDrag] = useState<{ key: string; y: number; overKey: string | null } | null>(null);
+  /**
+   * A drag in progress: what is held, where the pointer is, and which gap it
+   * would drop into.
+   *
+   * `insertAt` is a gap index from 0 to n, not a row — "before the row
+   * currently at this index". Dropping *onto* a row left the answer to "where
+   * does this land" ambiguous, which is most of why reordering was hard to
+   * follow: above it or below it are different results and the old feedback
+   * could not tell them apart.
+   */
+  const [drag, setDrag] = useState<
+    { key: string; x: number; y: number; insertAt: number } | null
+  >(null);
   const rowRefs = useRef(new Map<string, HTMLTableRowElement>());
+  /** Position being typed, for jumps too long to drag. */
+  const [typing, setTyping] = useState<{ key: string; value: string } | null>(null);
+  const pointer = useRef({ y: 0 });
   const key = (c: LibraryClip) => `${c.projectId}/${c.clipId}`;
 
   // Selection is scoped to what is on screen. Carrying it across a page or a
@@ -90,12 +105,13 @@ export function VideoTable({
     });
   }
 
-  /** Move one row to another row's position and hand the whole order back. */
-  function move(fromKey: string, toKey: string) {
-    if (!reorder || fromKey === toKey) return;
+  /** Drop a row into a gap and hand the whole order back. */
+  function moveTo(fromKey: string, insertAt: number) {
+    if (!reorder) return;
     const from = clips.findIndex((c) => key(c) === fromKey);
-    const to = clips.findIndex((c) => key(c) === toKey);
-    if (from < 0 || to < 0) return;
+    if (from < 0) return;
+    const to = insertAt > from ? insertAt - 1 : insertAt;
+    if (to === from) return;
     const next = [...clips];
     const [moved] = next.splice(from, 1);
     next.splice(to, 0, moved);
@@ -107,17 +123,68 @@ export function VideoTable({
     const i = clips.findIndex((c) => key(c) === k);
     const j = i + delta;
     if (i < 0 || j < 0 || j >= clips.length) return;
-    move(k, key(clips[j]));
+    moveTo(k, delta > 0 ? j + 1 : j);
   }
 
-  /** Which row the pointer is currently over, by its position on screen. */
-  function rowAt(clientY: number): string | null {
-    for (const [k, el] of rowRefs.current) {
+  /**
+   * Which gap the pointer is in.
+   *
+   * Above a row's midpoint means before it, below means after it — the rule
+   * every list in every app uses, and the reason a drop can now be predicted
+   * rather than discovered.
+   */
+  function gapAt(clientY: number): number {
+    let best = clips.length;
+    for (let i = 0; i < clips.length; i++) {
+      const el = rowRefs.current.get(key(clips[i]));
+      if (!el) continue;
       const r = el.getBoundingClientRect();
-      if (clientY >= r.top && clientY <= r.bottom) return k;
+      if (clientY < r.top + r.height / 2) {
+        best = i;
+        break;
+      }
     }
-    return null;
+    return best;
   }
+
+  /**
+   * The running-order number a shot would take, in the terms the row shows.
+   *
+   * Reversed on screen means position one is the *last* clip, so the number on
+   * the label has to be worked back from the end or it contradicts the column
+   * it is sitting next to.
+   */
+  function destinationNumber(fromKey: string, insertAt: number): number {
+    const from = clips.findIndex((c) => key(c) === fromKey);
+    const index = insertAt > from ? insertAt - 1 : insertAt;
+    return reorder?.reversed ? clips.length - index : index + 1;
+  }
+
+  // While a drag is near the top or bottom of the window, keep scrolling — a
+  // fifty-clip list cannot be crossed inside one screen, and a drag that stops
+  // dead at the edge is a drag that cannot reach most of its destinations.
+  useEffect(() => {
+    if (!drag) return;
+    let frame = 0;
+    const tick = () => {
+      const y = pointer.current.y;
+      const margin = 110;
+      const speed =
+        y < margin ? -Math.min(22, (margin - y) / 4)
+        : y > window.innerHeight - margin ? Math.min(22, (y - (window.innerHeight - margin)) / 4)
+        : 0;
+      if (speed !== 0) {
+        window.scrollBy(0, speed);
+        setDrag((d) => (d ? { ...d, insertAt: gapAt(y) } : d));
+      }
+      frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [drag !== null]);
+
+  const held = drag ? clips.find((c) => key(c) === drag.key) : undefined;
 
   function startDrag(k: string, e: React.PointerEvent) {
     if (!reorder) return;
@@ -125,26 +192,21 @@ export function VideoTable({
     // Capture on the handle, so the drag survives the pointer leaving the row
     // — which it does immediately, because the row moves out from under it.
     e.currentTarget.setPointerCapture(e.pointerId);
-    setDrag({ key: k, y: e.clientY, overKey: k });
+    pointer.current.y = e.clientY;
+    setDrag({ key: k, x: e.clientX, y: e.clientY, insertAt: gapAt(e.clientY) });
   }
 
   function moveDrag(e: React.PointerEvent) {
     if (!drag) return;
-    const overKey = rowAt(e.clientY) ?? drag.overKey;
-    setDrag({ ...drag, y: e.clientY, overKey });
-    // Keep the row being dropped onto in view when dragging past either end.
-    const el = overKey ? rowRefs.current.get(overKey) : null;
-    const r = el?.getBoundingClientRect();
-    if (r && (r.top < 90 || r.bottom > window.innerHeight - 60)) {
-      el?.scrollIntoView({ block: "nearest" });
-    }
+    pointer.current.y = e.clientY;
+    setDrag({ ...drag, x: e.clientX, y: e.clientY, insertAt: gapAt(e.clientY) });
   }
 
   function endDrag() {
     if (!drag) return;
-    const { key: from, overKey } = drag;
+    const { key: from, insertAt } = drag;
     setDrag(null);
-    if (overKey && overKey !== from) move(from, overKey);
+    moveTo(from, insertAt);
   }
 
   return (
@@ -174,6 +236,21 @@ export function VideoTable({
         </div>
       )}
 
+      {/* What is being held, following the pointer, and where it will land.
+          The single thing missing before: a faded row left behind at its old
+          position says nothing about what you picked up or where it is going. */}
+      {drag && held && (
+        <div
+          className="drag-ghost"
+          style={{ left: drag.x + 16, top: drag.y - 22 }}
+          aria-hidden="true"
+        >
+          {held.thumbnailPath && <img src={audioUrl(held.thumbnailPath)} alt="" />}
+          <span className="drag-ghost-name">{held.fileName}</span>
+          <span className="drag-ghost-to">→ {destinationNumber(drag.key, drag.insertAt)}</span>
+        </div>
+      )}
+
       <div className="lib-scroll">
       <table className="lib-table">
         <thead>
@@ -194,7 +271,7 @@ export function VideoTable({
           </tr>
         </thead>
         <tbody>
-          {clips.map((c) => {
+          {clips.map((c, i) => {
             const k = key(c);
             const when = formatWhen(c.addedAt);
             const hue = tagHue(c.projectId);
@@ -216,37 +293,82 @@ export function VideoTable({
                 }}
                 data-picked={selected.has(k) || undefined}
                 data-dragging={drag?.key === k || undefined}
-                data-dropzone={
-                  (drag && drag.overKey === k && drag.key !== k) || undefined
+                data-insert={
+                  drag
+                    ? drag.insertAt === i
+                      ? "before"
+                      : drag.insertAt === clips.length && i === clips.length - 1
+                        ? "after"
+                        : undefined
+                    : undefined
                 }
               >
                 {reorder && (
                   <td className="lib-order">
-                    <button
-                      type="button"
-                      className="drag-handle"
-                      onPointerDown={(e) => startDrag(k, e)}
-                      onPointerMove={moveDrag}
-                      onPointerUp={endDrag}
-                      onPointerCancel={() => setDrag(null)}
-                      onKeyDown={(e) => {
-                        // Up on screen is one step earlier in the film — except
-                        // in the reversed view, where up is one step later.
-                        const up = reorder.reversed ? 1 : -1;
-                        if (e.key === "ArrowUp") {
-                          e.preventDefault();
-                          nudge(k, up);
-                        } else if (e.key === "ArrowDown") {
-                          e.preventDefault();
-                          nudge(k, -up);
-                        }
-                      }}
-                      title="Drag to reorder, or use the arrow keys"
-                      aria-label={`Position ${c.sequence + 1}. Drag or use arrow keys to reorder ${c.fileName}`}
-                    >
-                      <span className="drag-grip" aria-hidden="true">⠿</span>
-                      <span className="drag-index">{c.sequence + 1}</span>
-                    </button>
+                    <div className="order-cell">
+                      <button
+                        type="button"
+                        className="drag-handle"
+                        onPointerDown={(e) => startDrag(k, e)}
+                        onPointerMove={moveDrag}
+                        onPointerUp={endDrag}
+                        onPointerCancel={() => setDrag(null)}
+                        onKeyDown={(e) => {
+                          // Up on screen is one step earlier in the film —
+                          // except in the reversed view, where up is later.
+                          const up = reorder.reversed ? 1 : -1;
+                          if (e.key === "ArrowUp") {
+                            e.preventDefault();
+                            nudge(k, up);
+                          } else if (e.key === "ArrowDown") {
+                            e.preventDefault();
+                            nudge(k, -up);
+                          }
+                        }}
+                        title="Drag to move this clip, or use the arrow keys"
+                        aria-label={`Move ${c.fileName}, currently ${c.sequence + 1}`}
+                      >
+                        <span className="drag-grip" aria-hidden="true">⠿</span>
+                      </button>
+
+                      {/* Typing a number beats dragging for anything more than
+                          a few rows: crossing fifty clips by hand means
+                          scrolling the whole way with the button held down. */}
+                      {typing?.key === k ? (
+                        <input
+                          className="order-input"
+                          autoFocus
+                          value={typing.value}
+                          inputMode="numeric"
+                          aria-label={`Move ${c.fileName} to position`}
+                          onChange={(e) => setTyping({ key: k, value: e.currentTarget.value })}
+                          onBlur={() => setTyping(null)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              const n = Number(typing.value);
+                              if (Number.isFinite(n) && n >= 1 && n <= clips.length) {
+                                // The number is a running-order position, which
+                                // in the reversed view counts from the far end.
+                                const index = reorder.reversed ? clips.length - n : n - 1;
+                                moveTo(k, index > i ? index + 1 : index);
+                              }
+                              setTyping(null);
+                            } else if (e.key === "Escape") {
+                              setTyping(null);
+                            }
+                          }}
+                        />
+                      ) : (
+                        <button
+                          type="button"
+                          className="order-number"
+                          onClick={() => setTyping({ key: k, value: String(c.sequence + 1) })}
+                          title="Click to type a position to move this clip to"
+                        >
+                          {c.sequence + 1}
+                        </button>
+                      )}
+                    </div>
                   </td>
                 )}
                 <td className="lib-pick">

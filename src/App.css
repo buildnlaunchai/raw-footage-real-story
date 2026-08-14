@@ -1167,6 +1167,7 @@ select {
   display: flex;
   align-items: center;
   gap: 0.35rem;
+  font-size: 1.05rem;
   background: none;
   border: 1px solid transparent;
   border-radius: var(--r-sm, 6px);
@@ -1197,13 +1198,98 @@ select {
   font-weight: 700;
 }
 
-.lib-table tr[data-dragging="true"] {
-  opacity: 0.35;
+/* The row you are holding: dimmed and pushed back, so it reads as lifted out
+   of the list rather than as a row that has stopped working. */
+.lib-table tr[data-dragging="true"] td {
+  opacity: 0.3;
+  background: #131317;
 }
 
-/* Where the row will land, drawn across the full width of the row it lands on. */
-.lib-table tr[data-dropzone="true"] td {
-  box-shadow: inset 0 3px 0 #e4572e;
+/* Where it lands. A gap between rows rather than a highlight on one of them —
+   "above this" and "below this" are different results, and a marker sitting on
+   a row cannot tell them apart. */
+.lib-table tr[data-insert="before"] td {
+  box-shadow: inset 0 4px 0 -1px #e4572e;
+}
+
+.lib-table tr[data-insert="after"] td {
+  box-shadow: inset 0 -4px 0 -1px #e4572e;
+}
+
+/* The label that follows the pointer. */
+.drag-ghost {
+  position: fixed;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.6rem 0.35rem 0.35rem;
+  background: #17171c;
+  border: 1px solid #e4572e;
+  border-radius: var(--r-md);
+  box-shadow: 0 10px 26px #000a;
+  pointer-events: none;
+  max-width: 20rem;
+}
+
+.drag-ghost img {
+  width: 3rem;
+  height: 1.9rem;
+  object-fit: cover;
+  border-radius: 4px;
+}
+
+.drag-ghost-name {
+  font-size: 0.82rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.drag-ghost-to {
+  font-weight: 700;
+  font-size: 0.9rem;
+  color: #e4572e;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* The handle and the number are separate controls: one drags, one is typed
+   into. Fifty clips cannot be crossed by dragging. */
+.order-cell {
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+}
+
+.order-number {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  color: var(--ink-dim);
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  padding: 0.2rem 0.3rem;
+  cursor: text;
+  min-width: 1.6rem;
+}
+
+.order-number:hover {
+  border-color: var(--line);
+  color: var(--ink);
+}
+
+.order-input {
+  width: 2.6rem;
+  padding: 0.2rem 0.25rem;
+  font-size: 0.82rem;
+  font-variant-numeric: tabular-nums;
+  background: var(--card-3, #202028);
+  border: 1px solid #e4572e;
+  border-radius: 5px;
+  color: var(--ink);
 }
 
 /* While a drag is running, nothing under the pointer should select or scroll
@@ -3444,8 +3530,18 @@ kbd {
   box-shadow: 0 0 0 1px #e4572e;
 }
 
-.tl-shot[data-dragging] { opacity: 0.4; }
-.tl-shot[data-dropzone] { box-shadow: inset 3px 0 0 #e4572e; }
+.tl-shot[data-dragging] { opacity: 0.35; }
+/* The gap it lands in, on whichever side the pointer is. */
+.tl-shot[data-insert="before"] { box-shadow: inset 4px 0 0 -1px #e4572e; }
+.tl-shot[data-insert="after"] { box-shadow: inset -4px 0 0 -1px #e4572e; }
+
+.tl-drag-note {
+  margin: 0.5rem 0;
+  font-size: 0.85rem;
+  color: var(--ink-2);
+}
+
+.tl-drag-note strong { color: #e4572e; }
 
 .tl-shot-thumb {
   width: 100%;
