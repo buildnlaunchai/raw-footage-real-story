@@ -17,24 +17,71 @@ const PLACEHOLDER_COLORS: &[&str] = &[
 
 /// Whether a font family is present on this machine.
 ///
-/// Asked of fontconfig, which is what libass itself consults, so the answer is
-/// the one that will be used rather than a guess from a list of paths. A build
-/// without `fc-match` reports nothing installed, and the caller falls through
-/// to its universal last resort.
+/// By looking at the font directories rather than by asking `fc-match`. The
+/// first version shelled out, and shelling out is exactly what does not work
+/// here: a macOS app launched from Finder inherits a minimal PATH with no
+/// Homebrew in it, so `fc-match` was never found, every font read as missing,
+/// and Bengali fell through to Arial — which cannot draw it. The same trap
+/// this codebase already documents for ffmpeg, sprung again.
+///
+/// It also passed its own test, because a test runs from a shell that *does*
+/// have fc-match on PATH. Only the shipped app was broken.
 fn font_installed(family: &str) -> bool {
-    std::process::Command::new("fc-match")
-        .arg("-f")
-        .arg("%{family}")
-        .arg(family)
-        .output()
-        .ok()
-        .map(|o| {
-            let got = String::from_utf8_lossy(&o.stdout).to_lowercase();
-            // fc-match always answers with *something*, so a match only counts
-            // when the family it returns is the one that was asked for.
-            got.split(',').any(|f| f.trim() == family.to_lowercase())
-        })
-        .unwrap_or(false)
+    let want = normalise_font(family);
+    font_dirs().iter().any(|dir| {
+        std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|e| {
+                let name = e.file_name();
+                let name = name.to_string_lossy();
+                let Some((stem, ext)) = name.rsplit_once('.') else { return false };
+                matches!(ext.to_ascii_lowercase().as_str(), "ttf" | "ttc" | "otf" | "otc")
+                    && normalise_font(stem) == want
+            })
+    })
+}
+
+/// Case and spacing vary between a family name and its filename —
+/// "Kohinoor Bangla" ships as `KohinoorBangla.ttc`.
+fn normalise_font(s: &str) -> String {
+    s.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase()
+}
+
+#[cfg(target_os = "macos")]
+fn font_dirs() -> Vec<PathBuf> {
+    let mut v = vec![
+        PathBuf::from("/System/Library/Fonts"),
+        PathBuf::from("/System/Library/Fonts/Supplemental"),
+        PathBuf::from("/Library/Fonts"),
+    ];
+    if let Ok(home) = std::env::var("HOME") {
+        v.push(PathBuf::from(home).join("Library").join("Fonts"));
+    }
+    v
+}
+
+#[cfg(target_os = "windows")]
+fn font_dirs() -> Vec<PathBuf> {
+    let mut v = vec![PathBuf::from(r"C:\Windows\Fonts")];
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        v.push(PathBuf::from(local).join("Microsoft").join("Windows").join("Fonts"));
+    }
+    v
+}
+
+#[cfg(test)]
+pub fn font_installed_for_test(family: &str) -> bool {
+    font_installed(family)
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+fn font_dirs() -> Vec<PathBuf> {
+    vec![
+        PathBuf::from("/usr/share/fonts"),
+        PathBuf::from("/usr/local/share/fonts"),
+    ]
 }
 
 fn settings_path(app: &AppHandle) -> Result<PathBuf, FfmpegError> {

@@ -494,24 +494,30 @@ export function TimelinePanel({
           {doc.subtitles ? (
             <>
               <label className="tl-sub-field">
-                Size
+                Size {(doc.subtitleStyle.size * 100).toFixed(1)}%
+                {/* Straight through: the slider is tenths of a percent of the
+                    frame height, and that is what gets stored. The first
+                    version showed `1/size` and set `1/(78 - value)`, so the
+                    thumb jumped to the far end after every drag and set the
+                    opposite of what it looked like it was setting. */}
                 <input
                   type="range"
-                  min={18}
-                  max={60}
-                  value={Math.round(1 / doc.subtitleStyle.size)}
-                  // Inverted: the slider reads "bigger to the right", and the
-                  // stored value is a divisor of the frame height.
+                  min={20}
+                  max={80}
+                  value={Math.round(doc.subtitleStyle.size * 1000)}
                   onChange={(e) =>
                     onChange({
                       ...doc,
-                      subtitleStyle: { ...doc.subtitleStyle, size: 1 / (78 - Number(e.currentTarget.value)) },
+                      subtitleStyle: {
+                        ...doc.subtitleStyle,
+                        size: Number(e.currentTarget.value) / 1000,
+                      },
                     })
                   }
                 />
               </label>
               <label className="tl-sub-field">
-                Height
+                Height {(doc.subtitleStyle.bottom * 100).toFixed(0)}%
                 <input
                   type="range"
                   min={2}

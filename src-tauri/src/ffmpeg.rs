@@ -642,6 +642,15 @@ pub struct RenderItem {
 /// So when zscale is absent we deliberately do nothing and rely on the import
 /// warning. A wrong correction that looks deliberate is harder for a user to
 /// diagnose than no correction at all.
+/// The canvas libass lays subtitles out on, before scaling to the frame.
+///
+/// ffmpeg's SRT-to-ASS conversion writes `PlayResX: 384, PlayResY: 288` into
+/// the script header, and every size and margin in a style is expressed in
+/// those units. Checked against the generated header rather than remembered:
+/// `ffmpeg -i x.srt -f ass -`.
+const PLAY_RES_X: f32 = 384.0;
+const PLAY_RES_Y: f32 = 288.0;
+
 fn tonemap_chain(caps: &FfmpegCaps) -> &'static str {
     if caps.zscale && caps.tonemap {
         ",zscale=t=linear:npl=100,tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p"
@@ -1066,14 +1075,23 @@ pub fn render_rough_cut(
             }
             let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
             let st = &settings.subtitle_style;
-            // Everything measured against the frame rather than fixed in
-            // points: 24pt is unreadable on a phone-shot portrait clip and
-            // dominates a 4K one.
-            let font_size = (height as f32 * st.size).round().max(14.0) as u32;
-            let margin_v = (height as f32 * st.bottom).round().max(8.0) as u32;
+            // Sizes and margins are in *libass's* coordinate space, not the
+            // video's. ffmpeg converts SRT to ASS with `PlayResX: 384,
+            // PlayResY: 288` and libass then scales that whole canvas up to
+            // the frame — so on 1080p every number here is multiplied by 3.75
+            // before it reaches a pixel.
+            //
+            // Sizing against the frame height instead put 41pt text on screen
+            // at 156px and a 92pt bottom margin 345px up, which is how a
+            // caption meant for the lower third ended up enormous and halfway
+            // up the picture. Everything is a fraction of the frame, so the
+            // fraction is applied to the canvas the fraction is measured in.
+            let font_size = (PLAY_RES_Y * st.size).round().max(6.0) as u32;
+            let margin_v = (PLAY_RES_Y * st.bottom).round().max(4.0) as u32;
             // Side margins keep a caption off the very edges, which is where a
             // long line otherwise runs to.
-            let margin_h = (width as f32 * 0.06).round() as u32;
+            let margin_h = (PLAY_RES_X * 0.06).round() as u32;
+            let _ = width;
             let border = if st.box_behind { 3 } else { 1 };
             let font_name = if st.font.is_empty() {
                 String::new()
@@ -1149,6 +1167,36 @@ pub fn mean_volume_db(ffmpeg: &str, media: &Path) -> Result<f64, FfmpegError> {
         .and_then(|v| v.trim().split_whitespace().next())
         .and_then(|v| v.parse::<f64>().ok())
         .ok_or_else(|| FfmpegError::new("NO_VOLUME", format!("volumedetect said nothing: {text}")))
+}
+
+/// How many lit pixels are in each row of a frame.
+///
+/// Used to measure where drawn text actually lands, which is the only way to
+/// check a size that passes through a coordinate space nothing in this codebase
+/// controls.
+pub fn lit_rows(
+    ffmpeg: &str,
+    media: &Path,
+    at_ms: u64,
+    width: u32,
+    height: u32,
+) -> Result<Vec<u32>, FfmpegError> {
+    let out = Command::new(ffmpeg)
+        .args(["-v", "error", "-ss", &format!("{:.3}", at_ms as f64 / 1000.0)])
+        .arg("-i")
+        .arg(media)
+        .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "gray", "-"])
+        .output()
+        .map_err(|e| FfmpegError::new("SPAWN_FAILED", e.to_string()))?;
+    if out.stdout.len() < (width * height) as usize {
+        return Err(FfmpegError::new("FRAME_READ_FAILED", "short frame"));
+    }
+    Ok((0..height)
+        .map(|y| {
+            let row = &out.stdout[(y * width) as usize..((y + 1) * width) as usize];
+            row.iter().filter(|&&p| p > 90).count() as u32
+        })
+        .collect())
 }
 
 /// Average RGB of a single frame, used by tests to assert which clip is on

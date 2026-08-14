@@ -1607,15 +1607,15 @@ fn bengali_captions_use_a_font_that_can_draw_them() {
         rgb.0 as u32 + rgb.1 as u32 + rgb.2 as u32
     };
 
-    let chosen = crate::subtitles::font_for("bn", |f| {
-        std::process::Command::new("fc-match")
-            .args(["-f", "%{family}", f])
-            .output()
-            .ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).to_lowercase().split(',')
-                .any(|x| x.trim() == f.to_lowercase()))
-            .unwrap_or(false)
-    });
+    // The app's own lookup, not a shell command. The first version asked
+    // `fc-match`, which a macOS app launched from Finder cannot find — so every
+    // font read as missing, Bengali fell through to Arial, and the test still
+    // passed because a test runs from a shell that *does* have fc-match.
+    let chosen = crate::subtitles::font_for("bn", crate::assembly::font_installed_for_test);
+    assert!(
+        crate::assembly::font_installed_for_test("Helvetica"),
+        "the font lookup finds nothing at all, so it is broken rather than strict",
+    );
     println!("\n  font chosen for Bengali: {chosen}");
 
     let arial = ink("Arial", "arial.mp4");
@@ -1696,4 +1696,91 @@ impl FfmpegCapsDefault {
     fn caps() -> ffmpeg::FfmpegCaps {
         ffmpeg::FfmpegCaps::default()
     }
+}
+
+/// Captions come out the size and in the place they were asked for.
+///
+/// The bug this pins down: sizes in an ASS style are in libass's own canvas,
+/// which ffmpeg writes as 384x288, and libass scales that to the frame. Sizing
+/// against the frame height instead multiplied everything by 3.75 — 41pt text
+/// rendered at 156px, and a bottom margin meant to be 92px sat 345px up. A
+/// caption for the lower third came out enormous and halfway up the picture.
+///
+/// Measured off the pixels rather than trusting the arithmetic, because the
+/// arithmetic is exactly what was wrong.
+#[test]
+fn captions_are_the_size_and_height_they_were_asked_for() {
+    let Some(fx) = Fixture::new("cap-size") else {
+        eprintln!("ffmpeg not available; skipping");
+        return;
+    };
+    let info = ffmpeg::detect(&FfmpegSettings::default()).expect("detect");
+    if !info.caps.subtitles {
+        eprintln!("no libass; skipping");
+        return;
+    }
+
+    let (w, h) = (960u32, 540u32);
+    let settings = RenderSettings { width: w, height: h, fps: 30, ..Default::default() };
+    let video = fx.dir.join("v.mp4");
+    ffmpeg::make_placeholder(&fx.ffmpeg, &video, "0x000000", 4_000, w, h, 30).expect("clip");
+    let audio = fx.dir.join("a.wav");
+    tts::write_wav(&audio, &vec![0f32; 2 * 24_000]).expect("wav");
+
+    let items = timeline::plan(
+        &[timeline::ClipInput::whole("c0", Some(4_000))],
+        &[timeline::LineInput::whole("c0", 2_000)],
+    );
+    let render_items = vec![ffmpeg::RenderItem {
+        video,
+        audio,
+        item: items[0].clone(),
+        is_hdr: false,
+        has_audio: false,
+        sound_gain: None,
+    }];
+    let cues = crate::subtitles::cues(&items, |_| Some("Hxy".into()));
+    let srt = fx.dir.join("cut-size.srt");
+    std::fs::write(&srt, crate::subtitles::to_srt(&cues, None)).expect("srt");
+
+    // One twentieth of the frame, sitting a tenth of the frame off the bottom.
+    let style = ffmpeg::SubtitleStyle {
+        size: 1.0 / 20.0,
+        bottom: 0.10,
+        font: "Helvetica".into(),
+        ..Default::default()
+    };
+    let out = fx.dir.join("sized.mp4");
+    let s = RenderSettings {
+        subtitle_path: Some(srt.to_string_lossy().to_string()),
+        subtitle_style: style,
+        ..settings
+    };
+    ffmpeg::render_rough_cut(&fx.ffmpeg, &render_items, &s, &info.caps, &out).expect("render");
+
+    // Find the rows that have ink in them, on a frame that is otherwise black.
+    let rows = ffmpeg::lit_rows(&fx.ffmpeg, &out, 900, w, h).expect("rows");
+    let top = rows.iter().position(|&n| n > 0).expect("no caption was drawn");
+    let bottom = rows.iter().rposition(|&n| n > 0).expect("no caption was drawn");
+    let text_h = (bottom - top + 1) as f32;
+    let above_floor = (h as usize - 1 - bottom) as f32;
+    println!(
+        "\n  frame {w}x{h}: caption rows {top}..{bottom}, height {text_h}px, {above_floor}px off the bottom",
+    );
+
+    // Cap height is less than the em it is measured from — letters do not fill
+    // their line box — so the ink is checked against a band rather than a point.
+    let want = h as f32 / 20.0;
+    assert!(
+        text_h > want * 0.4 && text_h < want * 1.6,
+        "asked for about {want}px of text, drew {text_h}px",
+    );
+    // The old bug put this at 3.75x, which is what the wide band still catches.
+    assert!(text_h < want * 2.0, "text is far larger than asked: {text_h}px vs {want}px");
+
+    let want_margin = h as f32 * 0.10;
+    assert!(
+        (above_floor - want_margin).abs() < want_margin * 0.6,
+        "asked for {want_margin}px above the bottom, sat {above_floor}px up",
+    );
 }
