@@ -76,6 +76,7 @@ pub fn run() {
             assembly::ffmpeg_set_path,
             assembly::assembly_make_placeholders,
             assembly::assembly_render,
+            assembly::assembly_plan,
             assembly::assembly_import_media,
             assembly::assembly_consolidate_media,
             assembly::assembly_export_bundle,

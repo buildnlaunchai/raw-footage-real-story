@@ -85,6 +85,19 @@ test("the cut's own settings are part of its signature", () => {
   assert.equal(renderSignature(v, 250, "calm"), renderSignature(v, 250, "calm"));
 });
 
+test("every timeline edit makes an existing cut stale", () => {
+  // Dropping a shot, reordering, swapping footage, turning a track on: all of
+  // them change the film, and none may leave the app showing the old video as
+  // though it were current.
+  const v = [{ audioPath: "line-01.wav", durationMs: 4000 }];
+  const base = renderSignature(v, 0, null, "", JSON.stringify({ order: ["a#0", "b#0"] }));
+  const reordered = renderSignature(v, 0, null, "", JSON.stringify({ order: ["b#0", "a#0"] }));
+  const withMusic = renderSignature(v, 0, null, "", JSON.stringify({ music: true }));
+  assert.notEqual(base, reordered);
+  assert.notEqual(base, withMusic);
+  assert.equal(base, renderSignature(v, 0, null, "", JSON.stringify({ order: ["a#0", "b#0"] })));
+});
+
 test("the opening is part of the cut's signature", () => {
   // The montage is rendered inside the cut, not beside it. A rewritten and
   // re-recorded hook, or footage that changes which shots get picked, leaves

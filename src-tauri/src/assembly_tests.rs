@@ -102,7 +102,7 @@ fn assembles_a_rough_cut_with_correct_order_and_timing() {
         let samples = vec![0f32; (lines[i].duration_ms as usize * 24_000) / 1000];
         tts::write_wav(&audio, &samples).expect("silence wav");
 
-        render_items.push(RenderItem { video, audio, item: item.clone(), is_hdr: false });
+        render_items.push(RenderItem { video, audio, item: item.clone(), is_hdr: false, has_audio: false });
     }
 
     let out = fx.dir.join("rough-cut.mp4");
@@ -190,7 +190,7 @@ fn rotation_survives_filter_complex() {
     let settings = RenderSettings { width: 1920, height: 1080, fps: 30, ..Default::default() };
     ffmpeg::render_rough_cut(
         &fx.ffmpeg,
-        &[RenderItem { video: rotated, audio, item: items[0].clone(), is_hdr: false }],
+        &[RenderItem { video: rotated, audio, item: items[0].clone(), is_hdr: false, has_audio: false }],
         &settings,
         &ffmpeg::FfmpegCaps::default(),
         &out,
@@ -354,6 +354,7 @@ fn handles_awkward_sources_and_normalises_them() {
             audio,
             item: item.clone(),
             is_hdr: false,
+            has_audio: false,
         });
     }
 
@@ -525,6 +526,7 @@ fn one_clip_used_twice_shows_two_different_moments() {
             audio,
             item: item.clone(),
             is_hdr: false,
+            has_audio: false,
         });
     }
 
@@ -642,7 +644,7 @@ fn output_has_the_expected_streams_and_format() {
     let out = fx.dir.join("out.mp4");
     ffmpeg::render_rough_cut(
         &fx.ffmpeg,
-        &[RenderItem { video, audio, item: items[0].clone(), is_hdr: false }],
+        &[RenderItem { video, audio, item: items[0].clone(), is_hdr: false, has_audio: false }],
         &settings,
         &ffmpeg::FfmpegCaps::default(),
         &out,
@@ -691,7 +693,7 @@ fn crossfade_shortens_the_cut_and_still_shows_every_clip() {
             .expect("placeholder");
         let audio = fx.dir.join(format!("a{i}.wav"));
         tts::write_wav(&audio, &vec![0f32; 1_800 * 24]).expect("wav");
-        render_items.push(RenderItem { video, audio, item: item.clone(), is_hdr: false });
+        render_items.push(RenderItem { video, audio, item: item.clone(), is_hdr: false, has_audio: false });
     }
 
     let plain = timeline::total_duration_ms(&items);
@@ -752,6 +754,7 @@ fn crossfade_is_capped_so_short_clips_still_resolve() {
                 fit: Fit::Exact,
             },
             is_hdr: false,
+            has_audio: false,
         })
         .collect();
 
@@ -792,7 +795,7 @@ fn music_bed_is_mixed_under_the_narration() {
         // Silent narration: anything audible in the output must be the bed.
         let audio = fx.dir.join(format!("a{i}.wav"));
         tts::write_wav(&audio, &vec![0f32; 2_000 * 24]).expect("wav");
-        render_items.push(RenderItem { video, audio, item: item.clone(), is_hdr: false });
+        render_items.push(RenderItem { video, audio, item: item.clone(), is_hdr: false, has_audio: false });
     }
 
     let out = fx.dir.join("with-music.mp4");
@@ -913,7 +916,8 @@ fn intro_montage_cuts_hard_inside_and_dissolves_into_the_film() {
                 fit: timeline::Fit::Exact,
             },
             is_hdr: false,
-        },
+                    has_audio: false,
+                },
         ffmpeg::RenderItem {
             video: body.clone(),
             audio: silence.clone(),
@@ -928,7 +932,8 @@ fn intro_montage_cuts_hard_inside_and_dissolves_into_the_film() {
                 fit: timeline::Fit::Exact,
             },
             is_hdr: false,
-        },
+                    has_audio: false,
+                },
     ];
 
     // Hard cuts everywhere, dissolve only out of the intro: the shape the
@@ -1001,6 +1006,7 @@ fn the_opening_dissolve_is_not_the_body_crossfade() {
                 fit: timeline::Fit::Exact,
             },
             is_hdr: false,
+            has_audio: false,
         });
     }
 
@@ -1053,7 +1059,8 @@ fn a_clip_too_short_for_its_line_is_capped_and_replayed() {
         audio,
         item: items[0].clone(),
         is_hdr: false,
-    }];
+                                        has_audio: false,
+                                    }];
     let out = fx.dir.join("capped.mp4");
     ffmpeg::render_rough_cut(
         &fx.ffmpeg, &render_items, &settings, &ffmpeg::FfmpegCaps::default(), &out,
@@ -1130,7 +1137,8 @@ fn subtitles_are_drawn_into_the_picture() {
         audio,
         item: items[0].clone(),
         is_hdr: false,
-    }];
+                                        has_audio: false,
+                                    }];
 
     // Non-Latin on purpose. Bengali needs conjunct shaping and reordering that
     // only a real text stack gets right, and it is the language this app is
@@ -1240,4 +1248,142 @@ fn iso_timestamps_parse_to_the_right_instant() {
     assert_eq!(parse(""), None);
     assert_eq!(parse("not a date"), None);
     assert_eq!(parse("2026-08-13"), None);
+}
+
+/// A clip with a tone on its own audio track, for testing the sound mix.
+fn clip_with_tone(fx: &Fixture, name: &str, colour: &str, ms: u64) -> PathBuf {
+    let path = fx.dir.join(format!("{name}.mp4"));
+    let secs = ms as f64 / 1000.0;
+    let status = std::process::Command::new(&fx.ffmpeg)
+        .args(["-y", "-v", "error"])
+        .args(["-f", "lavfi", "-i", &format!("color=c={colour}:s=320x180:d={secs}:r=30")])
+        .args(["-f", "lavfi", "-i", &format!("sine=frequency=440:duration={secs}")])
+        .args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest"])
+        .arg(&path)
+        .status()
+        .expect("make clip with tone");
+    assert!(status.success());
+    path
+}
+
+/// The clip's own sound, under the narration, when the timeline asks for it.
+///
+/// Duration proves nothing here — a graph that drops the source audio renders
+/// a perfectly good silent film of the right length. So this measures the
+/// level: off must be silence, on must not be, and the gain must move it.
+#[test]
+fn a_clips_own_sound_can_be_mixed_under_the_narration() {
+    let Some(fx) = Fixture::new("srcaudio") else {
+        eprintln!("ffmpeg not available; skipping");
+        return;
+    };
+    let settings = RenderSettings { width: 320, height: 180, fps: 30, ..Default::default() };
+
+    let video = clip_with_tone(&fx, "toned", "red", 6_000);
+    // Silent narration, so anything audible in the render came from the clip.
+    let narration = fx.dir.join("silent.wav");
+    tts::write_wav(&narration, &vec![0f32; 4 * 24_000]).expect("wav");
+
+    let items = timeline::plan(
+        &[timeline::ClipInput::whole("c0", Some(6_000))],
+        &[timeline::LineInput::whole("c0", 4_000)],
+    );
+    let mk = |has_audio: bool| vec![ffmpeg::RenderItem {
+        video: video.clone(),
+        audio: narration.clone(),
+        item: items[0].clone(),
+        is_hdr: false,
+        has_audio,
+    }];
+
+    let off = fx.dir.join("off.mp4");
+    ffmpeg::render_rough_cut(&fx.ffmpeg, &mk(false), &settings, &ffmpeg::FfmpegCaps::default(), &off)
+        .expect("render with the clip's sound off");
+
+    let loud = RenderSettings { source_audio_gain: 1.0, ..settings.clone() };
+    let on = fx.dir.join("on.mp4");
+    ffmpeg::render_rough_cut(&fx.ffmpeg, &mk(true), &loud, &ffmpeg::FfmpegCaps::default(), &on)
+        .expect("render with the clip's sound on");
+
+    let quiet = RenderSettings { source_audio_gain: 0.25, ..settings.clone() };
+    let low = fx.dir.join("low.mp4");
+    ffmpeg::render_rough_cut(&fx.ffmpeg, &mk(true), &quiet, &ffmpeg::FfmpegCaps::default(), &low)
+        .expect("render at a lower gain");
+
+    let db_off = ffmpeg::mean_volume_db(&fx.ffmpeg, &off).expect("measure off");
+    let db_on = ffmpeg::mean_volume_db(&fx.ffmpeg, &on).expect("measure on");
+    let db_low = ffmpeg::mean_volume_db(&fx.ffmpeg, &low).expect("measure low");
+    println!("\n  mean volume: off {db_off:.1}dB, on {db_on:.1}dB, quarter gain {db_low:.1}dB");
+
+    assert!(db_off < -60.0, "with the clip's sound off the film should be silent, got {db_off}");
+    assert!(db_on > -30.0, "the clip's sound is not in the mix, got {db_on}");
+    // A quarter of the amplitude is about 12dB down, give or take the codec.
+    assert!(
+        db_low < db_on - 8.0,
+        "the gain does nothing: full {db_on:.1}dB vs quarter {db_low:.1}dB",
+    );
+}
+
+/// A dissolve at one boundary and hard cuts at the others.
+///
+/// The thing a timeline can express that the old all-or-nothing setting could
+/// not. Measured by duration: each dissolve eats its own length out of the
+/// total, so putting one at the wrong boundary — or at all of them — lands the
+/// film somewhere else.
+#[test]
+fn a_transition_can_be_set_on_one_boundary_alone() {
+    let Some(fx) = Fixture::new("per-boundary") else {
+        eprintln!("ffmpeg not available; skipping");
+        return;
+    };
+    let base = RenderSettings { width: 320, height: 180, fps: 30, ..Default::default() };
+
+    // Three 3s shots. One 600ms dissolve, between the second and third.
+    let mut items = Vec::new();
+    for i in 0..3 {
+        let v = fx.dir.join(format!("s{i}.mp4"));
+        let a = fx.dir.join(format!("s{i}.wav"));
+        ffmpeg::make_placeholder(&fx.ffmpeg, &v, PALETTE[i].1, 4_000, 320, 180, 30).expect("clip");
+        tts::write_wav(&a, &vec![0f32; 3 * 24_000]).expect("wav");
+        items.push(ffmpeg::RenderItem {
+            video: v,
+            audio: a,
+            item: timeline::TimelineItem {
+                clip_id: format!("c{i}"),
+                segment_index: 0,
+                source_in_ms: 0,
+                source_out_ms: 3_000,
+                timeline_start_ms: i as u64 * 3_000,
+                timeline_duration_ms: 3_000,
+                stretch: 1.0,
+                fit: timeline::Fit::Exact,
+            },
+            is_hdr: false,
+            has_audio: false,
+        });
+    }
+
+    let settings = RenderSettings { transitions: vec![0, 600], ..base.clone() };
+    let out = fx.dir.join("one-fade.mp4");
+    ffmpeg::render_rough_cut(&fx.ffmpeg, &items, &settings, &ffmpeg::FfmpegCaps::default(), &out)
+        .expect("renders with a fade at one boundary");
+
+    // 9s less the single 600ms overlap. A fade at both would give 7.8s; none
+    // would give 9.0s.
+    let total = ffmpeg::probe_duration_ms(&fx.ffprobe, &out).expect("probe");
+    println!("\n  total {total}ms (8400 expected; 7800 if both faded, 9000 if neither)");
+    assert!(total.abs_diff(8_400) < 200, "expected 8.4s, measured {total}ms");
+
+    // Boundary one is a cut: the frame either side of 3.0s is one colour or
+    // the other, never a blend.
+    let before = ffmpeg::frame_rgb(&fx.ffmpeg, &out, 2_900).expect("before the cut");
+    let after = ffmpeg::frame_rgb(&fx.ffmpeg, &out, 3_100).expect("after the cut");
+    assert_eq!(nearest(before), PALETTE[0].0);
+    assert_eq!(nearest(after), PALETTE[1].0, "a cut, not a dissolve");
+
+    // Boundary two is a dissolve: mid-transition carries both colours.
+    let mid = ffmpeg::frame_rgb(&fx.ffmpeg, &out, 5_700).expect("mid-dissolve");
+    println!("  mid-dissolve {mid:?} between {} and {}", PALETTE[1].0, PALETTE[2].0);
+    assert_ne!(nearest(mid), nearest(before), "the second boundary should blend");
+    assert!(mid.1 > 20 && mid.2 > 20, "expected a green/blue blend, saw {mid:?}");
 }

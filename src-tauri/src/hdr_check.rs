@@ -131,6 +131,7 @@ fn tone_maps_real_hdr_footage_with_zscale() {
             audio: audio[i].clone(),
             item: item.clone(),
             is_hdr: true,
+            has_audio: false,
         })
         .collect();
 

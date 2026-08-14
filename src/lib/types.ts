@@ -16,6 +16,8 @@ export interface Clip {
   /** Set at import, never inferred from the filename. */
   isPlaceholder?: boolean;
   isHdr?: boolean;
+  /** Whether the file carries a sound track of its own. */
+  hasAudio?: boolean;
   warnings?: string[];
   /** Where in the clip a chosen segment starts. */
   sourceStartMs?: number;

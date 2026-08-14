@@ -82,6 +82,28 @@ export interface IntroSpec {
   text: string | null;
 }
 
+/**
+ * What the cut would be, without making it.
+ *
+ * The shot lengths come from the narration by rules that live in Rust; asking
+ * for them rather than re-deriving them here keeps one implementation of the
+ * arithmetic the whole app is timed by.
+ */
+export async function planTimeline(
+  clips: Clip[],
+  voiced: VoicedLine[],
+  opts: { segmentStarts?: Map<string, number>; sourceClipIds?: Map<string, string> } = {},
+): Promise<TimelineItem[]> {
+  try {
+    return await invoke<TimelineItem[]>("assembly_plan", {
+      clips: toClipSpecs(clips),
+      voiced: toVoicedSpecs(voiced, opts.segmentStarts, opts.sourceClipIds),
+    });
+  } catch (err) {
+    throw asError(err);
+  }
+}
+
 export interface GeneratedClip {
   clipId: string;
   sourcePath: string;
@@ -158,6 +180,7 @@ function toClipSpecs(clips: Clip[]) {
     sourceDurationMs: c.sourceDurationMs ?? null,
     isPlaceholder: c.isPlaceholder ?? false,
     isHdr: c.isHdr ?? null,
+    hasAudio: c.hasAudio ?? null,
     sourceStartMs: c.sourceStartMs ?? 0,
   }));
 }
@@ -167,16 +190,24 @@ function toClipSpecs(clips: Clip[]) {
  * the clip because a story may use two different moments from the same clip,
  * and each needs its own offset.
  */
-function toVoicedSpecs(voiced: VoicedLine[], startsByKey?: Map<string, number>) {
-  return voiced.map((v) => ({
-    clipId: v.clipId,
-    segmentIndex: v.segmentIndex ?? 0,
-    text: v.text,
-    audioPath: v.audioPath,
-    durationMs: v.durationMs,
-    skipped: v.skipped,
-    sourceStartMs: startsByKey?.get(`${v.clipId}#${v.segmentIndex ?? 0}`) ?? 0,
-  }));
+function toVoicedSpecs(
+  voiced: VoicedLine[],
+  startsByKey?: Map<string, number>,
+  sourceClipIds?: Map<string, string>,
+) {
+  return voiced.map((v) => {
+    const key = `${v.clipId}#${v.segmentIndex ?? 0}`;
+    return {
+      clipId: v.clipId,
+      segmentIndex: v.segmentIndex ?? 0,
+      text: v.text,
+      audioPath: v.audioPath,
+      durationMs: v.durationMs,
+      skipped: v.skipped,
+      sourceStartMs: startsByKey?.get(key) ?? 0,
+      sourceClipId: sourceClipIds?.get(key) ?? null,
+    };
+  });
 }
 
 /** Dev-only: stand-in footage so assembly can be exercised before upload exists. */
@@ -213,10 +244,24 @@ export interface RenderOptions {
   crossfadeMs?: number;
   /** Bundled bed id, or null for silence under the narration. */
   musicId?: string | null;
+  /**
+   * A music file the user chose, which is not the same thing as a bed id and
+   * must not be run through the id sanitiser — that strips the slashes out of
+   * a path and leaves a filename that resolves to nothing.
+   */
+  musicPath?: string | null;
+  /** How loud the music sits under the narration. */
+  musicGain?: number;
   /** The opening montage, or null for a film that starts on its first line. */
   intro?: IntroSpec | null;
   /** Draw the script into the picture. The .srt is written either way. */
   subtitles?: boolean;
+  /** How loud each clip's own sound sits under the narration. 0 is off. */
+  sourceAudioGain?: number;
+  /** A dissolve length per boundary, from the timeline. */
+  transitions?: number[];
+  /** Which clip's footage each line shows, where the timeline swapped it. */
+  sourceClipIds?: Map<string, string>;
   onProgress?: (p: RenderProgress) => void;
 }
 
@@ -231,7 +276,7 @@ export async function renderRoughCut(
   try {
     return await invoke<AssembleResult>("assembly_render", {
       clips: toClipSpecs(clips),
-      voiced: toVoicedSpecs(voiced, opts.segmentStarts),
+      voiced: toVoicedSpecs(voiced, opts.segmentStarts, opts.sourceClipIds),
       projectId: opts.projectId,
       projectName: opts.projectName,
       model: opts.model,
@@ -243,8 +288,12 @@ export async function renderRoughCut(
       videoTitle: opts.videoTitle ?? null,
       crossfadeMs: opts.crossfadeMs ?? 0,
       musicId: opts.musicId ?? null,
+      musicPath: opts.musicPath ?? null,
+      musicGain: opts.musicGain ?? null,
       intro: opts.intro ?? null,
       subtitles: opts.subtitles ?? false,
+      sourceAudioGain: opts.sourceAudioGain ?? 0,
+      transitions: opts.transitions ?? [],
     });
   } catch (err) {
     throw asError(err);

@@ -184,14 +184,19 @@ export function renderSignature(
    * stale against.
    */
   introSig = "",
-  /** Whether the words are drawn into the picture. */
-  subtitles = false,
+  /**
+   * The timeline's own contribution: what is in the cut, in what order, from
+   * which footage, with which tracks and captions.
+   *
+   * Every edit changes the film, so every edit has to make an existing render
+   * stale — otherwise dropping a shot leaves the app showing a video that
+   * still contains it.
+   */
+  timelineSig = "",
 ): string {
   if (!voiced) return "";
   const lines = voiced.map((v) => `${v.audioPath}:${v.durationMs}`).join("|");
-  return `${lines}::${crossfadeMs}::${musicId ?? "none"}::${introSig || "no-intro"}::${
-    subtitles ? "subs" : "no-subs"
-  }`;
+  return `${lines}::${crossfadeMs}::${musicId ?? "none"}::${introSig || "no-intro"}::${timelineSig}`;
 }
 
 export interface PipelineInput {

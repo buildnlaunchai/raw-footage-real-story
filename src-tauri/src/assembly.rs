@@ -94,6 +94,9 @@ pub struct ClipSpec {
     /// From the import probe; drives tone mapping at render time.
     #[serde(default)]
     pub is_hdr: Option<bool>,
+    /// From the import probe; whether the file carries sound of its own.
+    #[serde(default)]
+    pub has_audio: Option<bool>,
     /// Where in the clip this item starts, when a story uses one described
     /// segment rather than the whole clip.
     #[serde(default)]
@@ -117,6 +120,20 @@ pub struct VoicedSpec {
     /// Where in the clip this line's segment begins.
     #[serde(default)]
     pub source_start_ms: Option<u64>,
+    /// Show this clip's footage instead of the one the line was written for.
+    ///
+    /// The line keeps its own identity — its words, its recording, its caption
+    /// and its place in the script are untouched. Only the picture changes,
+    /// which is what "that shot is out of focus, use the other one" means.
+    #[serde(default)]
+    pub source_clip_id: Option<String>,
+}
+
+impl VoicedSpec {
+    /// Whose footage is on screen for this line.
+    fn media_clip_id(&self) -> &str {
+        self.source_clip_id.as_deref().unwrap_or(&self.clip_id)
+    }
 }
 
 /// The opening montage, as the frontend asks for it.
@@ -339,6 +356,42 @@ pub fn assembly_consolidate_media(
     Ok(out)
 }
 
+/// What the cut would be, without making it.
+///
+/// The timeline needs every shot's length before it can draw anything, and
+/// those lengths come from the narration by rules that live in `timeline.rs`.
+/// Re-deriving them in TypeScript would be a second implementation of the one
+/// piece of arithmetic the whole app is timed by, free to drift from the first.
+#[tauri::command]
+pub fn assembly_plan(
+    clips: Vec<ClipSpec>,
+    voiced: Vec<VoicedSpec>,
+) -> Vec<crate::timeline::TimelineItem> {
+    let clip_inputs: Vec<ClipInput> = voiced
+        .iter()
+        .map(|v| ClipInput {
+            clip_id: v.clip_id.clone(),
+            segment_index: v.segment_index,
+            source_duration_ms: clips
+                .iter()
+                .find(|c| c.id == v.media_clip_id())
+                .and_then(|c| c.source_duration_ms),
+            source_start_ms: v.source_start_ms.unwrap_or(0),
+        })
+        .collect();
+    let line_inputs: Vec<LineInput> = voiced
+        .iter()
+        .map(|v| LineInput {
+            clip_id: v.clip_id.clone(),
+            segment_index: v.segment_index,
+            duration_ms: v.duration_ms,
+            speech_end_ms: v.speech_end_ms,
+            text: Some(v.text.clone()),
+        })
+        .collect();
+    timeline::plan(&clip_inputs, &line_inputs)
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssembleResult {
@@ -377,9 +430,18 @@ pub async fn assembly_render(
     video_title: Option<String>,
     crossfade_ms: Option<u32>,
     music_id: Option<String>,
+    // A file the user chose, which is not a bed id: running a path through the
+    // id sanitiser strips its slashes and leaves a name resolving to nothing.
+    music_path: Option<String>,
+    music_gain: Option<f32>,
     intro: Option<IntroSpec>,
     subtitles: Option<bool>,
+    // How loud each clip's own sound sits under the narration (zero is off),
+    // and a dissolve length per boundary where the timeline has an opinion.
+    source_audio_gain: Option<f32>,
+    transitions: Option<Vec<u32>>,
 ) -> Result<AssembleResult, FfmpegError> {
+    let source_audio_gain = source_audio_gain.unwrap_or(0.0);
     let info = ffmpeg::detect(&load_settings(&app))?;
     let dir = project_dir(&app, &project_id)?;
     std::fs::create_dir_all(dir.join("render"))
@@ -394,7 +456,7 @@ pub async fn assembly_render(
             segment_index: v.segment_index,
             source_duration_ms: clips
                 .iter()
-                .find(|c| c.id == v.clip_id)
+                .find(|c| c.id == v.media_clip_id())
                 .and_then(|c| c.source_duration_ms),
             source_start_ms: v.source_start_ms.unwrap_or(0),
         })
@@ -427,7 +489,14 @@ pub async fn assembly_render(
 
     let mut render_items = Vec::with_capacity(items.len());
     for (i, item) in items.iter().enumerate() {
-        let spec = clips.iter().find(|c| c.id == item.clip_id);
+        // The media comes from whichever clip this line is showing, which is
+        // its own unless the timeline swapped it.
+        let media_id = voiced
+            .iter()
+            .find(|v| v.clip_id == item.clip_id && v.segment_index == item.segment_index)
+            .map(|v| v.media_clip_id().to_string())
+            .unwrap_or_else(|| item.clip_id.clone());
+        let spec = clips.iter().find(|c| c.id == media_id);
         // Audio is per line, so match the pair; the media file is per clip.
         let video = match spec.and_then(|c| c.source_path.clone()) {
             Some(p) if Path::new(&p).is_file() => PathBuf::from(p),
@@ -457,11 +526,23 @@ pub async fn assembly_render(
                 ),
             })?;
 
+        // Probed rather than remembered when the clip's own sound is wanted:
+        // footage imported before this was recorded carries no answer, and
+        // getting it wrong fails the whole render rather than degrading.
+        let source_has_audio = source_audio_gain > 0.0
+            && spec.and_then(|c| c.has_audio).unwrap_or_else(|| {
+                ffmpeg::probe_media(&info.ffprobe, &video).map(|m| m.has_audio).unwrap_or(false)
+            });
+
         render_items.push(RenderItem {
             video,
             audio,
             item: item.clone(),
             is_hdr: spec.and_then(|c| c.is_hdr).unwrap_or(false),
+            // Probed rather than remembered when the clip's own sound is
+            // wanted: footage imported before this was recorded carries no
+            // answer, and getting it wrong fails the whole render.
+            has_audio: source_has_audio,
         });
     }
 
@@ -472,14 +553,22 @@ pub async fn assembly_render(
 
     // Music ids map to bundled files; an unknown id is silence rather than an
     // error, since a missing bed should not fail a render.
-    let music_path = music_id.as_deref().and_then(|id| {
-        let safe: String = id.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
-        let p = crate::resources::root().join("music").join(format!("{safe}.m4a"));
-        p.is_file().then(|| p.to_string_lossy().to_string())
-    });
+    let music_path = music_path
+        .filter(|p| Path::new(p).is_file())
+        .or_else(|| {
+            music_id.as_deref().and_then(|id| {
+                let safe: String =
+                    id.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
+                let p = crate::resources::root().join("music").join(format!("{safe}.m4a"));
+                p.is_file().then(|| p.to_string_lossy().to_string())
+            })
+        });
     let mut settings = RenderSettings {
         crossfade_ms: crossfade_ms.unwrap_or(0),
+        source_audio_gain,
+        transitions: transitions.unwrap_or_default(),
         music_path,
+        music_gain: music_gain.unwrap_or(0.10),
         ..RenderSettings::default()
     };
     // One file per render. A fixed name meant every render destroyed the
@@ -521,6 +610,8 @@ pub async fn assembly_render(
                         item: placed[0].clone(),
                         // Already tone-mapped by `render_intro` if it needed to be.
                         is_hdr: false,
+                        // The montage is rendered mute; its sound is the hook.
+                        has_audio: false,
                     },
                 );
                 // Clamped against the assembled list, so a one-second first line

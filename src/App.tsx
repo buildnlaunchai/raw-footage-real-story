@@ -90,6 +90,14 @@ import {
   type ScriptStyle,
 } from "./lib/scriptComposer";
 import { INTRO_FADE_MS, pickShots, type ShotCandidate } from "./lib/intro";
+import { TimelinePanel } from "./components/TimelinePanel";
+import {
+  applyEdits,
+  DEFAULT_TIMELINE,
+  transitionsFor,
+  type PlannedShot,
+  type TimelineDoc,
+} from "./lib/timeline";
 import { coverageFor, suggestedWordCount } from "./lib/scriptComposerCore";
 import { audioUrl, concatNarration } from "./lib/voiceover";
 import {
@@ -108,6 +116,7 @@ import {
   importMedia,
   INTRO_CLIP_ID,
   MUSIC_BEDS,
+  planTimeline,
   renderRoughCut,
   VIDEO_EXTENSIONS,
   type AssembleResult,
@@ -145,6 +154,19 @@ function errorText(err: unknown): string {
     }
   }
   return String(err);
+}
+
+/** A project clip as the assembly layer wants it. */
+function toClipSpec(c: ProjectClip) {
+  return {
+    id: c.id,
+    description: c.segments[0]?.text ?? "",
+    sourcePath: c.sourcePath ?? undefined,
+    sourceDurationMs: c.sourceDurationMs ?? undefined,
+    isPlaceholder: c.isPlaceholder,
+    isHdr: c.isHdr,
+    hasAudio: c.hasAudio,
+  };
 }
 
 function App() {
@@ -362,9 +384,11 @@ function App() {
   const [assemblyBusy, setAssemblyBusy] = useState(false);
   const [renderProgress, setRenderProgress] = useState<RenderProgress | null>(null);
   const [assemblyError, setAssemblyError] = useState<string | null>(null);
-  const [crossfadeMs, setCrossfadeMs] = useState(0);
-  const [musicId, setMusicId] = useState<string | null>(null);
-  const [burnSubtitles, setBurnSubtitles] = useState(false);
+  // Kept as the render's defaults; the timeline overrides both per boundary
+  // and per track, and is where a user actually sets them now.
+  const [crossfadeMs] = useState(0);
+  const [timelineDoc, setTimelineDoc] = useState<TimelineDoc>(DEFAULT_TIMELINE);
+  const [planned, setPlanned] = useState<PlannedShot[]>([]);
 
   const projectId = manifest?.project.id ?? null;
 
@@ -409,6 +433,21 @@ function App() {
       text: hookAudio.text,
     };
   }, [introShots, hookAudio, manifest]);
+
+  /**
+   * What the timeline contributes to the cut's identity.
+   *
+   * Every edit changes the film, so every edit has to make an existing render
+   * stale — otherwise dropping a shot leaves the app showing a video that
+   * still contains it.
+   */
+  const timelineSig = JSON.stringify([
+    timelineDoc.order,
+    timelineDoc.edits,
+    timelineDoc.originalAudio,
+    timelineDoc.music,
+    timelineDoc.subtitles,
+  ]);
 
   /** What the cut's opening was made from, for the staleness check. */
   const introSignature = introSpec
@@ -511,6 +550,7 @@ function App() {
     setIdeas(null);
     setTitle("");
     setLines(null);
+    setTimelineDoc(DEFAULT_TIMELINE);
     setHook(null);
     setHookAudio(null);
     setVoiced(null);
@@ -561,6 +601,7 @@ function App() {
           // same as every other line.
           setHook(last.script.hook ?? null);
         }
+        setTimelineDoc({ ...DEFAULT_TIMELINE, ...(last.timelineDoc ?? {}) });
       }
       setDirty(false);
     } catch (err) {
@@ -609,6 +650,10 @@ function App() {
             }
           : (existing?.audio ?? null),
         timeline: existing?.timeline ?? [],
+        // The edits, not the resolved cut: timings are recomputed from the
+        // narration every time, so storing them would only create a second
+        // copy free to disagree with the first.
+        timelineDoc,
         render: existing?.render ?? null,
         pronunciations,
       };
@@ -619,7 +664,7 @@ function App() {
           : [...m.videos, video],
       };
     },
-    [title, lines, wordCount, hook, voiced, voice, pronunciations],
+    [title, lines, wordCount, hook, voiced, voice, pronunciations, timelineDoc],
   );
 
   const onSave = useCallback(async () => {
@@ -1141,6 +1186,50 @@ function App() {
     }
   }
 
+  /**
+   * Ask Rust what the cut would be, so the timeline can lay itself out.
+   *
+   * Re-asked whenever the narration or the swaps change, because both decide
+   * how long each shot is — and that arithmetic lives in one place on purpose.
+   */
+  useEffect(() => {
+    if (!voiced || voiced.length === 0 || !manifest) {
+      setPlanned([]);
+      return;
+    }
+    let cancelled = false;
+    const clipSpecs = manifest.clips.map(toClipSpec);
+    const starts = new Map<string, number>();
+    const swaps = new Map<string, string>();
+    for (const v of voiced) {
+      const key = `${v.clipId}#${v.segmentIndex}`;
+      const edit = timelineDoc.edits[key];
+      const seg = manifest.clips.find((c) => c.id === v.clipId)?.segments[v.segmentIndex];
+      starts.set(key, edit?.sourceInMs ?? Math.round((seg?.startSec ?? 0) * 1000));
+      if (edit?.sourceClipId) swaps.set(key, edit.sourceClipId);
+    }
+    void planTimeline(clipSpecs, voiced, { segmentStarts: starts, sourceClipIds: swaps })
+      .then((items) => {
+        if (cancelled) return;
+        const textFor = new Map(voiced.map((v) => [`${v.clipId}#${v.segmentIndex}`, v.text]));
+        setPlanned(
+          items.map((i) => ({
+            clipId: i.clipId,
+            segmentIndex: i.segmentIndex,
+            durationMs: i.timelineDurationMs,
+            sourceInMs: i.sourceInMs,
+            text: textFor.get(`${i.clipId}#${i.segmentIndex}`) ?? "",
+          })),
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setPlanned([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [voiced, manifest, timelineDoc.edits]);
+
   // --- assembly ------------------------------------------------------------
 
   async function onRender() {
@@ -1153,22 +1242,37 @@ function App() {
     try {
       // Clip specs describe the media; segment offsets travel per line, so a
       // clip used twice at different moments gets two independent starts.
-      const clipSpecs = manifest.clips.map((c) => ({
-        id: c.id,
-        description: c.segments[0]?.text ?? "",
-        sourcePath: c.sourcePath ?? undefined,
-        sourceDurationMs: c.sourceDurationMs ?? undefined,
-        isPlaceholder: c.isPlaceholder,
-        isHdr: c.isHdr,
-      }));
-      const segmentStarts = new Map<string, number>();
-      for (const v of voiced) {
-        const seg = manifest.clips.find((c) => c.id === v.clipId)?.segments[v.segmentIndex];
-        if (seg) {
-          segmentStarts.set(`${v.clipId}#${v.segmentIndex}`, Math.round(seg.startSec * 1000));
-        }
+      const clipSpecs = manifest.clips.map(toClipSpec);
+      // The timeline decides what is in the cut, in what order, from which
+      // footage and where each shot starts. Anything it has no opinion about
+      // falls back to the plan, which is what the edits are overrides on.
+      const shots = applyEdits(planned, timelineDoc);
+      const liveShots = shots.filter((sh) => sh.enabled);
+      const rank = new Map(liveShots.map((sh, i) => [sh.key, i]));
+      const inCut = voiced
+        .filter((v) => rank.has(`${v.clipId}#${v.segmentIndex}`))
+        .sort(
+          (a, b) =>
+            rank.get(`${a.clipId}#${a.segmentIndex}`)! -
+            rank.get(`${b.clipId}#${b.segmentIndex}`)!,
+        );
+      if (inCut.length === 0) {
+        setAssemblyError("Every shot is switched off in the timeline, so there is nothing to render.");
+        setAssemblyBusy(false);
+        return;
       }
-      const result = await renderRoughCut(clipSpecs, voiced, {
+
+      const segmentStarts = new Map<string, number>();
+      const sourceClipIds = new Map<string, string>();
+      for (const v of voiced) {
+        const key = `${v.clipId}#${v.segmentIndex}`;
+        const edit = timelineDoc.edits[key];
+        const seg = manifest.clips.find((c) => c.id === v.clipId)?.segments[v.segmentIndex];
+        const planStart = seg ? Math.round(seg.startSec * 1000) : 0;
+        segmentStarts.set(key, edit?.sourceInMs ?? planStart);
+        if (edit?.sourceClipId) sourceClipIds.set(key, edit.sourceClipId);
+      }
+      const result = await renderRoughCut(clipSpecs, inCut, {
         projectId: manifest.project.id,
         projectName: manifest.project.name,
         model: OLLAMA_MODEL,
@@ -1178,10 +1282,17 @@ function App() {
         takeId,
         videoTitle: title,
         segmentStarts,
+        sourceClipIds,
         crossfadeMs,
-        musicId,
+        musicId: timelineDoc.music.enabled ? timelineDoc.music.bedId : null,
+        musicPath: timelineDoc.music.enabled ? timelineDoc.music.path : null,
+        musicGain: timelineDoc.music.gain,
+        transitions: transitionsFor(shots),
+        sourceAudioGain: timelineDoc.originalAudio.enabled
+          ? timelineDoc.originalAudio.gain
+          : 0,
         intro: introSpec,
-        subtitles: burnSubtitles,
+        subtitles: timelineDoc.subtitles,
         onProgress: setRenderProgress,
       });
       setAssembly(result);
@@ -1193,17 +1304,24 @@ function App() {
         .join(" · ");
       if (missed) setAssemblyError(`The cut rendered, but ${missed}`);
       // Stamp what this cut was made from, so a later edit can be seen.
-      setRenderedSig(
-        renderSignature(voiced, crossfadeMs, musicId, introSignature, burnSubtitles),
-      );
+      setRenderedSig(renderSignature(inCut, crossfadeMs, null, introSignature, timelineSig));
 
       const take = renderTake(
         takeId,
         result.videoPath,
         result.durationMs,
-        `${crossfadeMs > 0 ? "crossfade" : "hard cuts"} · ${
-          musicId ? (MUSIC_BEDS.find((m) => m.id === musicId)?.label ?? musicId) : "no music"
-        }`,
+        // What this take is, in the terms the timeline set it: how many shots
+        // survived, what was under them, and whether it carries captions.
+        [
+          `${liveShots.length} shot${liveShots.length === 1 ? "" : "s"}`,
+          timelineDoc.music.enabled && timelineDoc.music.label
+            ? timelineDoc.music.label
+            : "no music",
+          timelineDoc.originalAudio.enabled ? "clip sound on" : null,
+          timelineDoc.subtitles ? "subtitles" : null,
+        ]
+          .filter(Boolean)
+          .join(" · "),
       );
       setTakes(await addTake(manifest.project.id, take));
       setCurrentRenderTake(takeId);
@@ -1213,6 +1331,35 @@ function App() {
     } finally {
       setAssemblyBusy(false);
       setRenderProgress(null);
+    }
+  }
+
+  /** Pick a music file from disk for the timeline's music track. */
+  async function onPickMusic() {
+    try {
+      const picked = await openDialog({
+        multiple: false,
+        title: "Choose a music track",
+        filters: [{ name: "Audio", extensions: ["mp3", "m4a", "aac", "wav", "flac", "ogg"] }],
+      });
+      const path = Array.isArray(picked) ? picked[0] : picked;
+      if (!path) return;
+      // The webview has to be allowed to read it, the same as footage — this
+      // is a file from wherever the user keeps their music.
+      await allowMedia([path]);
+      setTimelineDoc((d) => ({
+        ...d,
+        music: {
+          ...d.music,
+          path,
+          bedId: null,
+          label: path.split("/").pop() ?? "Music",
+          enabled: true,
+        },
+      }));
+      setDirty(true);
+    } catch (err) {
+      setError(errorText(err));
     }
   }
 
@@ -1651,8 +1798,7 @@ function App() {
   const assemblyCurrent =
     !assembly ||
     renderedSig === "" ||
-    renderedSig ===
-      renderSignature(voiced, crossfadeMs, musicId, introSignature, burnSubtitles);
+    renderedSig === renderSignature(voiced, crossfadeMs, null, introSignature, timelineSig);
 
   const busyStage: StageId | null = importing
     ? "footage"
@@ -2099,6 +2245,23 @@ function App() {
             />
 
             {ffmpeg && (
+              <>
+              {planned.length > 0 && (
+                <TimelinePanel
+                  planned={planned}
+                  doc={timelineDoc}
+                  onChange={(d) => {
+                    setTimelineDoc(d);
+                    setDirty(true);
+                  }}
+                  clips={manifest.clips}
+                  busy={assemblyBusy}
+                  onRender={() => void onRender()}
+                  onPickMusic={() => void onPickMusic()}
+                  beds={MUSIC_BEDS}
+                />
+              )}
+
               <AssemblyPanel
                 title={title}
                 voiced={voiced}
@@ -2122,83 +2285,8 @@ function App() {
                 intro={introSpec ? { hook, shots: introShots.length } : null}
                 hasExternalMedia={manifest.clips.some((c) => c.sourcePath && !c.isPlaceholder)}
               >
-                <div className="field-row">
-                  <span className="field-label">Transitions</span>
-                  <div className="style-row">
-                    <button
-                      type="button"
-                      className={`style-chip${crossfadeMs === 0 ? " is-selected" : ""}`}
-                      onClick={() => setCrossfadeMs(0)}
-                      title="The default: an instant cut between clips"
-                    >
-                      Hard cuts
-                    </button>
-                    <button
-                      type="button"
-                      className={`style-chip${crossfadeMs === 400 ? " is-selected" : ""}`}
-                      onClick={() => setCrossfadeMs(400)}
-                      title="A 400ms dissolve; shortens the film slightly"
-                    >
-                      Crossfade
-                    </button>
-                  </div>
-                </div>
-
-                <div className="field-row">
-                  <span className="field-label">Subtitles</span>
-                  <div className="style-row">
-                    <button
-                      type="button"
-                      className={`style-chip${!burnSubtitles ? " is-selected" : ""}`}
-                      onClick={() => setBurnSubtitles(false)}
-                    >
-                      Off
-                    </button>
-                    <button
-                      type="button"
-                      className={`style-chip${burnSubtitles ? " is-selected" : ""}`}
-                      onClick={() => setBurnSubtitles(true)}
-                      disabled={!ffmpeg.caps.subtitles}
-                      title={
-                        ffmpeg.caps.subtitles
-                          ? "Draw the script into the picture, in the language it was written in"
-                          : "This copy of ffmpeg was built without libass and cannot draw text"
-                      }
-                    >
-                      Burn into the video
-                    </button>
-                    <span className="hint">
-                      {ffmpeg.caps.subtitles
-                        ? "A .srt file is saved next to the video either way."
-                        : "Not available in this ffmpeg build — a .srt is still saved next to the video."}
-                    </span>
-                  </div>
-                </div>
-
-                <div className="field-row">
-                  <span className="field-label">Music</span>
-                  <div className="style-row">
-                    <button
-                      type="button"
-                      className={`style-chip${musicId === null ? " is-selected" : ""}`}
-                      onClick={() => setMusicId(null)}
-                    >
-                      None
-                    </button>
-                    {MUSIC_BEDS.map((m) => (
-                      <button
-                        key={m.id}
-                        type="button"
-                        className={`style-chip${musicId === m.id ? " is-selected" : ""}`}
-                        onClick={() => setMusicId(m.id)}
-                        title={m.hint}
-                      >
-                        {m.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </AssemblyPanel>
+                            </AssemblyPanel>
+              </>
             )}
 
             <TakeHistory

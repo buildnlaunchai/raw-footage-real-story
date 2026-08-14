@@ -96,6 +96,15 @@ export interface VideoProject {
   script: ScriptSection | null;
   audio: AudioSection | null;
   timeline: unknown[];
+  /**
+   * The timeline's edits — what was dropped, reordered, swapped or trimmed by
+   * hand, and how the audio tracks are set.
+   *
+   * The edits rather than the resolved cut: shot lengths are recomputed from
+   * the narration on every load, so storing them would create a second copy
+   * free to disagree with the first.
+   */
+  timelineDoc?: unknown;
   render: unknown | null;
   pronunciations: Record<string, string>;
 }

@@ -617,6 +617,12 @@ pub struct RenderItem {
     /// Set from the probe at import. HDR sources need tone mapping or they
     /// come out grey and desaturated.
     pub is_hdr: bool,
+    /// Whether the video file carries a sound track of its own.
+    ///
+    /// Not a preference — a fact about the file. `[n:a]` on a silent input
+    /// fails the entire render rather than degrading, so this must be what the
+    /// probe found and never what seems likely.
+    pub has_audio: bool,
 }
 
 /// Filter fragment converting HDR to SDR, or empty when it cannot be done well.
@@ -666,6 +672,20 @@ pub struct RenderSettings {
     /// with the voice defeats the point of the voice.
     #[serde(default = "default_music_gain")]
     pub music_gain: f32,
+    /// How loud each clip's own sound sits under the narration. Zero is off.
+    ///
+    /// Low by default when it is on at all: this is room tone, traffic and
+    /// wind under a voice, and anything approaching parity buries the voice
+    /// the film exists to deliver.
+    #[serde(default)]
+    pub source_audio_gain: f32,
+    /// A dissolve length per boundary, overriding `crossfade_ms` where present.
+    ///
+    /// Index `i` is the gap between shot `i` and shot `i + 1`. Short, and
+    /// usually empty — it exists so a timeline can put a dissolve at one
+    /// boundary without making every cut in the film a dissolve.
+    #[serde(default)]
+    pub transitions: Vec<u32>,
     /// A subtitle file to burn into the picture.
     ///
     /// The file is written whatever this is set to — it is useful on its own,
@@ -692,6 +712,8 @@ impl Default for RenderSettings {
             // boundary — "there is an intro" and "fade at boundary zero" have
             // to be the same fact, or they drift apart.
             intro_fade_ms: 0,
+            source_audio_gain: 0.0,
+            transitions: Vec::new(),
             music_path: None,
             music_gain: default_music_gain(),
             subtitle_path: None,
@@ -715,6 +737,38 @@ pub fn clamp_crossfade(requested_ms: u32, items: &[RenderItem]) -> u32 {
         .min()
         .unwrap_or(0);
     requested_ms.min((shortest / 3) as u32).min(1_500)
+}
+
+/// How long the dissolve is at each boundary, one per gap between shots.
+///
+/// The timeline's own list wins where it has an opinion; otherwise every
+/// boundary gets the one crossfade setting. Boundary zero is special only when
+/// there is an opening montage, which dissolves into the film whatever the
+/// rest of it does — that is the whole reason `intro_fade_ms` is a separate
+/// field rather than a style choice.
+///
+/// Every value is clamped against the shortest slot, because a dissolve eats
+/// time from both neighbours and two overlapping fades on a short shot can
+/// leave no un-faded frames at all.
+fn boundary_fades(settings: &RenderSettings, items: &[RenderItem]) -> Vec<u32> {
+    if items.len() < 2 {
+        return Vec::new();
+    }
+    let default = clamp_crossfade(settings.crossfade_ms, items);
+    let intro = clamp_crossfade(settings.intro_fade_ms, items);
+    (0..items.len() - 1)
+        .map(|i| {
+            if i == 0 && intro > 0 {
+                intro
+            } else {
+                settings
+                    .transitions
+                    .get(i)
+                    .map(|ms| clamp_crossfade(*ms, items))
+                    .unwrap_or(default)
+            }
+        })
+        .collect()
 }
 
 /// Assemble the rough cut in a single pass.
@@ -749,6 +803,7 @@ pub fn render_rough_cut(
         let a = v + 1;
         let use_ms = it.item.source_out_ms.saturating_sub(it.item.source_in_ms);
         let total_s = it.item.timeline_duration_ms as f64 / 1000.0;
+        let plays = it.item.fit.plays(it.item.timeline_duration_ms, use_ms, it.item.stretch);
 
         // trim -> tone map -> stretch -> normalise geometry -> lock rate.
         // Order matters twice over: tone mapping must precede the scale so it
@@ -793,11 +848,6 @@ pub fn render_rough_cut(
         // segment itself — looping the *input* would replay the whole file,
         // which for a moment taken from the middle of a long clip is different
         // footage, not the same shot again.
-        let plays = it.item.fit.plays(
-            it.item.timeline_duration_ms,
-            use_ms,
-            it.item.stretch,
-        );
         if plays > 1 {
             filter.push_str(&format!("[seg{i}]split={plays}"));
             for r in 0..plays {
@@ -819,66 +869,128 @@ pub fn render_rough_cut(
         ));
 
         // Narration, resampled and padded with silence to fill the same slot.
+        let narration = format!("nar{i}");
         filter.push_str(&format!(
             "[{a}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,\
-             apad,atrim=duration={total_s:.3},asetpts=PTS-STARTPTS[a{i}];"
+             apad,atrim=duration={total_s:.3},asetpts=PTS-STARTPTS[{narration}];"
         ));
+
+        // The clip's own sound, under the narration, when the timeline asks
+        // for it and the file actually has a track. Referencing `:a` on a
+        // silent file does not degrade — it fails the whole render — so this
+        // is driven by what the probe found rather than by hope.
+        let src_gain = settings.source_audio_gain.clamp(0.0, 4.0);
+        if src_gain > 0.0 && it.has_audio {
+            // Trimmed like the picture, and slowed to match it: a shot at 2x
+            // slower with its audio at normal speed drifts a whole second
+            // apart by the end of a two-second clip.
+            let tempo = if it.item.stretch > 1.0 { 1.0 / it.item.stretch } else { 1.0 };
+            filter.push_str(&format!(
+                "[{v}:a]atrim=start={:.3}:duration={:.3},asetpts=PTS-STARTPTS,\
+                 aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo",
+                it.item.source_in_ms as f64 / 1000.0,
+                use_ms as f64 / 1000.0,
+            ));
+            if tempo < 1.0 {
+                // atempo's floor is 0.5, which is exactly the 2x cap — so one
+                // filter always suffices and never has to be chained.
+                filter.push_str(&format!(",atempo={tempo:.4}"));
+            }
+            filter.push_str(&format!(",volume={src_gain:.3}[srcraw{i}];"));
+
+            // A replayed shot replays its sound with it, or the picture loops
+            // over audio that has already run out.
+            if plays > 1 {
+                filter.push_str(&format!("[srcraw{i}]asplit={plays}"));
+                for r in 0..plays {
+                    filter.push_str(&format!("[sr{i}_{r}]"));
+                }
+                filter.push(';');
+                for r in 0..plays {
+                    filter.push_str(&format!("[sr{i}_{r}]"));
+                }
+                filter.push_str(&format!("concat=n={plays}:v=0:a=1[srcrep{i}];"));
+            } else {
+                filter.push_str(&format!("[srcraw{i}]anull[srcrep{i}];"));
+            }
+            filter.push_str(&format!(
+                "[srcrep{i}]apad,atrim=duration={total_s:.3},asetpts=PTS-STARTPTS[src{i}];"
+            ));
+            // normalize=0 because the default divides every input by the
+            // number of them, which would drop the voice 6dB the moment
+            // anything was mixed under it.
+            filter.push_str(&format!(
+                "[{narration}][src{i}]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a{i}];"
+            ));
+        } else {
+            filter.push_str(&format!("[{narration}]anull[a{i}];"));
+        }
     }
 
-    let fade_ms = clamp_crossfade(settings.crossfade_ms, items);
+    // --- joining the shots ---------------------------------------------------
+    //
+    // One model instead of three special cases. Every boundary has a dissolve
+    // length, which is usually zero; runs of items separated by zero-length
+    // boundaries are concatenated, and the runs are crossfaded to each other.
+    //
+    // That subsumes what used to be written out three times: all-zero gives a
+    // single concat, all-non-zero gives a pairwise xfade chain, and an opening
+    // montage — a dissolve at boundary zero and hard cuts after it — falls out
+    // as two runs rather than needing a path of its own. It is also the only
+    // shape that can express what a timeline lets someone build, which is a
+    // dissolve at boundary four and nowhere else.
+    let fades = boundary_fades(settings, items);
 
-    // Three shapes, not two. The third exists because the opening montage wants
-    // hard cuts everywhere except the one boundary where it dissolves into the
-    // first narrated line.
-    let intro_fade_ms = clamp_crossfade(settings.intro_fade_ms, items);
-    let intro_only_fade = fade_ms == 0 && intro_fade_ms > 0 && items.len() > 1;
+    let mut runs: Vec<Vec<usize>> = vec![vec![0]];
+    for i in 1..items.len() {
+        if fades[i - 1] == 0 {
+            runs.last_mut().expect("seeded").push(i);
+        } else {
+            runs.push(vec![i]);
+        }
+    }
 
-    let (vout, aout) = if intro_only_fade {
-        // Body concatenated as one stream, then crossfaded with the intro.
-        // Verified against real ffmpeg before it was written: duration exact,
-        // and sampled pixels mid-transition are a genuine blend rather than a
-        // cut.
-        let d = intro_fade_ms as f64 / 1000.0;
-        for i in 1..items.len() {
+    // Each run becomes one stream. A run of one is already one.
+    let mut run_labels: Vec<(String, String)> = Vec::new();
+    for (k, run) in runs.iter().enumerate() {
+        if run.len() == 1 {
+            run_labels.push((format!("v{}", run[0]), format!("a{}", run[0])));
+            continue;
+        }
+        for &i in run {
             filter.push_str(&format!("[v{i}][a{i}]"));
         }
-        filter.push_str(&format!("concat=n={}:v=1:a=1[bodyv][bodya];", items.len() - 1));
-        filter.push_str(&format!("[bodyv]settb=1/{fps}[bodyv2];"));
-        let offset = items[0].item.timeline_duration_ms as f64 / 1000.0 - d;
-        filter.push_str(&format!(
-            "[v0][bodyv2]xfade=transition=fade:duration={d:.3}:offset={offset:.3}[outv];"
-        ));
-        filter.push_str(&format!("[a0][bodya]acrossfade=d={d:.3}[outa];"));
-        ("[outv]".to_string(), "[outa]".to_string())
-    } else if fade_ms == 0 {
-        // Hard cuts: one concat handles both streams and keeps them locked.
-        for i in 0..items.len() {
-            filter.push_str(&format!("[v{i}][a{i}]"));
-        }
-        filter.push_str(&format!("concat=n={}:v=1:a=1[outv][outa];", items.len()));
-        ("[outv]".to_string(), "[outa]".to_string())
+        filter.push_str(&format!("concat=n={}:v=1:a=1[rv{k}][ra{k}];", run.len()));
+        // concat hands back the microsecond timebase; xfade refuses to join
+        // streams whose timebases disagree.
+        filter.push_str(&format!("[rv{k}]settb=1/{fps}[rv{k}s];"));
+        run_labels.push((format!("rv{k}s"), format!("ra{k}")));
+    }
+
+    let (vout, aout) = if run_labels.len() == 1 {
+        let (v, a) = &run_labels[0];
+        (format!("[{v}]"), format!("[{a}]"))
     } else {
-        // Crossfade: chain xfade/acrossfade pairwise. Both streams get the same
-        // fade so audio and video stay locked; the overlap lands in the tail
-        // after the last word, which is why the tail exists.
+        let mut vprev = run_labels[0].0.clone();
+        let mut aprev = run_labels[0].1.clone();
         let mut offset = 0f64;
-        let mut vprev = "v0".to_string();
-        let mut aprev = "a0".to_string();
-        for i in 1..items.len() {
-            // The first boundary is the intro's own dissolve when there is an
-            // intro. Without this it would silently take the body's crossfade
-            // setting, which makes the opening a style choice — and the whole
-            // reason `intro_fade_ms` is a separate field is that it is not.
-            let d = if i == 1 && intro_fade_ms > 0 { intro_fade_ms } else { fade_ms } as f64
-                / 1000.0;
-            // Each fade overlaps the streams, so every subsequent offset is
-            // reduced by all the overlap consumed so far.
-            offset += items[i - 1].item.timeline_duration_ms as f64 / 1000.0 - d;
-            let (vn, an) = (format!("xv{i}"), format!("xa{i}"));
+        for k in 1..run_labels.len() {
+            // The dissolve into this run is the one at the boundary it starts on.
+            let d = fades[runs[k][0] - 1] as f64 / 1000.0;
+            let prev_ms: u64 =
+                runs[k - 1].iter().map(|&i| items[i].item.timeline_duration_ms).sum();
+            // Every fade overlaps its neighbours, so each offset is reduced by
+            // all the overlap consumed before it.
+            offset += prev_ms as f64 / 1000.0 - d;
+            let (vn, an) = (format!("xv{k}"), format!("xa{k}"));
             filter.push_str(&format!(
-                "[{vprev}][v{i}]xfade=transition=fade:duration={d:.3}:offset={offset:.3}[{vn}];"
+                "[{vprev}][{}]xfade=transition=fade:duration={d:.3}:offset={offset:.3}[{vn}];",
+                run_labels[k].0,
             ));
-            filter.push_str(&format!("[{aprev}][a{i}]acrossfade=d={d:.3}[{an}];"));
+            filter.push_str(&format!(
+                "[{aprev}][{}]acrossfade=d={d:.3}[{an}];",
+                run_labels[k].1,
+            ));
             vprev = vn;
             aprev = an;
         }
@@ -927,7 +1039,11 @@ pub fn render_rough_cut(
             ));
             // duration=first keeps the mix as long as the narration; the looped
             // music is trimmed to it rather than extending the film.
-            filter.push_str(&format!("{aout}[mus]amix=inputs=2:duration=first:dropout_transition=0[mixa];"));
+            // normalize=0: the default halves every input, so adding music
+            // used to make the narration quieter as a side effect.
+            filter.push_str(&format!(
+                "{aout}[mus]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[mixa];"
+            ));
             "[mixa]".to_string()
         }
     };
@@ -948,6 +1064,26 @@ pub fn render_rough_cut(
 
     run(&mut cmd, "render rough cut")?;
     Ok(())
+}
+
+/// Mean volume of a file's audio, in dBFS. Silence reads about -91.
+///
+/// Used by tests to tell "the clip's own sound is in the mix" from "the filter
+/// ran and produced nothing", which are indistinguishable from a file that
+/// plays and a duration that matches.
+pub fn mean_volume_db(ffmpeg: &str, media: &Path) -> Result<f64, FfmpegError> {
+    let out = Command::new(ffmpeg)
+        .args(["-v", "info", "-i"])
+        .arg(media)
+        .args(["-af", "volumedetect", "-f", "null", "-"])
+        .output()
+        .map_err(|e| FfmpegError::new("SPAWN_FAILED", e.to_string()))?;
+    let text = String::from_utf8_lossy(&out.stderr);
+    text.lines()
+        .find_map(|l| l.split("mean_volume:").nth(1))
+        .and_then(|v| v.trim().split_whitespace().next())
+        .and_then(|v| v.parse::<f64>().ok())
+        .ok_or_else(|| FfmpegError::new("NO_VOLUME", format!("volumedetect said nothing: {text}")))
 }
 
 /// Average RGB of a single frame, used by tests to assert which clip is on
