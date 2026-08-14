@@ -2323,32 +2323,6 @@ function App() {
 
             {ffmpeg && (
               <>
-              {/* The opening lives here rather than in Settings: it is a
-                  decision about this film, made while looking at it, not a
-                  preference that outlives the project. */}
-              <div className="panel tl-opening-row">
-                <label className="tl-track-toggle">
-                  <input
-                    type="checkbox"
-                    checked={introEnabled}
-                    onChange={(e) => {
-                      const on = e.currentTarget.checked;
-                      setIntroEnabled(on);
-                      void storeIntroEnabled(on);
-                      setAssembly(null);
-                    }}
-                  />
-                  <strong>Opening</strong>
-                </label>
-                <span className="hint tl-track-hint">
-                  {hook
-                    ? introPending
-                      ? `“${hook.slice(0, 60)}${hook.length > 60 ? "…" : ""}” — not recorded yet.`
-                      : `“${hook.slice(0, 60)}${hook.length > 60 ? "…" : ""}” over ${introShots.length} shot${introShots.length === 1 ? "" : "s"}.`
-                    : "One spoken line over a quick montage, before the film starts. Written with the script."}
-                </span>
-              </div>
-
               {planned.length > 0 && (
                 <TimelinePanel
                   planned={planned}
@@ -2363,6 +2337,19 @@ function App() {
                   onPickMusic={() => void onPickMusic()}
                   beds={MUSIC_BEDS}
                   subtitles={timelineDoc.subtitles ? timelineDoc.subtitleStyle : null}
+                  opening={{
+                    enabled: introEnabled,
+                    onToggle: (on) => {
+                      setIntroEnabled(on);
+                      void storeIntroEnabled(on);
+                      setAssembly(null);
+                    },
+                    summary: hook
+                      ? introPending
+                        ? `“${hook.slice(0, 60)}${hook.length > 60 ? "…" : ""}” — not recorded yet.`
+                        : `“${hook.slice(0, 60)}${hook.length > 60 ? "…" : ""}” over ${introShots.length} shot${introShots.length === 1 ? "" : "s"}.`
+                      : "One spoken line over a quick montage, before the film starts. Written with the script.",
+                  }}
                 />
               )}
 

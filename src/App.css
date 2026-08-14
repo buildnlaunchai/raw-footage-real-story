@@ -3836,3 +3836,51 @@ kbd {
   gap: 0.8rem;
   flex-wrap: wrap;
 }
+
+/* ── the assembled cut's player and shot list ──────────────────────────── */
+
+/* A row that plays the film from its own moment. */
+.shot-row-seek {
+  cursor: pointer;
+  border-radius: var(--r-md);
+  transition: background 120ms ease;
+}
+
+.shot-row-seek:hover {
+  background: var(--card-3);
+}
+
+/* The row whose slot the playhead is inside right now. */
+.shot-row-seek[data-playing] {
+  background: var(--card-3);
+  box-shadow: inset 3px 0 0 #e4572e;
+}
+
+.shot-details > summary,
+.tl-mixer-details > summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.9rem;
+  padding: 0.55rem 0.2rem;
+  color: var(--ink);
+  user-select: none;
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+}
+
+.shot-details > summary .hint,
+.tl-mixer-details > summary .hint {
+  font-weight: 400;
+}
+
+.shot-details[open] > summary,
+.tl-mixer-details[open] > summary {
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 0.6rem;
+}
+
+/* The ruler doubles as a scrubber; make it feel like one. */
+.tl-ruler {
+  cursor: pointer;
+}

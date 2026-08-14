@@ -913,17 +913,22 @@ pub fn render_rough_cut(
         }
     }
 
-    // Two decoder threads per input, not the default of roughly one per core.
-    // macOS caps a process at 4096 threads (`kern.num_taskthreads`), and this
-    // command opens two inputs per line of the film — a fifty-clip project is
-    // a hundred inputs, each spawning its own decoder pool, on top of a pool
-    // per slice-threaded filter instance in a graph with hundreds of them.
-    // Measured on a 30-input graph: 709 threads unbounded, 111 bounded, same
-    // wall-clock. Unbounded, a long film dies mid-open with
+    // Four decoder threads per video input, not the default of roughly one per
+    // core. macOS caps a process at 4096 threads (`kern.num_taskthreads`), and
+    // this command opens two inputs per line of the film — a fifty-clip
+    // project is a hundred inputs, each spawning its own decoder pool, on top
+    // of a pool per slice-threaded filter instance in a graph with hundreds of
+    // them. Measured on a 30-input graph: 709 threads unbounded, ~120 bounded,
+    // same wall-clock. Unbounded, a long film dies mid-open with
     // `pthread_create() failed: Resource temporarily unavailable`.
+    //
+    // Four rather than fewer because decode still has to outrun the encoder:
+    // a real HEVC clip decoded 3x realtime at two threads and 6x at four, and
+    // the extra costs a couple of hundred threads at peak against a budget of
+    // thousands. The narration is PCM and decodes on one.
     for it in items {
-        cmd.args(["-threads", "2"]).arg("-i").arg(&it.video);
-        cmd.args(["-threads", "2"]).arg("-i").arg(&it.audio);
+        cmd.args(["-threads", "4"]).arg("-i").arg(&it.video);
+        cmd.args(["-threads", "1"]).arg("-i").arg(&it.audio);
     }
 
     // Inputs are numbered by the order they are added, so the music bed is

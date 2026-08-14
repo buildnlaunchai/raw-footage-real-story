@@ -45,6 +45,12 @@ interface Props {
   beds: { id: string; label: string; hint: string }[];
   /** How captions will look, so the viewer can show them before a render. */
   subtitles: SubtitleStyle | null;
+  /**
+   * The film's opening, controlled here rather than in its own panel: it is a
+   * decision about this film, made while looking at it, and the timeline is
+   * where the film is being looked at.
+   */
+  opening?: { enabled: boolean; onToggle: (on: boolean) => void; summary: string };
   children?: React.ReactNode;
 }
 
@@ -67,6 +73,7 @@ export function TimelinePanel({
   onPickMusic,
   beds,
   subtitles,
+  opening,
   children,
 }: Props) {
   const [zoom, setZoom] = useState(1);
@@ -222,6 +229,20 @@ export function TimelinePanel({
 
       {children}
 
+      {opening && (
+        <div className="tl-track-row tl-opening-row">
+          <label className="tl-track-toggle">
+            <input
+              type="checkbox"
+              checked={opening.enabled}
+              onChange={(e) => opening.onToggle(e.currentTarget.checked)}
+            />
+            <strong>Opening</strong>
+          </label>
+          <span className="hint tl-track-hint">{opening.summary}</span>
+        </div>
+      )}
+
       {/* A viewer that plays the cut as it stands, before anything has been
           rendered — which is exactly when the edits are being made. Captions
           are drawn over it in HTML at the size and height the burn-in will
@@ -297,7 +318,22 @@ export function TimelinePanel({
             />
           )}
           {/* ── ruler ───────────────────────────────────────────────────── */}
-          <div className="tl-ruler" aria-hidden="true">
+          {/* Clicking the ruler moves the playhead there, like any editor. */}
+          <div
+            className="tl-ruler"
+            role="slider"
+            aria-label="Playhead"
+            aria-valuemin={0}
+            aria-valuemax={Math.round(total)}
+            aria-valuenow={Math.round(head)}
+            tabIndex={-1}
+            onPointerDown={(e) => {
+              const r = e.currentTarget.getBoundingClientRect();
+              const ms = Math.max(0, Math.min(total, ((e.clientX - r.left) / pps) * 1000));
+              setHead(ms);
+              startedAt.current = { wall: performance.now(), head: ms };
+            }}
+          >
             {ticks.map((t) => (
               <span key={t} className="tl-tick" style={{ left: (t / 1000) * pps }}>
                 {clock(t)}
@@ -438,7 +474,20 @@ export function TimelinePanel({
       </div>
 
       {/* ── tracks ────────────────────────────────────────────────────── */}
-      <div className="tl-mixer">
+      <details className="tl-mixer-details" open>
+        <summary>
+          Sound &amp; subtitles
+          <span className="hint">
+            {[
+              doc.originalAudio.enabled && "clip sound",
+              doc.music.enabled && hasMusic(doc.music) && (doc.music.label ?? "music"),
+              doc.subtitles && "subtitles",
+            ]
+              .filter(Boolean)
+              .join(" · ") || "narration only"}
+          </span>
+        </summary>
+        <div className="tl-mixer">
         <TrackRow
           label="Clip sound"
           hint="The video's own audio — traffic, voices, wind — under the narration."
@@ -572,7 +621,8 @@ export function TimelinePanel({
             </span>
           )}
         </div>
-      </div>
+        </div>
+      </details>
 
       {/* ── the selected shot ─────────────────────────────────────────── */}
       {current ? (
