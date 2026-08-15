@@ -1273,6 +1273,21 @@ function App() {
     if (!voiced || !manifest) return;
     setAssemblyBusy(true);
     setAssemblyError(null);
+    // Write the state that is about to be filmed, before filming it.
+    //
+    // Saving was manual, so the subtitle size, the music, the reordering and
+    // every trim lived only in this tab until somebody pressed ⌘S. Rendering
+    // then merged into a project file that had never heard of any of it, and
+    // reopening the project brought back the defaults — which reads as "the
+    // subtitles did not come out the way I set them", because the next render
+    // used the defaults too. Rendering is a deliberate act; the settings that
+    // produced a cut belong on disk with it.
+    try {
+      await onSave();
+    } catch {
+      // A failed save is not a reason to refuse to render. The cut is made
+      // from what is on screen either way, and the error is already shown.
+    }
     // Fixed up front: it names the output file, so the take and the mp4 it
     // owns cannot end up pointing at different things.
     const takeId = crypto.randomUUID();
