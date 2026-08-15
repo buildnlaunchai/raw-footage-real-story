@@ -40,6 +40,12 @@ zip = "2"
 sha2 = "0.10"
 tauri-plugin-dialog = "2.7.2"
 
+# For `setrlimit` only. A GUI app inherits macOS's 256-descriptor soft limit
+# from launchd, and a long film opens far more than that — see
+# `raise_file_limit` in ffmpeg.rs.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 # Integration tests drive the async Ollama commands directly.
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

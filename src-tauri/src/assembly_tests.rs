@@ -1637,3 +1637,141 @@ fn a_sixty_clip_film_renders_within_the_thread_budget() {
     // Well under the 4096 ceiling, with room for a film twice this long.
     assert!(peak < 1500, "thread caps are not holding: {peak} threads for {N} clips");
 }
+
+/// The real thing: a long film with captions on, in a process limited the way
+/// a GUI app is limited.
+///
+/// This is the shape that failed twice for a real 79-clip project, and both
+/// failures hid behind the same blind spot — the render was only ever tested
+/// from a shell, and a shell's resource limits are nothing like the ones
+/// launchd hands a windowed app.
+///
+/// Descriptors are the second wall. macOS gives a GUI app a **256** file
+/// descriptor soft limit. This render opens two inputs per line plus one image
+/// per caption: 79 lines and 293 captions is 451 files at once, and ffmpeg
+/// stops part-way through with `Error opening input files: Too many open
+/// files`. So the test drops its own limit to 256 first — without that it
+/// inherits the test runner's, passes, and proves nothing at all.
+#[test]
+fn a_long_film_with_captions_renders_in_a_gui_sized_process() {
+    let Some(fx) = Fixture::new("captioned-long") else {
+        eprintln!("ffmpeg not available; skipping");
+        return;
+    };
+
+    const CLIPS: usize = 79;
+    const CAPTIONS: usize = 293;
+
+    let lines: Vec<LineInput> =
+        (0..CLIPS).map(|i| LineInput::whole(format!("c{i}"), 700)).collect();
+    let clips: Vec<ClipInput> =
+        (0..CLIPS).map(|i| ClipInput::whole(format!("c{i}"), Some(1_000))).collect();
+    let items = timeline::plan(&clips, &lines);
+    let total = timeline::total_duration_ms(&items);
+
+    let settings_base = RenderSettings { width: 640, height: 360, fps: 30, ..Default::default() };
+    let video = fx.dir.join("clip.mp4");
+    ffmpeg::make_placeholder(&fx.ffmpeg, &video, "0x336699", 1_000, 640, 360, 30)
+        .expect("placeholder");
+    let audio = fx.dir.join("line.wav");
+    tts::write_wav(&audio, &vec![0f32; (700 * 24_000) / 1000]).expect("silence");
+
+    // One caption image, reused: the descriptor cost is per input opened, not
+    // per distinct file, and 293 separately drawn captions would only slow the
+    // fixture down.
+    let subs = fx.dir.join("subs");
+    std::fs::create_dir_all(&subs).expect("subs dir");
+    let cap_png = subs.join("cap.png");
+    std::process::Command::new(&fx.ffmpeg)
+        .args(["-y", "-v", "error", "-f", "lavfi", "-i", "color=c=white@0.9:s=200x40,format=rgba"])
+        .args(["-frames:v", "1"])
+        .arg(&cap_png)
+        .status()
+        .expect("caption png");
+
+    let span = total / CAPTIONS as u64;
+    let burn_in: Vec<ffmpeg::BurnCue> = (0..CAPTIONS)
+        .map(|i| ffmpeg::BurnCue {
+            image: "subs/cap.png".into(),
+            start_ms: i as u64 * span,
+            end_ms: (i as u64 + 1) * span,
+        })
+        .collect();
+
+    let render_items: Vec<RenderItem> = items
+        .iter()
+        .map(|item| RenderItem {
+            video: video.clone(),
+            audio: audio.clone(),
+            item: item.clone(),
+            is_hdr: false,
+            has_audio: false,
+            sound_gain: None,
+        })
+        .collect();
+
+    let settings = RenderSettings { burn_in, ..settings_base };
+    let inputs = CLIPS * 2 + CAPTIONS;
+
+    // Stand where the app stands. Restored afterwards so the rest of the suite
+    // is unaffected however this ends.
+    let was = ffmpeg::file_limit();
+    ffmpeg::set_file_limit(256);
+    let under_limit = ffmpeg::file_limit();
+
+    let out = fx.dir.join("long.mp4");
+    let result =
+        ffmpeg::render_rough_cut(&fx.ffmpeg, &render_items, &settings, &ffmpeg::FfmpegCaps::default(), &out);
+    let raised = ffmpeg::file_limit();
+    ffmpeg::set_file_limit(was);
+
+    println!(
+        "\n  {CLIPS} clips + {CAPTIONS} captions = {inputs} inputs\n  \
+         limit {under_limit} going in, {raised} once the render raised it",
+    );
+    assert_eq!(under_limit, 256, "the test failed to constrain itself; it proves nothing");
+    result.expect("a long captioned film must render in a GUI-sized process");
+    assert!(
+        raised > inputs as u64,
+        "the limit was raised to {raised}, which is not enough for {inputs} inputs",
+    );
+
+    let actual = ffmpeg::probe_duration_ms(&fx.ffprobe, &out).expect("probe");
+    println!("  {total}ms planned, {actual}ms rendered");
+    assert!(actual.abs_diff(total) <= 400, "drifted {}ms", actual.abs_diff(total));
+}
+
+#[test]
+#[ignore]
+fn bench_caption_overlay_cost() {
+    let Some(fx) = Fixture::new("bench-caps") else { return };
+    const CLIPS: usize = 79;
+    let lines: Vec<LineInput> = (0..CLIPS).map(|i| LineInput::whole(format!("c{i}"), 700)).collect();
+    let clips: Vec<ClipInput> = (0..CLIPS).map(|i| ClipInput::whole(format!("c{i}"), Some(1_000))).collect();
+    let items = timeline::plan(&clips, &lines);
+    let total = timeline::total_duration_ms(&items);
+    let video = fx.dir.join("clip.mp4");
+    ffmpeg::make_placeholder(&fx.ffmpeg, &video, "0x336699", 1_000, 640, 360, 30).unwrap();
+    let audio = fx.dir.join("line.wav");
+    tts::write_wav(&audio, &vec![0f32; (700 * 24_000) / 1000]).unwrap();
+    let subs = fx.dir.join("subs");
+    std::fs::create_dir_all(&subs).unwrap();
+    std::process::Command::new(&fx.ffmpeg)
+        .args(["-y", "-v", "error", "-f", "lavfi", "-i", "color=c=white@0.9:s=200x40,format=rgba", "-frames:v", "1"])
+        .arg(subs.join("cap.png")).status().unwrap();
+    let render_items: Vec<RenderItem> = items.iter().map(|item| RenderItem {
+        video: video.clone(), audio: audio.clone(), item: item.clone(),
+        is_hdr: false, has_audio: false, sound_gain: None }).collect();
+
+    for n in [0usize, 293] {
+        let span = if n == 0 { 1 } else { total / n as u64 };
+        let burn_in: Vec<ffmpeg::BurnCue> = (0..n).map(|i| ffmpeg::BurnCue {
+            image: "subs/cap.png".into(),
+            start_ms: i as u64 * span, end_ms: (i as u64 + 1) * span }).collect();
+        let settings = RenderSettings { width: 640, height: 360, fps: 30, burn_in, ..Default::default() };
+        let out = fx.dir.join(format!("bench{n}.mp4"));
+        let t0 = std::time::Instant::now();
+        ffmpeg::render_rough_cut(&fx.ffmpeg, &render_items, &settings, &ffmpeg::FfmpegCaps::default(), &out).unwrap();
+        println!("  {n:>3} captions: {:?}", t0.elapsed());
+    }
+}

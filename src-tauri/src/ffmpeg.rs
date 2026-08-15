@@ -63,6 +63,80 @@ pub struct FfmpegCaps {
     pub subtitles: bool,
 }
 
+/// Give this process, and so every ffmpeg it spawns, enough file descriptors.
+///
+/// macOS hands a GUI app a **256** descriptor soft limit from launchd. A shell
+/// raises its own, which is why this never showed up in testing and showed up
+/// immediately for a real film: a render opens two inputs per line plus one
+/// image per caption, and a 79-clip project with 293 captions asks for 451
+/// files at once. ffmpeg fails that with `Error opening input files: Too many
+/// open files`, part-way through opening them.
+///
+/// The hard limit is `kern.maxfilesperproc`, 61440 by default, so raising the
+/// soft limit needs no privileges and takes nothing from anybody. Children
+/// inherit it, which is the point — the descriptors are spent by ffmpeg, not
+/// by us.
+///
+/// Called before a render rather than at startup so it sits next to the reason
+/// it exists, and runs once.
+pub fn raise_file_limit() {
+    #[cfg(unix)]
+    {
+        use std::sync::Once;
+        static ONCE: Once = Once::new();
+        ONCE.call_once(raise_file_limit_now);
+    }
+}
+
+/// The raise itself, without the once-only guard.
+///
+/// Separate so a test can drop the limit to the 256 a GUI app is given and
+/// watch this put it back — which is the only way to check the fix under the
+/// conditions that produced the bug, since a test process inherits its shell's
+/// generous limit and would pass either way.
+#[cfg(unix)]
+pub fn raise_file_limit_now() {
+    // Safety: `getrlimit`/`setrlimit` on a resource this process owns, with a
+    // fully initialised struct. Nothing is lowered, so no other part of the
+    // program can be starved by it.
+    unsafe {
+        let mut lim = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) != 0 {
+            return;
+        }
+        // Ask for plenty, never lower what we already have, and never exceed
+        // the hard limit, which we are not allowed to raise.
+        let want = 16_384u64.min(lim.rlim_max as u64).max(lim.rlim_cur as u64);
+        if want > lim.rlim_cur as u64 {
+            lim.rlim_cur = want as libc::rlim_t;
+            libc::setrlimit(libc::RLIMIT_NOFILE, &lim);
+        }
+    }
+}
+
+/// Set the soft limit, for tests that need to reproduce a constrained process.
+#[cfg(unix)]
+pub fn set_file_limit(n: u64) {
+    // Safety: as above; the value is clamped to the hard limit by the kernel.
+    unsafe {
+        let mut lim = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) == 0 {
+            lim.rlim_cur = n as libc::rlim_t;
+            libc::setrlimit(libc::RLIMIT_NOFILE, &lim);
+        }
+    }
+}
+
+/// How many files this process may have open at once, for tests and messages.
+#[cfg(unix)]
+pub fn file_limit() -> u64 {
+    // Safety: reads a resource this process owns into an initialised struct.
+    unsafe {
+        let mut lim = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) == 0 { lim.rlim_cur as u64 } else { 0 }
+    }
+}
+
 fn probe_caps(ffmpeg: &Path) -> FfmpegCaps {
     let filters = Command::new(ffmpeg)
         .arg("-filters")
@@ -899,6 +973,9 @@ pub fn render_rough_cut(
     }
 
     let RenderSettings { width, height, fps, .. } = *settings;
+    // Two inputs per line plus one image per caption, all opened at once.
+    #[cfg(unix)]
+    raise_file_limit_now();
     let mut cmd = Command::new(ffmpeg);
     cmd.args(["-y", "-v", "error"]);
 
