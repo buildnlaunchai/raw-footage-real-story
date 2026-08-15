@@ -778,6 +778,31 @@ pub struct BurnCue {
     pub end_ms: u64,
 }
 
+/// Every caption in a film, as one silent video track with a transparent
+/// background.
+///
+/// One track rather than one image per caption. As separate inputs a film with
+/// 293 captions handed ffmpeg 293 files and 293 chained `overlay` filters, and
+/// every frame of the film was pushed through all of them to find the one that
+/// might be showing. Measured on a 79-clip cut that was 82% of the render —
+/// 1.2 seconds of work became 6.7 — and it cost around 880 threads and 293 of
+/// a GUI process's 256 file descriptors. This is one input and one overlay
+/// however long the film is.
+///
+/// The track is a concat playlist of same-sized PNGs, one per caption and one
+/// transparent one for each silence between them, each held for as long as it
+/// is on screen. The images are drawn by the app's own webview, which is the
+/// only renderer here that shapes Bengali correctly.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptionTrack {
+    /// ffconcat playlist, relative to the render directory.
+    pub playlist: String,
+    /// The size every frame of the track shares.
+    pub width: u32,
+    pub height: u32,
+}
+
 /// How burned-in captions look.
 ///
 /// Exposed rather than fixed because a caption sits on top of somebody's
@@ -867,6 +892,10 @@ pub struct RenderSettings {
     /// into frames.
     #[serde(default)]
     pub burn_in: Vec<BurnCue>,
+    /// The captions as one video track, which is how they are actually drawn.
+    /// `burn_in` above is what the track was built from, kept for the `.srt`.
+    #[serde(default)]
+    pub caption_track: Option<CaptionTrack>,
     /// The font file to draw them with, and the directory holding it.
     #[serde(default)]
     pub subtitle_font: Option<String>,
@@ -895,6 +924,7 @@ impl Default for RenderSettings {
             music_path: None,
             music_gain: default_music_gain(),
             burn_in: Vec::new(),
+            caption_track: None,
             subtitle_font: None,
         }
     }
@@ -984,7 +1014,7 @@ pub fn render_rough_cut(
     // treats a colon as an option separator, so an absolute path through a
     // folder somebody named "Trip: Bangkok" would break the graph — and only
     // on their machine.
-    if !settings.burn_in.is_empty() {
+    if settings.caption_track.is_some() {
         if let Some(dir) = out.parent() {
             cmd.current_dir(dir);
         }
@@ -1227,33 +1257,35 @@ pub fn render_rough_cut(
     // rendered by a browser, which is what caught them. The app draws each
     // caption in its own webview, which is provably correct, and ffmpeg does
     // the one thing it is reliable at: putting an image somewhere.
-    let vout = if settings.burn_in.is_empty() {
-        vout
-    } else {
-        let st = &settings.subtitle_style;
-        let margin_v = (height as f32 * st.bottom).round().max(4.0) as u32;
-        let first_image = items.len() * 2 + usize::from(music.is_some());
+    let vout = match settings.caption_track.as_ref() {
+        None => vout,
+        Some(track) => {
+            let st = &settings.subtitle_style;
+            let margin_v = (height as f32 * st.bottom).round().max(4.0) as u32;
+            let idx = items.len() * 2 + usize::from(music.is_some());
 
-        for cue in &settings.burn_in {
-            cmd.args(["-threads", "1"]).arg("-i").arg(&cue.image);
-        }
+            // `-safe 0` because the playlist names files beside itself and the
+            // demuxer refuses relative paths without it.
+            cmd.args(["-threads", "1", "-f", "concat", "-safe", "0"])
+                .arg("-i")
+                .arg(&track.playlist);
 
-        let mut prev = vout;
-        for (i, cue) in settings.burn_in.iter().enumerate() {
-            let idx = first_image + i;
-            let label = format!("[cap{i}]");
-            // Centred, and sitting the requested distance off the bottom. The
-            // image carries its own padding, so `overlay_h` is the whole
-            // caption including any plate behind it.
+            // The track is a slideshow: each frame is held for as long as its
+            // caption is on screen, so it has no natural frame rate until one
+            // is imposed. `fps` fills in the frames between, and `settb` puts
+            // it on the same time base as the picture so the overlay lines up.
             filter.push_str(&format!(
-                "{prev}[{idx}:v]overlay=x=(W-w)/2:y=H-{margin_v}-h:\
-                 enable='between(t\\,{:.3}\\,{:.3})'{label};",
-                cue.start_ms as f64 / 1000.0,
-                cue.end_ms as f64 / 1000.0,
+                "[{idx}:v]format=rgba,fps={fps},settb=1/{fps}[captrack];"
             ));
-            prev = label;
+            // Centred, resting the requested distance off the bottom. Every
+            // frame of the track is the same size, and each caption is drawn
+            // centred on its floor, so one placement serves all of them.
+            filter.push_str(&format!(
+                "{vout}[captrack]overlay=x=(W-w)/2:y=H-{margin_v}-h:\
+                 shortest=0:eof_action=pass[capped];"
+            ));
+            "[capped]".to_string()
         }
-        prev
     };
 
     // Optional music bed under the narration. Added as an input *before* the

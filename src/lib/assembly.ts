@@ -290,6 +290,13 @@ export interface RenderOptions {
   language?: string;
   /** Captions as the editor drew them: words, timings and a picture each. */
   captions?: { startMs: number; endMs: number; text: string; png: string }[];
+  /**
+   * The size every caption picture shares, and a transparent frame of it.
+   *
+   * One size for all of them is what lets ffmpeg play the set as a single
+   * video track instead of opening one file per caption.
+   */
+  captionBox?: { width: number; height: number; blank: string };
   /** How burned-in captions look. */
   subtitleStyle?: {
     size: number;
@@ -336,6 +343,7 @@ export async function renderRoughCut(
       language: opts.language ?? "en",
       subtitleStyle: opts.subtitleStyle ?? null,
       captions: opts.captions ?? [],
+      captionBox: opts.captionBox ?? null,
     });
   } catch (err) {
     throw asError(err);

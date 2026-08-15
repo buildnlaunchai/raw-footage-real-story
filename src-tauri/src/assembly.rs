@@ -20,33 +20,102 @@ fn subs_dir_name(stem: &str) -> String {
     format!("subs-{stem}")
 }
 
-/// Write each drawn caption to a PNG beside the cut.
+/// Write the drawn captions beside the cut, as one playable track.
 ///
-/// Returns them with paths relative to the render directory. ffmpeg is run from
-/// there, so nothing in the filter graph is an absolute path — a project folder
-/// named "Trip: Bangkok" would otherwise break the graph, because the parser
-/// reads a colon as an option separator.
+/// Each caption becomes a PNG and the set becomes an ffconcat playlist that
+/// holds each one for exactly as long as it is on screen, with a transparent
+/// frame covering every silence in between. ffmpeg then plays the lot as a
+/// single input and composites it once — instead of opening one file and
+/// chaining one `overlay` filter per caption, which on a real film meant 293
+/// of each and 82% of the render time.
+///
+/// Paths inside the playlist are relative to the render directory, and ffmpeg
+/// is run from there, so nothing in the filter graph is absolute — a project
+/// folder named "Trip: Bangkok" would otherwise break the graph, because the
+/// parser reads a colon as an option separator.
 fn write_captions(
     subs_dir: &Path,
     rel: &str,
     captions: &[CaptionImage],
-) -> Result<Vec<ffmpeg::BurnCue>, String> {
+    blank_png: &str,
+    box_w: u32,
+    box_h: u32,
+) -> Result<(Vec<ffmpeg::BurnCue>, Option<ffmpeg::CaptionTrack>), String> {
     std::fs::create_dir_all(subs_dir)
         .map_err(|e| format!("Could not make room for the captions: {e}"))?;
-    let mut out = Vec::with_capacity(captions.len());
+
+    let blank_bytes = base64_decode(blank_png)
+        .ok_or_else(|| "The blank caption frame was not readable.".to_string())?;
+    std::fs::write(subs_dir.join("blank.png"), blank_bytes)
+        .map_err(|e| format!("Could not write a caption: {e}"))?;
+
+    let mut cues = Vec::with_capacity(captions.len());
+    // `ffconcat version 1.0` rather than a bare list: it is the documented
+    // header, and without it the demuxer guesses at the format.
+    let mut playlist = String::from("ffconcat version 1.0\n");
+    let mut at_ms = 0u64;
+
     for (i, cap) in captions.iter().enumerate() {
         let bytes = base64_decode(&cap.png)
             .ok_or_else(|| "A caption image was not readable.".to_string())?;
         let name = format!("{i:04}.png");
         std::fs::write(subs_dir.join(&name), bytes)
             .map_err(|e| format!("Could not write a caption: {e}"))?;
-        out.push(ffmpeg::BurnCue {
+
+        // Nothing on screen until this caption starts. Captions are built from
+        // one narration line each and cannot overlap, but they are not
+        // required to touch either.
+        if cap.start_ms > at_ms {
+            playlist.push_str(&entry("blank.png", cap.start_ms - at_ms));
+        }
+        let end = cap.end_ms.max(cap.start_ms);
+        playlist.push_str(&entry(&name, end.saturating_sub(cap.start_ms)));
+        at_ms = end;
+
+        cues.push(ffmpeg::BurnCue {
             image: format!("{rel}/{name}"),
             start_ms: cap.start_ms,
             end_ms: cap.end_ms,
         });
     }
-    Ok(out)
+
+    // The concat demuxer drops the final entry's duration, so the last frame
+    // is named once more to close the track off. Without it the track ends one
+    // caption early and the last line of the film goes uncaptioned.
+    playlist.push_str("file blank.png\n");
+
+    let name = "captions.ffconcat";
+    std::fs::write(subs_dir.join(name), playlist)
+        .map_err(|e| format!("Could not write the caption track: {e}"))?;
+
+    Ok((
+        cues,
+        Some(ffmpeg::CaptionTrack {
+            playlist: format!("{rel}/{name}"),
+            width: box_w,
+            height: box_h,
+        }),
+    ))
+}
+
+/// One `file`/`duration` pair for the concat playlist.
+///
+/// Seconds with millisecond precision, which is the resolution the cues carry.
+fn entry(name: &str, ms: u64) -> String {
+    format!("file {name}\nduration {:.3}\n", ms as f64 / 1000.0)
+}
+
+/// The size every caption shares, and a transparent frame of it.
+///
+/// One size for all of them is what lets the set become a single video track;
+/// see `write_captions`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptionBox {
+    pub width: u32,
+    pub height: u32,
+    /// A fully transparent PNG of exactly this size, base64.
+    pub blank: String,
 }
 
 /// A caption as the editor drew it.
@@ -568,8 +637,10 @@ pub async fn assembly_render(
     // which font can draw it, and how those captions should look.
     language: Option<String>,
     subtitle_style: Option<ffmpeg::SubtitleStyle>,
-    // Captions as the editor drew them: words, timings, and a picture each.
+    // Captions as the editor drew them: words, timings, and a picture each,
+    // all the same size, plus one transparent frame of that size for the gaps.
     captions: Option<Vec<CaptionImage>>,
+    caption_box: Option<CaptionBox>,
 ) -> Result<AssembleResult, FfmpegError> {
     let source_audio_gain = source_audio_gain.unwrap_or(0.0);
     let info = ffmpeg::detect(&load_settings(&app))?;
@@ -797,9 +868,18 @@ pub async fn assembly_render(
 
         if subtitles.unwrap_or(false) {
             let subs_dir = dir.join("render").join(subs_dir_name(&stem));
-            match write_captions(&subs_dir, &subs_dir_name(&stem), &captions) {
-                Ok(burn) => {
+            let bx = caption_box.unwrap_or_default();
+            match write_captions(
+                &subs_dir,
+                &subs_dir_name(&stem),
+                &captions,
+                &bx.blank,
+                bx.width,
+                bx.height,
+            ) {
+                Ok((burn, track)) => {
                     settings.burn_in = burn;
+                    settings.caption_track = track;
                     settings.subtitle_style = subtitle_style.unwrap_or_default();
                 }
                 Err(e) => subtitle_error = Some(e),

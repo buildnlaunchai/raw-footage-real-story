@@ -1505,21 +1505,47 @@ fn a_caption_image_lands_where_and_when_it_should() {
         video, audio, item: items[0].clone(), is_hdr: false, has_audio: false, sound_gain: None,
     }];
 
-    // A 200x40 white block standing in for a drawn caption.
+    // Two 200x40 white blocks standing in for drawn captions, and a
+    // transparent frame of the same size for the silence between them — which
+    // is exactly what the webview hands over.
     let subs = fx.dir.join("subs");
     std::fs::create_dir_all(&subs).expect("dir");
+    for (name, colour) in [("0000.png", "white"), ("0001.png", "white")] {
+        std::process::Command::new(&fx.ffmpeg)
+            .args(["-y", "-v", "error", "-f", "lavfi", "-i",
+                   &format!("color=c={colour}:s=200x40:d=1,format=rgba"), "-frames:v", "1"])
+            .arg(subs.join(name))
+            .status()
+            .expect("png");
+    }
     std::process::Command::new(&fx.ffmpeg)
-        .args(["-y", "-v", "error", "-f", "lavfi", "-i", "color=c=white:s=200x40:d=1", "-frames:v", "1"])
-        .arg(subs.join("0000.png"))
+        .args(["-y", "-v", "error", "-f", "lavfi", "-i",
+               "color=c=black@0.0:s=200x40:d=1,format=rgba", "-frames:v", "1"])
+        .arg(subs.join("blank.png"))
         .status()
-        .expect("png");
+        .expect("blank png");
+
+    // The playlist the renderer is given: silent, then a caption, then silent
+    // again, then a second caption. Written by hand here so the test pins the
+    // format the writer must produce rather than trusting it to agree with
+    // itself.
+    std::fs::write(
+        subs.join("captions.ffconcat"),
+        "ffconcat version 1.0\n\
+         file blank.png\nduration 1.000\n\
+         file 0000.png\nduration 1.500\n\
+         file blank.png\nduration 0.500\n\
+         file 0001.png\nduration 0.500\n\
+         file blank.png\n",
+    )
+    .expect("playlist");
 
     let s = RenderSettings {
-        burn_in: vec![ffmpeg::BurnCue {
-            image: "subs/0000.png".into(),
-            start_ms: 1_000,
-            end_ms: 2_500,
-        }],
+        caption_track: Some(ffmpeg::CaptionTrack {
+            playlist: "subs/captions.ffconcat".into(),
+            width: 200,
+            height: 40,
+        }),
         subtitle_style: ffmpeg::SubtitleStyle { bottom: 0.10, ..Default::default() },
         ..settings
     };
@@ -1528,9 +1554,15 @@ fn a_caption_image_lands_where_and_when_it_should() {
 
     let rows_at = |ms: u64| ffmpeg::lit_rows(&fx.ffmpeg, &out, ms, w, h).expect("rows");
 
-    // Nothing before the cue, nothing after it.
+    // The timings the playlist asked for, checked one by one. A track built
+    // from durations rather than absolute times drifts if any single duration
+    // is wrong, and the drift only shows up later in the film — so the second
+    // caption matters more than the first.
     assert_eq!(rows_at(500).iter().sum::<u32>(), 0, "a caption appeared before its cue");
-    assert_eq!(rows_at(3_200).iter().sum::<u32>(), 0, "a caption outstayed its cue");
+    assert!(rows_at(1_800).iter().sum::<u32>() > 0, "the first caption never appeared");
+    assert_eq!(rows_at(2_800).iter().sum::<u32>(), 0, "the gap between captions was not blank");
+    assert!(rows_at(3_200).iter().sum::<u32>() > 0, "the second caption never appeared");
+    assert_eq!(rows_at(3_800).iter().sum::<u32>(), 0, "a caption outstayed its cue");
 
     // During: 200x40 of white, sitting 10% of the height off the bottom.
     let during = rows_at(1_800);
@@ -1689,14 +1721,19 @@ fn a_long_film_with_captions_renders_in_a_gui_sized_process() {
         .status()
         .expect("caption png");
 
+    // The same captions as a track: one held frame each, back to back.
     let span = total / CAPTIONS as u64;
-    let burn_in: Vec<ffmpeg::BurnCue> = (0..CAPTIONS)
-        .map(|i| ffmpeg::BurnCue {
-            image: "subs/cap.png".into(),
-            start_ms: i as u64 * span,
-            end_ms: (i as u64 + 1) * span,
-        })
-        .collect();
+    let mut playlist = String::from("ffconcat version 1.0\n");
+    for _ in 0..CAPTIONS {
+        playlist.push_str(&format!("file cap.png\nduration {:.3}\n", span as f64 / 1000.0));
+    }
+    playlist.push_str("file cap.png\n");
+    std::fs::write(subs.join("captions.ffconcat"), playlist).expect("playlist");
+    let track = Some(ffmpeg::CaptionTrack {
+        playlist: "subs/captions.ffconcat".into(),
+        width: 200,
+        height: 40,
+    });
 
     let render_items: Vec<RenderItem> = items
         .iter()
@@ -1710,8 +1747,11 @@ fn a_long_film_with_captions_renders_in_a_gui_sized_process() {
         })
         .collect();
 
-    let settings = RenderSettings { burn_in, ..settings_base };
-    let inputs = CLIPS * 2 + CAPTIONS;
+    let settings = RenderSettings { caption_track: track, ..settings_base };
+    // One input for the whole caption track now, however many captions it
+    // holds. It was one per caption, which is what put a real project over the
+    // descriptor limit in the first place.
+    let inputs = CLIPS * 2 + 1;
 
     // Stand where the app stands. Restored afterwards so the rest of the suite
     // is unaffected however this ends.
@@ -1726,7 +1766,7 @@ fn a_long_film_with_captions_renders_in_a_gui_sized_process() {
     ffmpeg::set_file_limit(was);
 
     println!(
-        "\n  {CLIPS} clips + {CAPTIONS} captions = {inputs} inputs\n  \
+        "\n  {CLIPS} clips + {CAPTIONS} captions (one track) = {inputs} inputs\n  \
          limit {under_limit} going in, {raised} once the render raised it",
     );
     assert_eq!(under_limit, 256, "the test failed to constrain itself; it proves nothing");
@@ -1741,9 +1781,19 @@ fn a_long_film_with_captions_renders_in_a_gui_sized_process() {
     assert!(actual.abs_diff(total) <= 400, "drifted {}ms", actual.abs_diff(total));
 }
 
+/// Captions must not dominate the render.
+///
+/// They did. Every caption used to be its own input and its own `overlay`
+/// filter, so every frame of the film was pushed through all of them to find
+/// the one that might be showing: on this fixture, 1.2 seconds of work became
+/// 6.7, and a real 79-clip project spent 82% of its render doing it. As one
+/// track it is a single overlay and costs about a quarter of a second.
+///
+/// A ratio rather than a time, and a loose one, because the two renders run
+/// back to back on the same machine — whatever slows one slows the other.
+/// Anything approaching the old behaviour blows straight through it.
 #[test]
-#[ignore]
-fn bench_caption_overlay_cost() {
+fn captions_do_not_dominate_the_render() {
     let Some(fx) = Fixture::new("bench-caps") else { return };
     const CLIPS: usize = 79;
     let lines: Vec<LineInput> = (0..CLIPS).map(|i| LineInput::whole(format!("c{i}"), 700)).collect();
@@ -1763,15 +1813,35 @@ fn bench_caption_overlay_cost() {
         video: video.clone(), audio: audio.clone(), item: item.clone(),
         is_hdr: false, has_audio: false, sound_gain: None }).collect();
 
+    let mut timings = Vec::new();
     for n in [0usize, 293] {
         let span = if n == 0 { 1 } else { total / n as u64 };
-        let burn_in: Vec<ffmpeg::BurnCue> = (0..n).map(|i| ffmpeg::BurnCue {
-            image: "subs/cap.png".into(),
-            start_ms: i as u64 * span, end_ms: (i as u64 + 1) * span }).collect();
-        let settings = RenderSettings { width: 640, height: 360, fps: 30, burn_in, ..Default::default() };
+        let track = if n == 0 { None } else {
+            let mut pl = String::from("ffconcat version 1.0\n");
+            for _ in 0..n {
+                pl.push_str(&format!("file cap.png\nduration {:.3}\n", span as f64 / 1000.0));
+            }
+            pl.push_str("file cap.png\n");
+            std::fs::write(subs.join("captions.ffconcat"), pl).unwrap();
+            Some(ffmpeg::CaptionTrack {
+                playlist: "subs/captions.ffconcat".into(), width: 200, height: 40 })
+        };
+        let settings = RenderSettings { width: 640, height: 360, fps: 30,
+            caption_track: track, ..Default::default() };
         let out = fx.dir.join(format!("bench{n}.mp4"));
         let t0 = std::time::Instant::now();
         ffmpeg::render_rough_cut(&fx.ffmpeg, &render_items, &settings, &ffmpeg::FfmpegCaps::default(), &out).unwrap();
-        println!("  {n:>3} captions: {:?}", t0.elapsed());
+        let took = t0.elapsed();
+        println!("  {n:>3} captions: {took:?}");
+        timings.push(took);
     }
+
+    let (bare, captioned) = (timings[0], timings[1]);
+    let ratio = captioned.as_secs_f64() / bare.as_secs_f64();
+    println!("  captions cost {:.2}x the bare render", ratio);
+    assert!(
+        ratio < 3.0,
+        "captions cost {ratio:.1}x the render ({bare:?} -> {captioned:?}); they are being \
+         composited one at a time again",
+    );
 }

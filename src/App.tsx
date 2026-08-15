@@ -93,7 +93,7 @@ import {
 } from "./lib/scriptComposer";
 import { INTRO_FADE_MS, pickShots, type ShotCandidate } from "./lib/intro";
 import { TimelinePanel } from "./components/TimelinePanel";
-import { CAPTION_FACES, drawCaptions, loadCaptionFont } from "./lib/captions";
+import { blankCaption, CAPTION_FACES, drawCaptions, loadCaptionFont } from "./lib/captions";
 import { resolveResource } from "@tauri-apps/api/path";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import {
@@ -1313,7 +1313,8 @@ function App() {
       // renderer in this app that shapes Bengali correctly — ffmpeg's two text
       // tools both place ি and ে after their consonant. ffmpeg is handed
       // finished pictures instead.
-      let captions: Awaited<ReturnType<typeof drawCaptionsFor>> = [];
+      let captions: Awaited<ReturnType<typeof drawCaptionsFor>>["images"] = [];
+      let captionBox: { width: number; height: number; blank: string } | null = null;
       if (timelineDoc.subtitles) {
         const cues = await captionCues(clipSpecs, inCut, {
           segmentStarts,
@@ -1321,7 +1322,14 @@ function App() {
           intro: introSpec,
           introFadeMs: INTRO_FADE_MS,
         });
-        captions = await drawCaptionsFor(cues);
+        const drawn = await drawCaptionsFor(cues);
+        captions = drawn.images;
+        if (drawn.images.length > 0) {
+          captionBox = {
+            ...drawn.box,
+            blank: blankCaption(drawn.box.width, drawn.box.height),
+          };
+        }
       }
 
       const result = await renderRoughCut(clipSpecs, inCut, {
@@ -1346,6 +1354,7 @@ function App() {
         soundGains: soundGains(shots, timelineDoc.originalAudio),
         language,
         captions,
+        captionBox: captionBox ?? undefined,
         subtitleStyle: {
           size: timelineDoc.subtitleStyle.size,
           bottom: timelineDoc.subtitleStyle.bottom,
@@ -1406,7 +1415,7 @@ function App() {
    * boxes.
    */
   async function drawCaptionsFor(cues: { startMs: number; endMs: number; text: string }[]) {
-    if (cues.length === 0) return [];
+    if (cues.length === 0) return { images: [], box: { width: 0, height: 0 } };
     try {
       const urls = await Promise.all(
         CAPTION_FACES.map(async (f) =>

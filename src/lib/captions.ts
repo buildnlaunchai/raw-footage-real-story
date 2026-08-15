@@ -123,6 +123,10 @@ export function shrinkToFit(fontPx: number, widthPx: number, frameWidth: number)
  *
  * Sized to the text rather than the frame: a full-frame image per caption
  * would be eight megabytes decoded, and a film has hundreds of them.
+ *
+ * `box` makes every caption come out the same size, drawn centred and sitting
+ * on the box's floor. That is what lets the whole set become a single video
+ * track instead of one input per caption — see `drawCaptions`.
  */
 export function drawCaption(
   text: string,
@@ -130,6 +134,7 @@ export function drawCaption(
   frameHeight: number,
   frameWidth: number,
   family: string,
+  box?: { width: number; height: number },
 ): { png: string; width: number; height: number } {
   // Measure first, on a throwaway context, so the real canvas is exactly the
   // size of what goes on it.
@@ -163,20 +168,30 @@ export function drawCaption(
   const w = textW + pad * 2;
   const h = Math.ceil(ascent + descent) + pad * 2;
 
+  // Every caption is drawn on a canvas of the same size when a box is given,
+  // centred in it and resting on its floor. Bottom-aligned rather than
+  // centred vertically because the box is placed by its floor: a tall line and
+  // a short one must sit at the same height above the bottom of the frame,
+  // and only their tops may differ.
+  const canvasW = box?.width ?? w;
+  const canvasH = box?.height ?? h;
+  const offsetX = Math.round((canvasW - w) / 2);
+  const offsetY = canvasH - h;
+
   const canvas = document.createElement("canvas");
-  canvas.width = w;
-  canvas.height = h;
+  canvas.width = canvasW;
+  canvas.height = canvasH;
   const c = canvas.getContext("2d")!;
   c.font = font;
   c.textAlign = "center";
   c.textBaseline = "alphabetic";
-  const x = w / 2;
-  const y = pad + ascent;
+  const x = offsetX + w / 2;
+  const y = offsetY + pad + ascent;
 
   if (style.boxBehind) {
     c.fillStyle = "rgba(0,0,0,0.55)";
     const r = Math.round(fontPx * 0.18);
-    roundRect(c, 0, 0, w, h, r);
+    roundRect(c, offsetX, offsetY, w, h, r);
     c.fill();
   }
 
@@ -191,9 +206,18 @@ export function drawCaption(
 
   return {
     png: canvas.toDataURL("image/png").split(",")[1],
-    width: w,
-    height: h,
+    width: canvasW,
+    height: canvasH,
   };
+}
+
+/** A blank frame of the caption box, for the gaps where nobody is speaking. */
+export function blankCaption(width: number, height: number): string {
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, width);
+  canvas.height = Math.max(1, height);
+  // Left untouched, so every pixel is transparent black.
+  return canvas.toDataURL("image/png").split(",")[1];
 }
 
 function roundRect(
@@ -213,16 +237,44 @@ function roundRect(
   c.closePath();
 }
 
-/** Draw every caption for a cut. */
+/**
+ * Draw every caption for a cut, all the same size.
+ *
+ * They come out identical in size on purpose, so ffmpeg can play them as one
+ * video track rather than opening one image per caption. That matters more
+ * than it sounds: as separate inputs, a film with 293 captions handed ffmpeg
+ * 293 files and 293 overlay filters, and *every frame of the film* was pushed
+ * through all 293 of them to find the one that might be showing. Measured on a
+ * 79-clip cut, that was 82% of the render — 1.2 seconds of work became 6.7 —
+ * and it cost around 880 of the process's threads. One track is one input and
+ * one overlay, whatever the length of the film.
+ *
+ * Two passes, because the common size cannot be known until every caption has
+ * been measured, and a caption's size depends on its own text: a long line is
+ * shrunk to fit the frame, so it is not merely wider but set smaller.
+ */
 export function drawCaptions(
   cues: CaptionCue[],
   style: CaptionStyle,
   frameWidth: number,
   frameHeight: number,
   family: string,
-): CaptionImage[] {
-  return cues.map((cue) => ({
+): { images: CaptionImage[]; box: { width: number; height: number } } {
+  if (cues.length === 0) return { images: [], box: { width: 0, height: 0 } };
+
+  // First pass: what size does each one want to be?
+  const sizes = cues.map((cue) => drawCaption(cue.text, style, frameHeight, frameWidth, family));
+  const box = {
+    width: Math.max(1, ...sizes.map((s) => s.width)),
+    height: Math.max(1, ...sizes.map((s) => s.height)),
+  };
+
+  // Second pass: the same caption again, this time on a canvas of the common
+  // size. Redrawn rather than composited, so there is one drawing path and no
+  // chance of the two disagreeing about where the text sits.
+  const images = cues.map((cue) => ({
     ...cue,
-    ...drawCaption(cue.text, style, frameHeight, frameWidth, family),
+    ...drawCaption(cue.text, style, frameHeight, frameWidth, family, box),
   }));
+  return { images, box };
 }
