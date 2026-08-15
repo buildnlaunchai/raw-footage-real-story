@@ -42,7 +42,14 @@ import { fileURLToPath } from "node:url";
 
 const root = join(fileURLToPath(import.meta.url), "../..");
 const fontsDir = join(root, "src-tauri/resources/fonts");
-const work = mkdtempSync(join(tmpdir(), "caption-check-"));
+// Not the per-user temp directory on macOS. WKWebView refuses to run a module
+// script from a page under `/var/folders`, where `$TMPDIR` points — it does not
+// fail, it simply never runs the script, so the probe looks like a page that
+// hangs. The same page under `/private/tmp` works. Everything else here is
+// happy either way.
+const work = mkdtempSync(
+  join(process.platform === "darwin" ? "/tmp" : tmpdir(), "caption-check-"),
+);
 
 const CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 
@@ -201,6 +208,13 @@ function renderDrawtext(probes) {
   return files;
 }
 
+/** Lines of very different lengths, so a shared box has room to get it wrong. */
+const CENTRING_PROBES = [
+  "বিকেল চারটার দিকে আমরা বাড়ি",
+  "ছোট",
+  "মাঝারি একটি লাইন এখানে",
+];
+
 /** A sentence with four pre-base signs in it, one of them behind a conjunct. */
 const SENTENCE = "ভেতরের ক্রেডিট ডিভাইসটি ঠিক নেই";
 
@@ -292,6 +306,79 @@ document.body.appendChild(tag);
     shaped: correlate(a, s),
     unshaped: correlate(a, u),
   };
+}
+
+
+/**
+ * Check the captions come out centred, in the engine that actually draws them.
+ *
+ * WKWebView is what renders captions on macOS, and it is not Chrome. It
+ * ignores the canvas `textAlign` property for complex scripts: Latin centres,
+ * Bengali is drawn from the anchor rightwards exactly as if left-aligned. So
+ * every caption started at the middle of its box and ran off the right edge —
+ * in a film that had already been checked for shaping in two other engines and
+ * passed both.
+ *
+ * The lesson is the check: measure in the engine that ships, not in the one
+ * that is convenient. This draws real captions of different lengths through
+ * the real function and compares the transparent margin either side of the
+ * ink, which is a property no alignment bug can fake.
+ */
+function checkCentredInWebKit() {
+  const bundle = join(work, "captions.js");
+  try {
+    execFileSync(
+      "npx",
+      ["esbuild", join(root, "src/lib/captions.ts"), "--bundle", "--format=esm", `--outfile=${bundle}`],
+      { cwd: root, stdio: "ignore" },
+    );
+  } catch {
+    return null;
+  }
+  copyFileSync(join(fontsDir, "NotoSansBengali-Regular.ttf"), join(work, "bn.ttf"));
+
+  const page = `<!doctype html><meta charset="utf-8"><body>
+<script type="module">
+const out = [];
+try {
+  const mod = await import("./captions.js");
+  await mod.loadCaptionFont("Cap", ["bn.ttf"]);
+  const cues = ${JSON.stringify(CENTRING_PROBES)}.map((t, i) => ({ startMs: i, endMs: i + 1, text: t }));
+  const r = mod.drawCaptions(cues, { size: 1/26, colour: "#ffffff", boxBehind: false }, 1920, 1080, "Cap");
+  for (const [i, im] of r.images.entries()) {
+    const img = new Image();
+    await new Promise((res, rej) => { img.onload = res; img.onerror = rej;
+      img.src = "data:image/png;base64," + im.png; });
+    const cv = document.createElement("canvas");
+    cv.width = im.width; cv.height = im.height;
+    const g = cv.getContext("2d");
+    g.drawImage(img, 0, 0);
+    const d = g.getImageData(0, 0, im.width, im.height).data;
+    let lo = im.width, hi = -1;
+    for (let y = 0; y < im.height; y++)
+      for (let x = 0; x < im.width; x++)
+        if (d[(y * im.width + x) * 4 + 3] > 16) { if (x < lo) lo = x; if (x > hi) hi = x; }
+    out.push([im.width, lo, im.width - 1 - hi, cues[i].text].join("\\t"));
+  }
+} catch (e) { out.push("ERROR\\t" + (e && e.message || e)); }
+window.__result = out.join("\\n");
+</script></body>`;
+  const file = join(work, "webkit.html");
+  writeFileSync(file, page);
+  try {
+    const text = execFileSync(
+      "swift",
+      [join(root, "scripts/webview-probe.swift"), file, "40"],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    );
+    return text.trim().split("\n").map((l) => l.split("\t"));
+  } catch (err) {
+    // Said out loud. A check that quietly reports "skipped" is a check that
+    // is not running, and this one exists because of a bug that hid for a
+    // whole release behind engines that were not the shipping one.
+    console.log(`  (webview probe failed: ${String(err.stderr || err.message).trim()})`);
+    return null;
+  }
 }
 
 // --- measurement -------------------------------------------------------------
@@ -527,11 +614,35 @@ if (!app) {
   }
 }
 
+console.log("drawCaption in WKWebView (what draws them on macOS)");
+const webkit = checkCentredInWebKit();
+if (!webkit) {
+  console.log("  skipped — no swift, or the webview never reported\n");
+} else if (webkit[0] && webkit[0][0] === "ERROR") {
+  console.log(`  FAILED to draw: ${webkit[0][1]}\n`);
+  failures++;
+} else {
+  console.log("  box    left  right  text");
+  console.log("  " + "-".repeat(64));
+  for (const [boxW, left, right, text] of webkit) {
+    // Equal transparent margins either side is what centred means, and no
+    // alignment bug can imitate it. A couple of pixels of slack for the side
+    // bearings of the first and last glyph, which are not symmetrical.
+    const off = Math.abs(Number(left) - Number(right));
+    const ok = off <= 6;
+    if (!ok) failures++;
+    console.log(
+      `  ${String(boxW).padEnd(6)} ${String(left).padEnd(5)} ${String(right).padEnd(6)} ` +
+        `${(text || "").slice(0, 28)}  ${ok ? "centred" : `OFF BY ${off}px — NOT CENTRED`}`,
+    );
+  }
+  console.log();
+}
+
 if (failures > 0) {
   console.error(`${failures} problem(s). Captions are not safe to ship.`);
   process.exit(1);
 }
-console.log("Every pre-base vowel sign is drawn before its consonant, in every engine");
 console.log("that draws a caption. An unshaped rendering was caught in each, and so was");
 console.log("the renderer that shipped broken — so the measurement measures, and the");
 console.log("engines the app uses pass it. And what drawCaption itself draws is the");

@@ -97,6 +97,20 @@ export function loadCaptionFont(family: string, urls: string[]): Promise<void> {
   return fontReady;
 }
 
+/**
+ * How wide a line's ink actually runs.
+ *
+ * The advance width is where the *next* glyph would start, which is not where
+ * the ink stops: a Bengali line measured 469px wide reached 493px of ink, so
+ * trusting the advance alone clipped the last glyph. Whichever is larger wins,
+ * plus anything hanging off the left.
+ */
+function inkWidth(m: TextMetrics): number {
+  const left = Math.max(0, m.actualBoundingBoxLeft || 0);
+  const right = Math.max(m.width, m.actualBoundingBoxRight || 0);
+  return left + right;
+}
+
 /** How far in from each edge a caption must stay. */
 const SIDE_MARGIN = 0.04;
 
@@ -146,7 +160,7 @@ export function drawCaption(
 
   const fitted = shrinkToFit(
     fontPx,
-    measure.measureText(text).width + Math.round(fontPx * 0.4) * 2,
+    inkWidth(measure.measureText(text)) + Math.round(fontPx * 0.4) * 2,
     frameWidth,
   );
   if (fitted !== fontPx) {
@@ -162,7 +176,10 @@ export function drawCaption(
   // them off.
   const ascent = m.actualBoundingBoxAscent || fontPx * 0.8;
   const descent = m.actualBoundingBoxDescent || fontPx * 0.35;
-  const textW = Math.ceil(m.width);
+  // How far the ink reaches left of where the text is drawn from. Small, but
+  // it is the difference between a clipped first glyph and a whole one.
+  const bearing = Math.max(0, m.actualBoundingBoxLeft || 0);
+  const textW = Math.ceil(inkWidth(m));
   // Not clamped to the frame: the size was already chosen so it fits, and a
   // clamp here would quietly cut the ends off instead of failing the fit.
   const w = textW + pad * 2;
@@ -183,9 +200,22 @@ export function drawCaption(
   canvas.height = canvasH;
   const c = canvas.getContext("2d")!;
   c.font = font;
-  c.textAlign = "center";
+  // Left-aligned, and centred by arithmetic instead.
+  //
+  // `textAlign = "center"` is ignored by WebKit for complex scripts, and
+  // WebKit is what draws these captions on macOS. Latin centres correctly;
+  // Bengali comes out drawn from the anchor rightwards, identical to
+  // left-aligned, so every caption began at the middle of its box and ran off
+  // the right edge. Measured in WKWebView: the same string with "center" and
+  // with "left" produced byte-identical ink. Chrome centres both, which is why
+  // this survived being checked there.
+  //
+  // `measureText` is accurate in WebKit — it agreed with the drawn ink to
+  // within two pixels on every string tried — so the width it reports can be
+  // trusted even where the alignment cannot.
+  c.textAlign = "left";
   c.textBaseline = "alphabetic";
-  const x = offsetX + w / 2;
+  const x = offsetX + pad + bearing;
   const y = offsetY + pad + ascent;
 
   if (style.boxBehind) {
