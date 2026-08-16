@@ -186,7 +186,57 @@ pub fn project_open(app: AppHandle, id: String) -> Result<ProjectFile, StoreErro
     if !path.is_file() {
         return Err(StoreError::new("NOT_FOUND", format!("no project at {}", path.display())));
     }
-    load_from(&path)
+    let mut file = load_from(&path)?;
+    absolutise(&mut file, &project_dir(&app, &id)?);
+    Ok(file)
+}
+
+/// Turn the manifest's stored paths into ones the app can open directly.
+///
+/// Media that lives inside the project is written down relative to it, so a
+/// project folder can be moved without every path in it going stale. Media
+/// that lives elsewhere — the user's own footage — is stored absolute, because
+/// there is nothing to be relative to. The reader should not have to know
+/// which is which, and until now it did: narration recordings came back as
+/// `audio/line-01.wav`, which is not something a webview can load, so playing
+/// a line worked right after recording it and silently did nothing once the
+/// project had been closed and reopened.
+#[cfg(test)]
+pub fn absolutise_for_test(file: &mut ProjectFile, dir: &Path) {
+    absolutise(file, dir);
+}
+
+fn absolutise(file: &mut ProjectFile, dir: &Path) {
+    let fix = |p: &mut String| {
+        if !p.is_empty() && Path::new(&*p).is_relative() {
+            *p = dir.join(&*p).to_string_lossy().into_owned();
+        }
+    };
+    for video in &mut file.videos {
+        if let Some(audio) = video.audio.as_mut() {
+            for line in &mut audio.lines {
+                fix(&mut line.path);
+            }
+        }
+        if let Some(render) = video.render.as_mut() {
+            if let Some(out) = render.output_path.as_mut() {
+                fix(out);
+            }
+        }
+    }
+    for take in &mut file.takes {
+        for line in &mut take.audio {
+            fix(&mut line.path);
+        }
+    }
+    for clip in &mut file.clips {
+        if let Some(src) = clip.source_path.as_mut() {
+            fix(src);
+        }
+        if let Some(thumb) = clip.thumbnail_path.as_mut() {
+            fix(thumb);
+        }
+    }
 }
 
 #[tauri::command]

@@ -678,3 +678,61 @@ fn a_video_with_no_timeline_edits_still_loads() {
     assert!(video.timeline_doc.is_none());
     assert!(video.language.is_none());
 }
+
+/// A reopened project hands back paths that can actually be opened.
+///
+/// Recordings live inside the project folder, so they are written down
+/// relative to it — `audio/line-01.wav` — which is right for a folder that
+/// may be moved and wrong for anything that wants to play the file. Playing a
+/// line worked immediately after recording it, when the path in memory was
+/// still absolute, and did nothing at all once the project had been closed and
+/// reopened. Footage kept elsewhere has no base to be relative to and must
+/// come back untouched.
+#[test]
+fn reopening_a_project_gives_paths_that_can_be_opened() {
+    let dir = std::env::temp_dir().join("rfrs-abs-test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("dir");
+
+    let raw = serde_json::json!({
+        "schemaVersion": 2,
+        "app": { "slug": "raw-footage-real-story", "version": "0.1.0" },
+        "project": { "id": "p1", "name": "Trip", "createdAt": NOW, "updatedAt": NOW },
+        "clips": [
+            { "id": "c0", "sourcePath": "/Users/someone/Movies/IMG_1.MOV",
+              "thumbnailPath": "thumbs/001.jpg", "isPlaceholder": false, "segments": [] }
+        ],
+        "videos": [{
+            "id": "video-1", "title": "T", "createdAt": NOW, "updatedAt": NOW,
+            "selection": [], "script": null,
+            "audio": { "voice": "af_heart", "sampleRate": 24000, "lines": [
+                { "clipId": "c0", "segmentIndex": 0, "path": "audio/line-01.wav",
+                  "durationMs": 900, "skippedWords": [] }
+            ]},
+            "timeline": [], "render": null, "pronunciations": {}
+        }],
+        "takes": []
+    });
+    let path = dir.join("project.json");
+    std::fs::write(&path, serde_json::to_vec_pretty(&raw).unwrap()).expect("write");
+
+    let mut file = project::load(&path).expect("loads");
+    super::store::absolutise_for_test(&mut file, &dir);
+
+    let line = &file.videos[0].audio.as_ref().unwrap().lines[0];
+    assert_eq!(
+        line.path,
+        dir.join("audio/line-01.wav").to_string_lossy(),
+        "a recording inside the project must come back as a path that opens",
+    );
+    assert_eq!(
+        file.clips[0].thumbnail_path.as_deref(),
+        Some(dir.join("thumbs/001.jpg").to_string_lossy().as_ref()),
+    );
+    // Footage elsewhere has no base to be relative to; it must not be touched.
+    assert_eq!(
+        file.clips[0].source_path.as_deref(),
+        Some("/Users/someone/Movies/IMG_1.MOV"),
+        "footage outside the project was rewritten",
+    );
+}
