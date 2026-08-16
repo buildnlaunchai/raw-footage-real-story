@@ -38,6 +38,7 @@ fn clip_with_segments(i: usize, segments: usize) -> ProjectClip {
         codec: Some("h264".into()),
         has_audio: None,
         captured_at_ms: None,
+        imported_at: None,
         favorite: false,
         deleted_at: None,
         segments: (0..segments)
@@ -251,6 +252,7 @@ fn project_with_video() -> ProjectFile {
         codec: None,
         has_audio: None,
         captured_at_ms: None,
+        imported_at: None,
         favorite: false,
         deleted_at: None,
         segments: vec![Segment { start_sec: 0.0, end_sec: 9.0, text: "harbour".into() }],

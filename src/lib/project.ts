@@ -39,6 +39,8 @@ export interface ProjectClip {
    * and a film assembled in that order runs backwards.
    */
   capturedAtMs?: number | null;
+  /** When this clip was added to the project. Absent on older imports. */
+  importedAt?: string | null;
   /** Starred in the library. */
   favorite?: boolean;
   /** Set when the clip is in the trash; it keeps its description until purged. */

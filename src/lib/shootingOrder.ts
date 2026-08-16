@@ -122,3 +122,93 @@ export function describeOrdering(clips: Shootable[]): string {
   return `Ordered ${noun} by filename — these files carry no recording time and their ` +
     `names are not one camera's numbering, so this is a guess.`;
 }
+
+/**
+ * The orderings somebody can ask for by name.
+ *
+ * Separate from `orderBasis`, which *guesses*. Guessing is right at import,
+ * when there is no order yet and any order is better than the one the file
+ * picker happened to return. It is wrong afterwards: by then the person has
+ * looked at the list, knows which signal they trust, and wants that one
+ * applied — not an opinion about it.
+ */
+export type SortBasis = "shot-time" | "file-name" | "import-time";
+
+export interface Sortable extends Shootable {
+  /** When this clip was brought into the project, if it is known. */
+  importedAt?: string | null;
+}
+
+/**
+ * Put clips in a named order.
+ *
+ * Stable, so clips the chosen signal cannot separate — two files shot in the
+ * same second, or anything imported before import times were recorded — keep
+ * the order they already had rather than being shuffled arbitrarily.
+ */
+export function sortClipsBy<T extends Sortable>(
+  clips: T[],
+  basis: SortBasis,
+  newestFirst = false,
+): T[] {
+  /** Whether this clip carries the signal being sorted on at all. */
+  const missing = (c: T): boolean => {
+    if (basis === "shot-time") return c.capturedAtMs == null;
+    if (basis === "import-time") return !c.importedAt;
+    return !c.fileName;
+  };
+
+  /** Compare two clips that both carry the signal. */
+  const compare = (a: T, b: T): number => {
+    switch (basis) {
+      case "shot-time":
+        return a.capturedAtMs! - b.capturedAtMs!;
+      case "file-name":
+        return (a.fileName ?? "").localeCompare(b.fileName ?? "", undefined, {
+          numeric: true,
+          sensitivity: "base",
+        });
+      case "import-time":
+        return a.importedAt!.localeCompare(b.importedAt!);
+    }
+  };
+
+  const keyed = clips.map((clip, at) => ({ clip, at }));
+  keyed.sort((a, b) => {
+    // A clip the signal cannot place goes to the end — in *both* directions,
+    // because "unknown" is not "earliest" and reversing the list should not
+    // promote it to the front. So this is decided before the direction is
+    // applied, not after.
+    const am = missing(a.clip);
+    const bm = missing(b.clip);
+    if (am && bm) return a.at - b.at;
+    if (am) return 1;
+    if (bm) return -1;
+
+    const by = compare(a.clip, b.clip);
+    if (by !== 0) return newestFirst ? -by : by;
+    // Clips the signal cannot separate keep the order they had, which is what
+    // stable means here and why the tie-break is never reversed either.
+    return a.at - b.at;
+  });
+  return keyed.map((k) => k.clip);
+}
+
+/** What each ordering is called, and what it actually reads. */
+export const SORT_BASES: { id: SortBasis; label: string; hint: string }[] = [
+  {
+    id: "shot-time",
+    label: "Time filmed",
+    hint: "The recording time stored inside each file. Some apps rewrite it when they compress or share a video, so it is not always the truth.",
+  },
+  {
+    id: "file-name",
+    label: "File name",
+    hint: "A camera numbers its files as it records them, so this is usually the order you shot in — and it survives being copied and compressed.",
+  },
+  {
+    id: "import-time",
+    label: "Import order",
+    hint: "The order footage was added to this project. Clips added before this was recorded keep the position they already have.",
+  },
+];

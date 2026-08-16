@@ -633,8 +633,11 @@ pub async fn assembly_render(
     // One level per shot, where the timeline has an opinion about each.
     sound_gains: Option<Vec<f32>>,
     transitions: Option<Vec<u32>>,
-    // The script's language, which decides how wide a caption line may be and
-    // which font can draw it, and how those captions should look.
+    // Kept in the signature because the caller still sends it, and no longer
+    // read: the wrap width and the font are decided from the caption text
+    // itself, which cannot be wrong about what language it is in. The stored
+    // code could be, and was — it did not survive a save, so a Bengali script
+    // came back as English.
     language: Option<String>,
     subtitle_style: Option<ffmpeg::SubtitleStyle>,
     // Captions as the editor drew them: words, timings, and a picture each,
@@ -642,6 +645,7 @@ pub async fn assembly_render(
     captions: Option<Vec<CaptionImage>>,
     caption_box: Option<CaptionBox>,
 ) -> Result<AssembleResult, FfmpegError> {
+    let _ = language;
     let source_audio_gain = source_audio_gain.unwrap_or(0.0);
     let info = ffmpeg::detect(&load_settings(&app))?;
     let dir = project_dir(&app, &project_id)?;
@@ -934,6 +938,7 @@ pub async fn assembly_render(
                 codec: None,
                 has_audio: None,
                 captured_at_ms: None,
+                imported_at: None,
                 favorite: false,
                 deleted_at: None,
                 segments: if c.description.trim().is_empty() {

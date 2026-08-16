@@ -752,6 +752,7 @@ mod library_rows {
             codec: Some("hevc".into()),
             has_audio: Some(true),
             captured_at_ms: None,
+            imported_at: None,
             favorite: false,
             deleted_at: None,
             segments,

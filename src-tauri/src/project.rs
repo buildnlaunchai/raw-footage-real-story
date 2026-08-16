@@ -100,6 +100,15 @@ pub struct ProjectClip {
     /// When the camera recorded it, in Unix milliseconds, where the file says.
     #[serde(default)]
     pub captured_at_ms: Option<i64>,
+    /// When this clip was added to the project.
+    ///
+    /// Distinct from the recording time inside the file, which some apps
+    /// rewrite when they compress or share a video, and distinct from the
+    /// project's own created date, which every clip shared and so could not
+    /// order anything. Absent on clips imported before this was recorded;
+    /// those keep the position they already have rather than being shuffled.
+    #[serde(default)]
+    pub imported_at: Option<String>,
     /// Starred in the library.
     #[serde(default)]
     pub favorite: bool,
@@ -404,6 +413,7 @@ fn migrate_v1(value: serde_json::Value) -> Result<ProjectFile, String> {
             codec: None,
             has_audio: None,
             captured_at_ms: None,
+            imported_at: None,
             favorite: false,
             deleted_at: None,
             segments,

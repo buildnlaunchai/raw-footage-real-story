@@ -48,7 +48,13 @@ import {
   type StorageUsage,
 } from "./lib/library";
 import { listProjects, type ProjectSummary } from "./lib/project";
-import { describeOrdering, sortByShootingOrder } from "./lib/shootingOrder";
+import {
+  describeOrdering,
+  sortByShootingOrder,
+  sortClipsBy,
+  SORT_BASES,
+  type SortBasis,
+} from "./lib/shootingOrder";
 import { invoke } from "@tauri-apps/api/core";
 import { AssemblyPanel } from "./components/AssemblyPanel";
 import {
@@ -773,6 +779,10 @@ function App() {
         // same file picked twice in one import used to pass this filter twice,
         // because the set never learned about the first copy.
         const seen = new Set(current.clips.map((c) => c.sourcePath));
+        // One stamp for the whole batch: an import is a single act, and the
+        // order inside it is the order they were sorted into, not the order
+        // the loop happened to reach them in.
+        const importedAt = new Date().toISOString();
         const added: ProjectClip[] = usable
           .filter((r) => !seen.has(r.sourcePath) && seen.add(r.sourcePath) !== null)
           .map((r) => ({
@@ -789,6 +799,9 @@ function App() {
             codec: r.info?.codec ?? null,
             hasAudio: r.info?.hasAudio ?? false,
             capturedAtMs: r.info?.createdAtMs ?? null,
+            // One stamp for the batch, so a single import is one moment and
+            // the files inside it keep the order they were sorted into.
+            importedAt: importedAt,
             favorite: false,
             deletedAt: null,
             segments: [],
@@ -1586,9 +1599,44 @@ function App() {
    */
   async function onSortByCapture() {
     if (!manifest) return;
-    const sorted = sortByShootingOrder(manifest.clips);
+    await applyOrder(sortByShootingOrder(manifest.clips), describeOrdering(manifest.clips));
+  }
+
+  /**
+   * Put the collection in an order the user named, rather than one guessed at.
+   *
+   * Guessing is right at import, when there is no order yet and anything beats
+   * whatever the file picker returned. It is wrong afterwards: by then they
+   * have looked at the list and know which signal they trust.
+   */
+  async function onArrange(action: SortBasis | "auto" | "reverse") {
+    if (!manifest) return;
+    if (action === "auto") return onSortByCapture();
+    if (action === "reverse") {
+      const flipped = [...manifest.clips].reverse();
+      return applyOrder(flipped, `Reversed the running order of ${flipped.length} clips.`);
+    }
+    const sorted = sortClipsBy(manifest.clips, action);
+    const named = SORT_BASES.find((b) => b.id === action);
+    const placed = sorted.filter((c) =>
+      action === "shot-time" ? c.capturedAtMs != null : action === "import-time" ? c.importedAt : true,
+    ).length;
+    // Said plainly when the signal could not place everything, because the
+    // clips it could not place are sitting at the end and that is not obvious.
+    const note =
+      placed === sorted.length
+        ? `Ordered ${sorted.length} clips by ${named?.label.toLowerCase()}.`
+        : `Ordered ${placed} of ${sorted.length} clips by ${named?.label.toLowerCase()}. ` +
+          `The rest carry no ${action === "shot-time" ? "recording time" : "import time"} ` +
+          `and are left at the end, in the order they were already in.`;
+    await applyOrder(sorted, note);
+  }
+
+  /** Commit a new running order: on screen, on disk, and in the library. */
+  async function applyOrder(sorted: ProjectClip[], note: string) {
+    if (!manifest) return;
     setManifest({ ...manifest, clips: sorted });
-    setOrderNote(describeOrdering(manifest.clips));
+    setOrderNote(note);
     try {
       await reorderClips(manifest.project.id, sorted.map((c) => c.id));
       setAssembly(null);
@@ -2631,15 +2679,32 @@ function App() {
                 </select>
               </label>
 
-              {onFootageTab && manifest && manifest.clips.length > 2 && (
-                <button
-                  type="button"
-                  className="lib-tool"
-                  onClick={() => void onSortByCapture()}
-                  title="Put the whole collection back into the order it was filmed in, using each file's own recording time"
-                >
-                  Shooting order
-                </button>
+              {onFootageTab && manifest && manifest.clips.length > 1 && (
+                <label className="lib-tool">
+                  <SortIcon />
+                  <span className="visually-hidden">Arrange the running order</span>
+                  <select
+                    value=""
+                    onChange={(e) => {
+                      const action = e.currentTarget.value;
+                      // Reset so the same choice can be made twice running —
+                      // this is a command, not a setting, and it should not
+                      // sit there looking like the current state.
+                      e.currentTarget.value = "";
+                      if (action) void onArrange(action as SortBasis | "auto" | "reverse");
+                    }}
+                    title="Put the whole collection in a chosen order. This is the order the script is written to and the film is cut in."
+                  >
+                    <option value="">Arrange…</option>
+                    <option value="auto">Shooting order (work it out)</option>
+                    {SORT_BASES.map((b) => (
+                      <option key={b.id} value={b.id} title={b.hint}>
+                        {b.label}
+                      </option>
+                    ))}
+                    <option value="reverse">Reverse current order</option>
+                  </select>
+                </label>
               )}
 
               {onFootageTab && manifest && (

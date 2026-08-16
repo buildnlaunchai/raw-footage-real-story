@@ -12,6 +12,7 @@ import {
   orderBasis,
   signalsDisagree,
   sortByShootingOrder,
+  sortClipsBy,
 } from "../.test-build/lib/shootingOrder.js";
 
 const clip = (fileName, capturedAtMs = null) => ({ fileName, capturedAtMs });
@@ -132,4 +133,46 @@ test("the original array is left alone", () => {
   const before = names(cs);
   sortByShootingOrder(cs);
   assert.deepEqual(names(cs), before);
+});
+
+test("clips can be put in an order somebody asked for by name", () => {
+  const clips = [
+    { fileName: "IMG_2165.MOV", capturedAtMs: 300, importedAt: "2026-08-12T10:00:03Z" },
+    { fileName: "IMG_2163.MOV", capturedAtMs: 100, importedAt: "2026-08-12T10:00:01Z" },
+    { fileName: "IMG_2164.MOV", capturedAtMs: 200, importedAt: "2026-08-12T10:00:02Z" },
+  ];
+  const names = (list) => list.map((c) => c.fileName.slice(4, 8)).join(",");
+
+  assert.equal(names(sortClipsBy(clips, "shot-time")), "2163,2164,2165");
+  assert.equal(names(sortClipsBy(clips, "file-name")), "2163,2164,2165");
+  assert.equal(names(sortClipsBy(clips, "import-time")), "2163,2164,2165");
+  // The complaint that started this: the whole list arriving backwards.
+  assert.equal(names(sortClipsBy(clips, "shot-time", true)), "2165,2164,2163");
+});
+
+test("a clip with no recording time sinks rather than claiming the start", () => {
+  // "Unknown" is not "earliest", and it is not "latest" either — it is simply
+  // not something the chosen signal can place, in either direction.
+  const clips = [
+    { fileName: "b.mov", capturedAtMs: null },
+    { fileName: "a.mov", capturedAtMs: 100 },
+  ];
+  assert.deepEqual(sortClipsBy(clips, "shot-time").map((c) => c.fileName), ["a.mov", "b.mov"]);
+  assert.deepEqual(
+    sortClipsBy(clips, "shot-time", true).map((c) => c.fileName),
+    ["a.mov", "b.mov"],
+  );
+});
+
+test("clips the signal cannot separate keep the order they had", () => {
+  // Two files shot in the same second, and anything imported before import
+  // times were recorded. Shuffling those would be a change nobody asked for.
+  const clips = [
+    { fileName: "second.mov", capturedAtMs: 100 },
+    { fileName: "first.mov", capturedAtMs: 100 },
+  ];
+  assert.deepEqual(
+    sortClipsBy(clips, "shot-time").map((c) => c.fileName),
+    ["second.mov", "first.mov"],
+  );
 });
