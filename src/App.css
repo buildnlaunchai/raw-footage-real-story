@@ -3189,6 +3189,27 @@ kbd {
   filter: brightness(1.08);
 }
 
+/*
+ * A confirmation sits above whatever asked for it.
+ *
+ * It used to borrow `.describer`, and so its z-index — and the describer is
+ * rendered after it, so at equal height the later element won and the "remove
+ * this clip?" dialog opened *behind* the window you pressed delete in. A
+ * question you cannot see is worse than no question: the app looks frozen.
+ *
+ * Above every other overlay on purpose. Anything that has to be answered
+ * before the app will go on belongs on top of the thing that raised it.
+ */
+.confirm-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  background: rgba(0, 0, 0, 0.84);
+  display: grid;
+  place-items: center;
+  padding: clamp(1rem, 4vw, 3rem);
+}
+
 .confirm-panel {
   background: var(--card);
   border: 1px solid var(--line);

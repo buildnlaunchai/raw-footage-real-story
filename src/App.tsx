@@ -2920,8 +2920,9 @@ function App() {
 
       {pendingDelete && (
         <div
-          className="describer"
+          className="confirm-overlay"
           role="dialog"
+          aria-modal="true"
           aria-label="Confirm removal"
           onClick={() => setPendingDelete(null)}
         >

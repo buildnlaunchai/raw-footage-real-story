@@ -1845,3 +1845,63 @@ fn captions_do_not_dominate_the_render() {
          composited one at a time again",
     );
 }
+
+/// Captions land where the cue said, whatever the cue before it did.
+///
+/// The track is a playlist of durations, so a caption's position is the sum of
+/// everything before it. That makes one bad duration permanent: a dissolve
+/// makes the two shots either side of it overlap, the caption list overlaps
+/// with them, and showing the earlier caption in full pushed the next one late
+/// — and every caption after it late by the same amount, for the rest of the
+/// film. Measured on a real ten-minute cut: 300ms behind the voice from the
+/// first dissolve to the end.
+#[test]
+fn one_overlapping_caption_does_not_shift_the_rest_of_the_film() {
+    let dir = std::env::temp_dir().join("rfrs-caption-timing");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // A transparent 1x1 png, base64. Content is irrelevant here; timing is not.
+    const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk\
+                       YPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+    let cap = |start: u64, end: u64| crate::assembly::CaptionImage {
+        start_ms: start,
+        end_ms: end,
+        text: String::new(),
+        png: PNG.replace(char::is_whitespace, ""),
+    };
+
+    // The shape that failed: the third cue starts 300ms before the second ends.
+    let captions = vec![cap(0, 2_000), cap(2_000, 5_000), cap(4_700, 7_000), cap(7_000, 9_000)];
+    let (_, track) = crate::assembly::write_captions(&dir, "subs", &captions, &PNG.replace(char::is_whitespace, ""), 10, 10)
+        .expect("writes");
+    let track = track.expect("a track");
+
+    let playlist = std::fs::read_to_string(dir.join(&track.playlist.replace("subs/", "")))
+        .or_else(|_| std::fs::read_to_string(dir.join("captions.ffconcat")))
+        .expect("playlist");
+
+    // Walk the playlist the way ffmpeg does — position is the running total —
+    // and check every caption starts when its cue said it would.
+    let mut at = 0f64;
+    let mut starts = Vec::new();
+    let mut lines = playlist.lines().peekable();
+    while let Some(line) = lines.next() {
+        let Some(file) = line.strip_prefix("file ") else { continue };
+        let Some(dur) = lines.peek().and_then(|l| l.strip_prefix("duration ")) else { continue };
+        let dur: f64 = dur.parse().expect("a duration");
+        if !file.starts_with("blank") {
+            starts.push((file.to_string(), (at * 1000.0).round() as u64));
+        }
+        at += dur;
+    }
+
+    println!("\n  caption starts in the track: {starts:?}");
+    let want = [0u64, 2_000, 4_700, 7_000];
+    for (i, (name, got)) in starts.iter().enumerate() {
+        assert_eq!(
+            *got, want[i],
+            "caption {name} starts at {got}ms, but its cue said {}ms",
+            want[i],
+        );
+    }
+}

@@ -33,7 +33,7 @@ fn subs_dir_name(stem: &str) -> String {
 /// is run from there, so nothing in the filter graph is absolute — a project
 /// folder named "Trip: Bangkok" would otherwise break the graph, because the
 /// parser reads a colon as an option separator.
-fn write_captions(
+pub(crate) fn write_captions(
     subs_dir: &Path,
     rel: &str,
     captions: &[CaptionImage],
@@ -62,21 +62,37 @@ fn write_captions(
         std::fs::write(subs_dir.join(&name), bytes)
             .map_err(|e| format!("Could not write a caption: {e}"))?;
 
-        // Nothing on screen until this caption starts. Captions are built from
-        // one narration line each and cannot overlap, but they are not
-        // required to touch either.
-        if cap.start_ms > at_ms {
-            playlist.push_str(&entry("blank.png", cap.start_ms - at_ms));
-        }
-        let end = cap.end_ms.max(cap.start_ms);
-        playlist.push_str(&entry(&name, end.saturating_sub(cap.start_ms)));
-        at_ms = end;
-
         cues.push(ffmpeg::BurnCue {
             image: format!("{rel}/{name}"),
             start_ms: cap.start_ms,
             end_ms: cap.end_ms,
         });
+
+        // A caption gives way to the one after it rather than overrunning it.
+        //
+        // This is what keeps the track honest. It is a playlist of durations,
+        // so a position is the sum of everything before it — and two captions
+        // that overlap cannot both be shown in full without pushing the second
+        // one late, and everything after it late by the same amount, for the
+        // rest of the film. It happened: one dissolve makes the two shots
+        // either side of it overlap, and every caption from there on ran 300ms
+        // behind the voice.
+        //
+        // Cutting the earlier one short is also just what a single line of
+        // subtitle does when the next line arrives.
+        let next_start = captions.get(i + 1).map_or(u64::MAX, |n| n.start_ms);
+        let start = cap.start_ms;
+        let end = cap.end_ms.min(next_start).max(start);
+
+        // Nothing on screen until this caption is due. `end` never runs past
+        // the next start, so this is never negative and the clock never slips.
+        if start > at_ms {
+            playlist.push_str(&entry("blank.png", start - at_ms));
+        }
+        if end > start {
+            playlist.push_str(&entry(&name, end - start));
+            at_ms = end;
+        }
     }
 
     // The concat demuxer drops the final entry's duration, so the last frame
