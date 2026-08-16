@@ -13,6 +13,7 @@ import {
   maxTrimMs,
   moved,
   runtimeMs,
+  shotGain,
   shotKey,
   transitionsFor,
   withEdit,
@@ -218,4 +219,22 @@ test("nothing wanting sound is worth knowing", () => {
   const shots = applyEdits(plan(3), doc());
   assert.equal(anySound(shots, track({ enabled: false })), false);
   assert.equal(anySound(shots, track()), true);
+});
+
+test("one shot's level and the whole list agree", () => {
+  // They were worked out separately once and drifted apart. The viewer asks
+  // for a single shot, the renderer asks for the list, and both must be the
+  // same rule or what you hear while editing is not what gets filmed.
+  const track = { enabled: true, gain: 0.3 };
+  const shots = applyEdits(plan(3), {
+    ...DEFAULT_TIMELINE,
+    edits: {
+      "c0#0": { sound: { enabled: false } },
+      "c1#0": { sound: { enabled: true, gain: 0.8 } },
+    },
+  });
+  assert.deepEqual(
+    shots.filter((s) => s.enabled).map((s) => shotGain(s, track)),
+    soundGains(shots, track),
+  );
 });

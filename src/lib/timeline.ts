@@ -178,6 +178,8 @@ export interface Shot {
    * — which they did.
    */
   sound: { enabled: boolean; gain: number | null } | null;
+  /** The narration recording for this line, carried through for playback. */
+  audioPath?: string;
 }
 
 export interface PlannedShot {
@@ -186,6 +188,8 @@ export interface PlannedShot {
   durationMs: number;
   sourceInMs: number;
   text: string;
+  /** The narration recording for this line, so the viewer can play it. */
+  audioPath?: string;
 }
 
 /**
@@ -234,6 +238,7 @@ export function applyEdits(planned: PlannedShot[], doc: TimelineDoc): Shot[] {
       enabled,
       text: p.text,
       swapped: sourceClipId !== p.clipId,
+      audioPath: p.audioPath,
       sound: edit.sound
         ? { enabled: edit.sound.enabled, gain: edit.sound.gain ?? null }
         : null,
@@ -316,12 +321,20 @@ export function maxTransitionMs(a: Shot | undefined, b: Shot | undefined): numbe
  * silent, which is how the renderer already reads it.
  */
 export function soundGains(shots: Shot[], track: AudioTrack): number[] {
-  return shots
-    .filter((s) => s.enabled)
-    .map((s) => {
-      if (s.sound) return s.sound.enabled ? (s.sound.gain ?? track.gain) : 0;
-      return track.enabled ? track.gain : 0;
-    });
+  return shots.filter((s) => s.enabled).map((s) => shotGain(s, track));
+}
+
+/**
+ * How loud one shot's own sound should be.
+ *
+ * Split out because the viewer needs the same answer for the shot under the
+ * playhead, and this number has already been wrong once from being worked out
+ * in two places: what you hear while editing and what ends up in the file must
+ * come from one rule, or the preview is a guess.
+ */
+export function shotGain(shot: Shot, track: AudioTrack): number {
+  if (shot.sound) return shot.sound.enabled ? (shot.sound.gain ?? track.gain) : 0;
+  return track.enabled ? track.gain : 0;
 }
 
 /**

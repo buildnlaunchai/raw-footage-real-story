@@ -18,6 +18,7 @@ import {
   maxTrimMs,
   moved,
   runtimeMs,
+  shotGain,
   withEdit,
   hasMusic,
   withOrder,
@@ -45,6 +46,8 @@ interface Props {
   beds: { id: string; label: string; hint: string }[];
   /** How captions will look, so the viewer can show them before a render. */
   subtitles: SubtitleStyle | null;
+  /** The music track, already resolved to something an <audio> can load. */
+  musicUrl: string | null;
   /**
    * The film's opening, controlled here rather than in its own panel: it is a
    * decision about this film, made while looking at it, and the timeline is
@@ -56,6 +59,15 @@ interface Props {
 
 /** Pixels per second at rest. The ruler scales; the tracks follow it. */
 const BASE_PPS = 26;
+/**
+ * Width of the track-name column, which every lane is offset by.
+ *
+ * Pinned in pixels and mirrored by `.tl-track-name` and `.tl-ruler` in the
+ * stylesheet, because the playhead and the auto-scroll both have to land on
+ * the same pixel as the lanes, and a rem would make that depend on the root
+ * font size at runtime.
+ */
+const LABEL_W = 104;
 const ZOOMS = [0.5, 1, 2, 4];
 
 function clock(ms: number): string {
@@ -73,6 +85,7 @@ export function TimelinePanel({
   onPickMusic,
   beds,
   subtitles,
+  musicUrl,
   opening,
   children,
 }: Props) {
@@ -87,6 +100,8 @@ export function TimelinePanel({
   const [head, setHead] = useState(0);
   const video = useRef<HTMLVideoElement | null>(null);
   const voice = useRef<HTMLAudioElement | null>(null);
+  const music = useRef<HTMLAudioElement | null>(null);
+  const scroller = useRef<HTMLDivElement | null>(null);
   const startedAt = useRef<{ wall: number; head: number } | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   // `insertAt` is a gap index, not a shot: "before the shot at this index".
@@ -162,25 +177,93 @@ export function TimelinePanel({
     return () => cancelAnimationFrame(frame);
   }, [playing, total]);
 
-  // Keep the picture and the voice pointed at wherever the playhead is.
+  // Keep the picture, the voice and the music pointed at wherever the playhead
+  // is, and each at the level its track is set to.
+  //
+  // Three elements rather than one mixed stream, because the point of this
+  // viewer is to judge the balance between them: the levels have to be
+  // audible as they are changed, without re-rendering anything.
   useEffect(() => {
     const cur = at(head);
     const v = video.current;
-    if (!v || !cur) return;
-    const clip = byId.get(cur.shot.sourceClipId);
-    const src = clip?.sourcePath ? audioUrl(clip.sourcePath) : "";
-    if (src && !v.src.endsWith(encodeURI(clip!.sourcePath!).split("/").pop() ?? "")) {
-      v.src = src;
+    const a = voice.current;
+    const m = music.current;
+
+    if (v && cur) {
+      const clip = byId.get(cur.shot.sourceClipId);
+      const src = clip?.sourcePath ? audioUrl(clip.sourcePath) : "";
+      if (src && !v.src.endsWith(encodeURI(clip!.sourcePath!).split("/").pop() ?? "")) {
+        v.src = src;
+      }
+      // Where in the source file this moment falls. A slowed shot advances
+      // through its source more slowly than the playhead advances through the
+      // film, which is what the stretch accounts for.
+      const want = (cur.shot.sourceInMs + cur.into) / 1000;
+      if (Math.abs(v.currentTime - want) > 0.35) v.currentTime = want;
+      // The clip's own sound, at the level this shot asks for. Muted rather
+      // than left at zero volume as well, because a muted element is what
+      // lets it play at all before the user has touched the page.
+      // The renderer's own rule, so the preview cannot disagree with the file.
+      const gain = shotGain(cur.shot, doc.originalAudio);
+      v.volume = Math.min(1, Math.max(0, gain));
+      v.muted = gain <= 0;
+      if (playing && v.paused) void v.play().catch(() => setPlaying(false));
+      if (!playing && !v.paused) v.pause();
     }
-    // Where in the source file this moment falls. A slowed shot advances
-    // through its source more slowly than the playhead advances through the
-    // film, which is what the stretch accounts for.
-    const want = (cur.shot.sourceInMs + cur.into) / 1000;
-    if (Math.abs(v.currentTime - want) > 0.35) v.currentTime = want;
-    if (playing && v.paused) void v.play().catch(() => setPlaying(false));
-    if (!playing && !v.paused) v.pause();
+
+    // The narration. One recording per line, so the element is moved from line
+    // to line exactly as the picture is, and seeked to how far into this one
+    // the playhead has reached.
+    if (a) {
+      const path = cur?.shot.audioPath;
+      if (!path) {
+        if (!a.paused) a.pause();
+      } else {
+        const src = audioUrl(path);
+        if (a.src !== src) a.src = src;
+        const want = cur!.into / 1000;
+        if (Math.abs(a.currentTime - want) > 0.35) a.currentTime = want;
+        a.volume = 1;
+        if (playing && a.paused) void a.play().catch(() => {});
+        if (!playing && !a.paused) a.pause();
+      }
+    }
+
+    // The music runs under the whole film, so it is seeked to the playhead
+    // itself rather than to a position within a shot.
+    if (m) {
+      const on = doc.music.enabled && hasMusic(doc.music) && musicUrl !== null;
+      m.volume = on ? Math.min(1, Math.max(0, doc.music.gain)) : 0;
+      m.muted = !on;
+      if (on) {
+        const want = head / 1000;
+        if (Math.abs(m.currentTime - want) > 0.5) m.currentTime = want;
+        if (playing && m.paused) void m.play().catch(() => {});
+      }
+      if ((!playing || !on) && !m.paused) m.pause();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [head, playing]);
+  }, [head, playing, doc.originalAudio, doc.music, musicUrl]);
+
+  /**
+   * Keep the playhead in view while it moves.
+   *
+   * A timeline that does not follow the play is a timeline you cannot use to
+   * find the moment you are listening to — which is the whole reason to play
+   * it here rather than watch the finished file. Nudged only when the head
+   * approaches an edge, so a still playhead never drags the view around under
+   * somebody who is reading it.
+   */
+  useEffect(() => {
+    const el = scroller.current;
+    if (!el || !playing) return;
+    const x = LABEL_W + (head / 1000) * pps;
+    const left = el.scrollLeft;
+    const right = left + el.clientWidth;
+    if (x < left + el.clientWidth * 0.15 || x > right - el.clientWidth * 0.15) {
+      el.scrollTo({ left: Math.max(0, x - el.clientWidth * 0.4), behavior: "auto" });
+    }
+  }, [head, playing, pps]);
 
   function toggle() {
     if (playing) {
@@ -188,12 +271,44 @@ export function TimelinePanel({
       startedAt.current = null;
       video.current?.pause();
       voice.current?.pause();
+      music.current?.pause();
     } else {
       startedAt.current = { wall: performance.now(), head: head >= total ? 0 : head };
       if (head >= total) setHead(0);
       setPlaying(true);
+      // Started here, inside the gesture, rather than left to the effect that
+      // runs after it. A webview grants permission to play audio to the click,
+      // and an effect a frame later is not the click — which would leave the
+      // narration silent while the picture ran, the exact complaint this
+      // viewer exists to answer.
+      void video.current?.play().catch(() => {});
+      void voice.current?.play().catch(() => {});
+      if (doc.music.enabled && hasMusic(doc.music)) {
+        void music.current?.play().catch(() => {});
+      }
     }
   }
+
+  /**
+   * Space plays and pauses, as it does in every editor.
+   *
+   * Ignored while typing, so renaming a project does not start the film.
+   */
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.code !== "Space" && e.key !== " ") return;
+      const el = e.target as HTMLElement | null;
+      const tag = el?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || el?.isContentEditable) return;
+      // Buttons answer to space themselves, and taking it from them would
+      // break the transport controls sitting right above the timeline.
+      if (tag === "BUTTON") return;
+      e.preventDefault();
+      toggle();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
 
   const ticks: number[] = [];
   for (let t = 0; t <= total; t += total > 120_000 ? 30_000 : total > 30_000 ? 10_000 : 5_000) {
@@ -250,6 +365,11 @@ export function TimelinePanel({
       <div className="tl-viewer">
         <div className="tl-stage">
           <video ref={video} className="tl-video" playsInline />
+          {/* The narration and the music, played alongside the picture rather
+              than mixed into it, so their levels can be judged by ear while
+              they are being set. Never shown: the transport above drives them. */}
+          <audio ref={voice} preload="auto" />
+          <audio ref={music} preload="auto" loop src={musicUrl ?? undefined} />
           {subtitles && underHead && (
             <div
               className="tl-caption"
@@ -307,13 +427,13 @@ export function TimelinePanel({
         </div>
       )}
 
-      <div className="tl-scroll">
+      <div className="tl-scroll" ref={scroller}>
         <div className="tl-inner" style={{ width }}>
           {/* Where the viewer above is, drawn across every track. */}
           {total > 0 && (
             <span
               className="tl-head"
-              style={{ left: `calc(6.5rem + ${(head / 1000) * pps}px)` }}
+              style={{ left: `${LABEL_W + (head / 1000) * pps}px` }}
               aria-hidden="true"
             />
           )}

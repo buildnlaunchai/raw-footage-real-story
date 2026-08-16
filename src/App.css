@@ -3495,7 +3495,7 @@ kbd {
 .tl-ruler {
   position: relative;
   height: 1.5rem;
-  margin-left: 6.5rem;
+  margin-left: 104px;
   border-bottom: 1px solid var(--line);
 }
 
@@ -3521,7 +3521,7 @@ kbd {
 }
 
 .tl-track-name {
-  width: 6.5rem;
+  width: 104px;
   flex: none;
   font-size: 0.72rem;
   letter-spacing: 0.06em;

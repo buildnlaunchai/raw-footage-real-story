@@ -402,6 +402,8 @@ function App() {
   const [crossfadeMs] = useState(0);
   const [timelineDoc, setTimelineDoc] = useState<TimelineDoc>(DEFAULT_TIMELINE);
   const [planned, setPlanned] = useState<PlannedShot[]>([]);
+  /** The music track as a URL the viewer can play. */
+  const [musicUrl, setMusicUrl] = useState<string | null>(null);
 
   const projectId = manifest?.project.id ?? null;
 
@@ -1248,15 +1250,20 @@ function App() {
     void planTimeline(clipSpecs, voiced, { segmentStarts: starts, sourceClipIds: swaps })
       .then((items) => {
         if (cancelled) return;
-        const textFor = new Map(voiced.map((v) => [`${v.clipId}#${v.segmentIndex}`, v.text]));
+        const byKey = new Map(voiced.map((v) => [`${v.clipId}#${v.segmentIndex}`, v]));
         setPlanned(
-          items.map((i) => ({
-            clipId: i.clipId,
-            segmentIndex: i.segmentIndex,
-            durationMs: i.timelineDurationMs,
-            sourceInMs: i.sourceInMs,
-            text: textFor.get(`${i.clipId}#${i.segmentIndex}`) ?? "",
-          })),
+          items.map((i) => {
+            const line = byKey.get(`${i.clipId}#${i.segmentIndex}`);
+            return {
+              clipId: i.clipId,
+              segmentIndex: i.segmentIndex,
+              durationMs: i.timelineDurationMs,
+              sourceInMs: i.sourceInMs,
+              text: line?.text ?? "",
+              // Carried so the viewer can play the line rather than miming it.
+              audioPath: line?.audioPath,
+            };
+          }),
         );
       })
       .catch(() => {
@@ -1266,6 +1273,30 @@ function App() {
       cancelled = true;
     };
   }, [voiced, manifest, timelineDoc.edits]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const { path, bedId } = timelineDoc.music;
+    if (path) {
+      setMusicUrl(audioUrl(path));
+      return;
+    }
+    if (!bedId) {
+      setMusicUrl(null);
+      return;
+    }
+    void resolveResource(`resources/music/${bedId}.m4a`)
+      .then((p) => {
+        if (!cancelled) setMusicUrl(convertFileSrc(p));
+      })
+      .catch(() => {
+        if (!cancelled) setMusicUrl(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [timelineDoc.music.path, timelineDoc.music.bedId]);
+
 
   // --- assembly ------------------------------------------------------------
 
@@ -2360,6 +2391,7 @@ function App() {
                   onRender={() => void onRender()}
                   onPickMusic={() => void onPickMusic()}
                   beds={MUSIC_BEDS}
+                  musicUrl={musicUrl}
                   subtitles={timelineDoc.subtitles ? timelineDoc.subtitleStyle : null}
                   opening={{
                     enabled: introEnabled,
