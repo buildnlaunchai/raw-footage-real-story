@@ -159,3 +159,48 @@ export function lengthInstruction(wordCount: number, lang: ScriptLanguage): stri
     ? `about ${target} characters`
     : `about ${target} words`;
 }
+
+/**
+ * Which language a script is actually written in, read from the text.
+ *
+ * The stored language code is a separate piece of state and it can be wrong.
+ * It was: it did not survive a save, so a Bengali project reopened as English
+ * — and English is the one language the local voice *does* support, so the
+ * guard that should have moved narration to a cloud voice never fired. Kokoro
+ * then read Bengali through an English phoneme lexicon, which produces sound
+ * but not speech.
+ *
+ * The captions already work this way, for the same reason and after the same
+ * bug. The text cannot be wrong about what it is.
+ *
+ * Returns null for text with no strong signal — an empty script, or one that
+ * is only digits and punctuation — so the caller keeps whatever was chosen.
+ */
+export function detectLanguage(text: string): string | null {
+  const counts = new Map<string, number>();
+  for (const ch of text) {
+    const c = ch.codePointAt(0)!;
+    let code: string | null = null;
+    if (c >= 0x0980 && c <= 0x09ff) code = "bn";
+    else if (c >= 0x0900 && c <= 0x097f) code = "hi";
+    else if ((c >= 0x0600 && c <= 0x06ff) || (c >= 0x0750 && c <= 0x077f)) code = "ar";
+    else if (c >= 0x0e00 && c <= 0x0e7f) code = "th";
+    else if (c >= 0x3040 && c <= 0x30ff) code = "ja";
+    else if ((c >= 0xac00 && c <= 0xd7af) || (c >= 0x1100 && c <= 0x11ff)) code = "ko";
+    else if ((c >= 0x4e00 && c <= 0x9fff) || (c >= 0x3400 && c <= 0x4dbf)) code = "zh";
+    else if ((c >= 0x41 && c <= 0x5a) || (c >= 0x61 && c <= 0x7a)) code = "en";
+    if (code) counts.set(code, (counts.get(code) ?? 0) + 1);
+  }
+  let best: string | null = null;
+  let most = 0;
+  for (const [code, n] of counts) {
+    if (n > most) {
+      most = n;
+      best = code;
+    }
+  }
+  // A handful of Latin letters inside a Bengali script is a place name, not a
+  // change of language; and nothing at all is not an answer.
+  if (!best || most < 3) return null;
+  return LANGUAGES.some((l) => l.code === best) ? best : null;
+}

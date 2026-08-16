@@ -28,6 +28,7 @@ import {
   type Shot,
   type TimelineDoc,
 } from "../lib/timeline";
+import { loopPosition, seekTarget } from "../lib/playback";
 import { formatSpan } from "../lib/library";
 import { audioUrl } from "../lib/voiceover";
 import type { ProjectClip } from "../lib/project";
@@ -70,6 +71,14 @@ const BASE_PPS = 26;
 const LABEL_W = 104;
 const ZOOMS = [0.5, 1, 2, 4];
 
+const clamp01 = (n: number) => Math.min(1, Math.max(0, n));
+
+/** Apply the seek rule to a real element. */
+function seekTo(el: HTMLMediaElement, seconds: number) {
+  const to = seekTarget(el.currentTime, seconds, el.duration);
+  if (to !== null) el.currentTime = to;
+}
+
 function clock(ms: number): string {
   const t = Math.max(0, Math.round(ms / 1000));
   return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, "0")}`;
@@ -102,6 +111,17 @@ export function TimelinePanel({
   const voice = useRef<HTMLAudioElement | null>(null);
   const music = useRef<HTMLAudioElement | null>(null);
   const scroller = useRef<HTMLDivElement | null>(null);
+  const playhead = useRef<HTMLSpanElement | null>(null);
+  /**
+   * Where the playhead really is.
+   *
+   * The state below is a throttled copy for anything React draws. This is the
+   * truth, updated every frame, so the players are never pointed at a position
+   * that is a tenth of a second stale.
+   */
+  const headRef = useRef(0);
+  /** Bumped whenever something happens that the players must be told about. */
+  const [syncSeq, setSyncSeq] = useState(0);
   const startedAt = useRef<{ wall: number; head: number } | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   // `insertAt` is a gap index, not a shot: "before the shot at this index".
@@ -120,6 +140,8 @@ export function TimelinePanel({
   const current = selected ? shots.find((s) => s.key === selected) : undefined;
   /** The shot under the playhead, for the caption preview. */
   const underHead = at(head)?.shot;
+  /** Its identity, which is what the players actually react to. */
+  const shotUnderHead = underHead?.key ?? null;
 
   function edit(key: string, patch: Parameters<typeof withEdit>[2]) {
     onChange(withEdit(doc, key, patch));
@@ -154,37 +176,86 @@ export function TimelinePanel({
     return null;
   }
 
-  // The clock. One rAF loop advances the playhead from wall time rather than
-  // from the video element, because the video is swapped at every cut and its
-  // own currentTime restarts each time.
+  /**
+   * The clock.
+   *
+   * One rAF loop advances the playhead from wall time rather than from the
+   * video element, because the video is swapped at every cut and its own
+   * currentTime restarts each time.
+   *
+   * The position is written straight to the DOM and only *occasionally* into
+   * React state. Re-rendering this panel sixty times a second re-runs the
+   * edits over every shot and rebuilds every lane, which on a ten-minute film
+   * is enough to make scrolling stutter and the window feel stuck. The line
+   * moves every frame; the clock and the caption catch up ten times a second,
+   * which is faster than anybody reads them.
+   */
   useEffect(() => {
     if (!playing) return;
     let frame = 0;
+    let lastPublished = -1;
+    let lastShot = at(headRef.current)?.shot.key ?? null;
     const tick = () => {
       const s = startedAt.current;
       if (s) {
-        const now = s.head + (performance.now() - s.wall);
+        const now = Math.min(total, s.head + (performance.now() - s.wall));
+        headRef.current = now;
+        paint(now);
+        // A cut is published the moment it happens rather than at the next
+        // tenth of a second, because that is when the narration has to change
+        // over. Everything else can wait for the throttle.
+        const shot = at(now)?.shot.key ?? null;
+        if (shot !== lastShot || Math.abs(now - lastPublished) >= 100) {
+          lastShot = shot;
+          lastPublished = now;
+          setHead(now);
+        }
         if (now >= total) {
           setPlaying(false);
           setHead(total);
-        } else {
-          setHead(now);
+          return;
         }
       }
       frame = requestAnimationFrame(tick);
     };
     frame = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(frame);
-  }, [playing, total]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playing, total, pps]);
 
-  // Keep the picture, the voice and the music pointed at wherever the playhead
-  // is, and each at the level its track is set to.
-  //
-  // Three elements rather than one mixed stream, because the point of this
-  // viewer is to judge the balance between them: the levels have to be
-  // audible as they are changed, without re-rendering anything.
+  /** Move the playhead line and follow it, without going through React. */
+  function paint(ms: number) {
+    const x = LABEL_W + (ms / 1000) * pps;
+    const line = playhead.current;
+    if (line) line.style.left = `${x}px`;
+    const el = scroller.current;
+    if (!el) return;
+    // Nudged only near an edge, so a playhead sitting still never drags the
+    // view out from under somebody reading it.
+    const left = el.scrollLeft;
+    const right = left + el.clientWidth;
+    if (x < left + el.clientWidth * 0.15 || x > right - el.clientWidth * 0.15) {
+      el.scrollLeft = Math.max(0, x - el.clientWidth * 0.4);
+    }
+  }
+
+  /**
+   * Point every player at the playhead and start or stop it.
+   *
+   * Deliberately *not* run per frame. It used to be, and the music paid for
+   * it: the track is shorter than the film, so seeking it to the playhead's
+   * position asked for a moment past the end of the file, the element clamped,
+   * the drift never closed, and it seeked again on the very next frame —
+   * sixty times a second, through a twenty-six megabyte wav. The app locked
+   * up and the music was never heard, because it never played for longer than
+   * a frame at a time.
+   *
+   * So this runs when something discrete happens: the shot changes, playback
+   * starts or stops, or somebody scrubs. Between those the players are left
+   * alone to run, which is what they are good at.
+   */
   useEffect(() => {
-    const cur = at(head);
+    const cur = at(headRef.current);
     const v = video.current;
     const a = voice.current;
     const m = music.current;
@@ -198,22 +269,13 @@ export function TimelinePanel({
       // Where in the source file this moment falls. A slowed shot advances
       // through its source more slowly than the playhead advances through the
       // film, which is what the stretch accounts for.
-      const want = (cur.shot.sourceInMs + cur.into) / 1000;
-      if (Math.abs(v.currentTime - want) > 0.35) v.currentTime = want;
-      // The clip's own sound, at the level this shot asks for. Muted rather
-      // than left at zero volume as well, because a muted element is what
-      // lets it play at all before the user has touched the page.
-      // The renderer's own rule, so the preview cannot disagree with the file.
-      const gain = shotGain(cur.shot, doc.originalAudio);
-      v.volume = Math.min(1, Math.max(0, gain));
-      v.muted = gain <= 0;
+      seekTo(v, (cur.shot.sourceInMs + cur.into) / 1000);
       if (playing && v.paused) void v.play().catch(() => setPlaying(false));
       if (!playing && !v.paused) v.pause();
     }
 
     // The narration. One recording per line, so the element is moved from line
-    // to line exactly as the picture is, and seeked to how far into this one
-    // the playhead has reached.
+    // to line exactly as the picture is.
     if (a) {
       const path = cur?.shot.audioPath;
       if (!path) {
@@ -221,61 +283,82 @@ export function TimelinePanel({
       } else {
         const src = audioUrl(path);
         if (a.src !== src) a.src = src;
-        const want = cur!.into / 1000;
-        if (Math.abs(a.currentTime - want) > 0.35) a.currentTime = want;
-        a.volume = 1;
+        // A slot is longer than the line spoken in it — there is a beat after
+        // the words. Past the end of the recording there is nothing to seek
+        // to, and asking anyway is what jams a media element.
+        seekTo(a, cur!.into / 1000);
         if (playing && a.paused) void a.play().catch(() => {});
         if (!playing && !a.paused) a.pause();
       }
     }
 
-    // The music runs under the whole film, so it is seeked to the playhead
-    // itself rather than to a position within a shot.
+    // The music runs under the whole film and loops, so where it should be is
+    // the playhead wrapped by its own length — not the playhead itself.
     if (m) {
       const on = doc.music.enabled && hasMusic(doc.music) && musicUrl !== null;
-      m.volume = on ? Math.min(1, Math.max(0, doc.music.gain)) : 0;
-      m.muted = !on;
       if (on) {
-        const want = head / 1000;
-        if (Math.abs(m.currentTime - want) > 0.5) m.currentTime = want;
+        seekTo(m, loopPosition(headRef.current / 1000, m.duration));
         if (playing && m.paused) void m.play().catch(() => {});
       }
       if ((!playing || !on) && !m.paused) m.pause();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [head, playing, doc.originalAudio, doc.music, musicUrl]);
+  }, [shotUnderHead, playing, syncSeq, musicUrl]);
 
   /**
-   * Keep the playhead in view while it moves.
+   * Levels, which change on their own and must not drag a seek along with them.
    *
-   * A timeline that does not follow the play is a timeline you cannot use to
-   * find the moment you are listening to — which is the whole reason to play
-   * it here rather than watch the finished file. Nudged only when the head
-   * approaches an edge, so a still playhead never drags the view around under
-   * somebody who is reading it.
+   * Separate from the effect above so that dragging a fader while the film
+   * plays adjusts the volume and nothing else — that is the entire point of
+   * being able to hear it here.
    */
   useEffect(() => {
-    const el = scroller.current;
-    if (!el || !playing) return;
-    const x = LABEL_W + (head / 1000) * pps;
-    const left = el.scrollLeft;
-    const right = left + el.clientWidth;
-    if (x < left + el.clientWidth * 0.15 || x > right - el.clientWidth * 0.15) {
-      el.scrollTo({ left: Math.max(0, x - el.clientWidth * 0.4), behavior: "auto" });
+    const cur = at(headRef.current);
+    const v = video.current;
+    if (v && cur) {
+      // The renderer's own rule, so the preview cannot disagree with the file.
+      const gain = shotGain(cur.shot, doc.originalAudio);
+      v.volume = clamp01(gain);
+      v.muted = gain <= 0;
     }
-  }, [head, playing, pps]);
+    if (voice.current) voice.current.volume = 1;
+    const m = music.current;
+    if (m) {
+      const on = doc.music.enabled && hasMusic(doc.music) && musicUrl !== null;
+      m.volume = on ? clamp01(doc.music.gain) : 0;
+      m.muted = !on;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shotUnderHead, doc.originalAudio, doc.music, musicUrl]);
+
+  /** Move the playhead, and tell the players about it. */
+  function seek(ms: number) {
+    const at = Math.max(0, Math.min(total, ms));
+    headRef.current = at;
+    setHead(at);
+    paint(at);
+    startedAt.current = { wall: performance.now(), head: at };
+    setSyncSeq((n) => n + 1);
+  }
 
   function toggle() {
     if (playing) {
       setPlaying(false);
       startedAt.current = null;
+      // The state copy lags the real position by up to a tenth of a second;
+      // catch it up so the line does not jump back when the frame-by-frame
+      // painting stops.
+      setHead(headRef.current);
       video.current?.pause();
       voice.current?.pause();
       music.current?.pause();
     } else {
-      startedAt.current = { wall: performance.now(), head: head >= total ? 0 : head };
-      if (head >= total) setHead(0);
+      const from = headRef.current >= total ? 0 : headRef.current;
+      headRef.current = from;
+      setHead(from);
+      startedAt.current = { wall: performance.now(), head: from };
       setPlaying(true);
+      setSyncSeq((n) => n + 1);
       // Started here, inside the gesture, rather than left to the effect that
       // runs after it. A webview grants permission to play audio to the click,
       // and an effect a frame later is not the click — which would leave the
@@ -292,7 +375,8 @@ export function TimelinePanel({
   /**
    * Space plays and pauses, as it does in every editor.
    *
-   * Ignored while typing, so renaming a project does not start the film.
+   * Ignored while typing, so renaming a project does not start the film, and
+   * left alone over a button, which answers to space itself.
    */
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -300,15 +384,14 @@ export function TimelinePanel({
       const el = e.target as HTMLElement | null;
       const tag = el?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || el?.isContentEditable) return;
-      // Buttons answer to space themselves, and taking it from them would
-      // break the transport controls sitting right above the timeline.
       if (tag === "BUTTON") return;
       e.preventDefault();
       toggle();
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playing, total, doc.music.enabled, doc.music.path, doc.music.bedId]);
 
   const ticks: number[] = [];
   for (let t = 0; t <= total; t += total > 120_000 ? 30_000 : total > 30_000 ? 10_000 : 5_000) {
@@ -395,7 +478,7 @@ export function TimelinePanel({
             onClick={() => {
               setPlaying(false);
               startedAt.current = null;
-              setHead(0);
+              seek(0);
             }}
             title="Back to the start"
           >
@@ -408,11 +491,7 @@ export function TimelinePanel({
             max={Math.max(1, total)}
             value={Math.min(head, total)}
             aria-label="Playhead"
-            onChange={(e) => {
-              const v = Number(e.currentTarget.value);
-              setHead(v);
-              startedAt.current = { wall: performance.now(), head: v };
-            }}
+            onChange={(e) => seek(Number(e.currentTarget.value))}
           />
           <span className="tl-clock">
             {clock(head)} / {clock(total)}
@@ -432,6 +511,7 @@ export function TimelinePanel({
           {/* Where the viewer above is, drawn across every track. */}
           {total > 0 && (
             <span
+              ref={playhead}
               className="tl-head"
               style={{ left: `${LABEL_W + (head / 1000) * pps}px` }}
               aria-hidden="true"
@@ -449,9 +529,7 @@ export function TimelinePanel({
             tabIndex={-1}
             onPointerDown={(e) => {
               const r = e.currentTarget.getBoundingClientRect();
-              const ms = Math.max(0, Math.min(total, ((e.clientX - r.left) / pps) * 1000));
-              setHead(ms);
-              startedAt.current = { wall: performance.now(), head: ms };
+              seek(((e.clientX - r.left) / pps) * 1000);
             }}
           >
             {ticks.map((t) => (

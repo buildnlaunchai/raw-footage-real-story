@@ -3,6 +3,7 @@
 // a hole at 12s would become a hole in the cut.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { detectLanguage } from "../.test-build/lib/languages.js";
 import {
   initialSegments,
   isContiguous,
@@ -75,4 +76,17 @@ test("an out-of-range index changes nothing", () => {
   const before = twoMoments();
   assert.deepEqual(removeAt(before, 9), before);
   assert.deepEqual(removeAt(before, -1), before);
+});
+
+test("a script's language is read from the script, not from a setting", () => {
+  // The setting did not survive a save, so a Bengali project reopened as
+  // English — the one language the local voice supports — and Kokoro read
+  // Bengali through an English lexicon.
+  assert.equal(detectLanguage("বিকেল চারটার দিকে আমরা বাড়ি থেকে বের হলাম"), "bn");
+  assert.equal(detectLanguage("We left the house at about four in the afternoon"), "en");
+  // A place name in Latin letters does not make a Bengali script English.
+  assert.equal(detectLanguage("আমরা Chattogram চিড়িয়াখানায় গেলাম আজকে"), "bn");
+  // Nothing to go on: the caller keeps whatever was chosen.
+  assert.equal(detectLanguage(""), null);
+  assert.equal(detectLanguage("123 — 456"), null);
 });

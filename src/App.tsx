@@ -75,7 +75,7 @@ import {
   type ProjectFile,
 } from "./lib/project";
 import type { Segment } from "./lib/segments";
-import { DEFAULT_LANGUAGE, languageFor } from "./lib/languages";
+import { DEFAULT_LANGUAGE, detectLanguage, languageFor } from "./lib/languages";
 import {
   type QualityTier,
   type ScriptProviderId,
@@ -525,7 +525,21 @@ function App() {
     onRecord: () => void onRecordHook(),
   };
 
-  const scriptLanguage = languageFor(language);
+  /**
+   * The language the narration will actually be spoken in.
+   *
+   * Read from the script itself where there is a script to read, because the
+   * stored code is separate state and has been wrong: it did not survive a
+   * save, so a Bengali project reopened as English — the one language the
+   * local voice does support — and the guard below never fired. Kokoro then
+   * read Bengali through an English phoneme lexicon, which makes sound and not
+   * speech. The captions were moved onto the text for the same reason.
+   */
+  const spokenLanguage = useMemo(
+    () => detectLanguage((lines ?? []).map((l) => l.text).join(" ")) ?? language,
+    [lines, language],
+  );
+  const scriptLanguage = languageFor(spokenLanguage);
 
   // Kokoro plus an English lexicon is English-only. Rather than let someone
   // reach a silent failure, the provider moves and the reason is stated.
@@ -1141,7 +1155,7 @@ function App() {
     setPreviewing(true);
     setTtsError(null);
     try {
-      const sample = await provider.preview(voice, lines?.[0]?.text, language);
+      const sample = await provider.preview(voice, lines?.[0]?.text, spokenLanguage);
       await new Audio(audioUrl(sample.audioPath)).play();
     } catch (err) {
       setTtsError(errorText(err));
@@ -1398,7 +1412,7 @@ function App() {
           ? timelineDoc.originalAudio.gain
           : 0,
         soundGains: soundGains(shots, timelineDoc.originalAudio),
-        language,
+        language: spokenLanguage,
         captions,
         captionBox: captionBox ?? undefined,
         subtitleStyle: {
