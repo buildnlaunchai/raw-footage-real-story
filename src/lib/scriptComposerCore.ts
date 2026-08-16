@@ -94,6 +94,14 @@ export type GenerateFn = (args: {
    * the thing the viewer actually hears, so it earns the slower model.
    */
   tier?: "fast" | "quality";
+  /**
+   * Roughly how many words this call is being asked for.
+   *
+   * Only a hint about how long to wait. A cloud request returns nothing until
+   * it returns everything, so the wait covers the whole generation, and a long
+   * script needs longer than a title.
+   */
+  words?: number;
 }) => Promise<string>;
 
 export const NUM_CTX = 8192;
@@ -916,6 +924,13 @@ export async function writeScript(
 
   const raw = await generate({
     ...base,
+    // The one call that writes the whole script, and so the one that can
+    // outrun a fixed wait: fifteen hundred words of Bengali is five thousand
+    // output tokens before a reasoning model has thought about anything. The
+    // selection passes above stay on the default, because they are short and
+    // run many times, and a generous ceiling there only means a stuck request
+    // takes longer to admit it.
+    words: options.wordCount,
     system: options.instructions?.trim() || writeSystemFor(lang),
     format: SCRIPT_SCHEMA,
     prompt:

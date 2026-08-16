@@ -66,6 +66,14 @@ export interface GenerateArgs {
   seed?: number;
   numCtx?: number;
   tier?: "fast" | "quality";
+  /**
+   * Roughly how many words are being asked for.
+   *
+   * Only used to decide how long to wait. A cloud request returns nothing
+   * until it returns everything, so the wait is a ceiling on the whole
+   * generation, and a long script needs a longer one than a title does.
+   */
+  words?: number;
 }
 
 export interface ScriptProvider {
@@ -162,7 +170,7 @@ export function makeGenerateFn(
     };
   }
 
-  return async ({ tier: t, numCtx: _numCtx, ...args }) => {
+  return async ({ tier: t, numCtx: _numCtx, words, ...args }) => {
     const model = t === "quality" ? OPENAI_MODELS[tier] : OPENAI_MODELS.fast;
     try {
       const result = await invoke<{ text: string; usage: TokenUsage }>("openai_generate", {
@@ -174,6 +182,7 @@ export function makeGenerateFn(
         // rather than ignoring them. See supportsSampling.
         temperature: null,
         seed: null,
+        words: words ?? null,
       });
       meter?.add(result.usage);
       return result.text;

@@ -14,7 +14,30 @@ const API: &str = "https://api.openai.com/v1/responses";
 
 /// A frontier model writing a few hundred words is not fast, and a 300-clip
 /// selection run is many calls; this only guards against a hung connection.
+/// How long to wait when the caller has no opinion.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Never wait less than this, however small the job looks.
+const MIN_TIMEOUT_SECS: u64 = 180;
+/// Never wait longer than this, however large. Past a quarter of an hour
+/// something has gone wrong that waiting will not fix.
+const MAX_TIMEOUT_SECS: u64 = 900;
+
+/// The wait a request of this size deserves.
+///
+/// A flat three minutes was fine for a title and far too short for a script:
+/// fifteen hundred words of Bengali is five thousand output tokens or more
+/// before the model has thought about anything, and these are reasoning
+/// models. The request died at three minutes, having very likely been
+/// generated and billed on the other end.
+///
+/// The whole response arrives at once — nothing streams — so this is a ceiling
+/// on the total, not on silence between bytes.
+fn timeout_for(words: Option<u32>) -> Duration {
+    let Some(w) = words else { return REQUEST_TIMEOUT };
+    let secs = 60 + (u64::from(w) * 3) / 10;
+    Duration::from_secs(secs.clamp(MIN_TIMEOUT_SECS, MAX_TIMEOUT_SECS))
+}
 
 #[derive(Debug, Serialize)]
 pub struct OpenAiError {
@@ -159,8 +182,10 @@ pub async fn openai_generate(
     format: Option<serde_json::Value>,
     temperature: Option<f32>,
     seed: Option<i64>,
+    // Roughly how many words are being asked for, so the wait can match.
+    words: Option<u32>,
 ) -> Result<OpenAiResult, OpenAiError> {
-    generate_with_key(key()?, model, prompt, system, format, temperature, seed).await
+    generate_with_key(key()?, model, prompt, system, format, temperature, seed, words).await
 }
 
 /// The request itself, with the credential handed in rather than looked up.
@@ -182,9 +207,10 @@ async fn generate_with_key(
     format: Option<serde_json::Value>,
     temperature: Option<f32>,
     seed: Option<i64>,
+    words: Option<u32>,
 ) -> Result<OpenAiResult, OpenAiError> {
     let client = reqwest::Client::builder()
-        .timeout(REQUEST_TIMEOUT)
+        .timeout(timeout_for(words))
         .build()
         .map_err(|e| OpenAiError::new("CLIENT_INIT", e.to_string()))?;
 
@@ -234,7 +260,12 @@ async fn generate_with_key(
         .await
         .map_err(|e| {
             if e.is_timeout() {
-                OpenAiError::new("TIMEOUT", "OpenAI took too long to respond.")
+                OpenAiError::new(
+                    "TIMEOUT",
+                    "OpenAI took too long to respond. A long script in a language \
+                     that needs many tokens can outrun the wait — try a shorter \
+                     one, or the faster model tier.",
+                )
             } else if e.is_connect() {
                 OpenAiError::new("NETWORK", "Couldn't reach OpenAI. Check your connection.")
             } else {
@@ -357,6 +388,8 @@ pub async fn openai_probe_sampling(model: String) -> Result<serde_json::Value, O
             None,
             Some(0.0),
             Some(7),
+            // A one-word probe; the default wait is more than generous.
+            None,
         )
         .await
         {
@@ -553,6 +586,7 @@ mod param_probe {
                 None,
                 temp,
                 seed,
+                None,
             )
             .await;
             match r {
@@ -590,6 +624,44 @@ mod comparison {
         println!("{}", String::from_utf8_lossy(&out.stdout));
         if !out.status.success() {
             println!("--- stderr ---\n{}", String::from_utf8_lossy(&out.stderr));
+        }
+    }
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+
+    /// The wait has to follow the size of the job.
+    ///
+    /// A flat three minutes was fine for a title and too short for a script:
+    /// a fifteen-hundred-word Bengali script is five thousand output tokens
+    /// or more before a reasoning model has thought about anything, and the
+    /// request died having very likely been generated and billed already.
+    #[test]
+    fn a_longer_script_is_given_longer_to_arrive() {
+        // A title, or anything else that names no length.
+        assert_eq!(timeout_for(None), REQUEST_TIMEOUT);
+
+        // Short jobs keep the floor rather than being rushed.
+        assert_eq!(timeout_for(Some(100)).as_secs(), MIN_TIMEOUT_SECS);
+        assert_eq!(timeout_for(Some(400)).as_secs(), MIN_TIMEOUT_SECS);
+
+        // The length that failed: comfortably past the old flat ceiling.
+        let long = timeout_for(Some(1_500)).as_secs();
+        assert!(long > 180, "1500 words still gets the old three minutes: {long}s");
+        assert_eq!(long, 510);
+
+        // And a bound, because past a quarter of an hour something is wrong
+        // that waiting will not fix.
+        assert_eq!(timeout_for(Some(100_000)).as_secs(), MAX_TIMEOUT_SECS);
+
+        // Never shorter for more work.
+        let mut last = 0;
+        for w in [0, 500, 1_000, 2_000, 5_000] {
+            let secs = timeout_for(Some(w)).as_secs();
+            assert!(secs >= last, "{w} words got less time than fewer words");
+            last = secs;
         }
     }
 }
