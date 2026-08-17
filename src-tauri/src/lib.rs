@@ -1,6 +1,7 @@
 mod readiness;
 mod selftest;
 mod assembly;
+mod auth;
 mod elevenlabs;
 mod assembly_tests;
 mod ffmpeg;
