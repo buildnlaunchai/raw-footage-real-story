@@ -696,12 +696,22 @@ fn reopening_a_project_gives_paths_that_can_be_opened() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("dir");
 
+    // Footage that lives outside the project, written the way the platform
+    // under test writes one. `/Users/...` is *not* absolute on Windows — it
+    // carries no drive letter, so `is_relative()` is true and the resolver
+    // would treat somebody's whole media library as a path inside the project.
+    // The fixture has to speak the local dialect or it tests the wrong thing.
+    #[cfg(windows)]
+    let outside = r"C:\Users\someone\Movies\IMG_1.MOV";
+    #[cfg(not(windows))]
+    let outside = "/Users/someone/Movies/IMG_1.MOV";
+
     let raw = serde_json::json!({
         "schemaVersion": 2,
         "app": { "slug": "raw-footage-real-story", "version": "0.1.0" },
         "project": { "id": "p1", "name": "Trip", "createdAt": NOW, "updatedAt": NOW },
         "clips": [
-            { "id": "c0", "sourcePath": "/Users/someone/Movies/IMG_1.MOV",
+            { "id": "c0", "sourcePath": outside,
               "thumbnailPath": "thumbs/001.jpg", "isPlaceholder": false, "segments": [] }
         ],
         "videos": [{
@@ -734,7 +744,7 @@ fn reopening_a_project_gives_paths_that_can_be_opened() {
     // Footage elsewhere has no base to be relative to; it must not be touched.
     assert_eq!(
         file.clips[0].source_path.as_deref(),
-        Some("/Users/someone/Movies/IMG_1.MOV"),
+        Some(outside),
         "footage outside the project was rewritten",
     );
 }

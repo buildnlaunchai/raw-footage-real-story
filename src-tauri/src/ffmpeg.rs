@@ -976,6 +976,35 @@ pub fn boundary_fades_for_test(settings: &RenderSettings, items: &[RenderItem]) 
     boundary_fades(settings, items)
 }
 
+/// Hand ffmpeg its filtergraph in a file rather than on the command line.
+///
+/// Windows caps a command line at about 32,000 characters. The graph for a
+/// long film is bigger than that on its own: a trim/scale/pad/fps chain per
+/// shot, an audio chain per shot, a concat naming every one of them, and the
+/// caption overlay on top. A 79-clip cut runs to tens of kilobytes, and
+/// `CreateProcess` refuses the whole command with `os error 206` — "the
+/// filename or extension is too long", which names neither the graph nor the
+/// length. macOS never sees it, because its own limit is a megabyte.
+///
+/// `-filter_complex_script` takes a path, so the graph stops counting against
+/// that budget. The file is written beside the video it produced and left
+/// there: it is the exact graph behind that render, which is worth having when
+/// one has to be explained.
+///
+/// The path is an ordinary argument rather than part of the graph, so a colon
+/// in it — a project folder called "Trip: Bangkok" — is safe here in a way it
+/// would not be inside the filtergraph itself.
+fn write_filter_script(out: &Path, filter: &str) -> Result<PathBuf, FfmpegError> {
+    let dir = out.parent().unwrap_or_else(|| Path::new("."));
+    let stem = out.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let path = dir.join(format!("{stem}.filtergraph"));
+    std::fs::write(&path, filter).map_err(|e| {
+        FfmpegError::new("FILTER_SCRIPT", format!("could not write the filter graph: {e}"))
+    })?;
+    Ok(path)
+}
+
+
 /// Assemble the rough cut in a single pass.
 ///
 /// Each input is normalised inline — scaled and letterboxed rather than
@@ -1301,7 +1330,8 @@ pub fn render_rough_cut(
     };
 
     let filter = filter.trim_end_matches(';').to_string();
-    cmd.args(["-filter_complex_threads", "2", "-filter_complex", &filter]);
+    let script = write_filter_script(out, &filter)?;
+    cmd.args(["-filter_complex_threads", "2"]).arg("-filter_complex_script").arg(&script);
     cmd.args([
         "-map", &vout, "-map", &aout,
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
@@ -1496,7 +1526,8 @@ pub fn render_intro(
          apad,atrim=duration={total_s:.3},asetpts=PTS-STARTPTS[outa]"
     ));
 
-    cmd.args(["-filter_complex_threads", "2", "-filter_complex", &filter]);
+    let script = write_filter_script(out, &filter)?;
+    cmd.args(["-filter_complex_threads", "2"]).arg("-filter_complex_script").arg(&script);
     cmd.args(["-map", "[outv]", "-map", "[outa]"]);
     cmd.args(["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p"]);
     cmd.args(["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"]);
