@@ -35,9 +35,9 @@ jobs:
         include: >-
           ${{ fromJSON(
             (github.event_name != 'workflow_dispatch' || inputs.platforms == 'both')
-              && '[{"os":"macos-14","label":"macOS","target":"aarch64-apple-darwin","args":""},{"os":"windows-latest","label":"Windows","target":"","args":""}]'
+              && '[{"os":"macos-14","label":"macOS","target":"universal-apple-darwin","args":"--target universal-apple-darwin"},{"os":"windows-latest","label":"Windows","target":"","args":""}]'
             || inputs.platforms == 'macos'
-              && '[{"os":"macos-14","label":"macOS","target":"aarch64-apple-darwin","args":""}]'
+              && '[{"os":"macos-14","label":"macOS","target":"universal-apple-darwin","args":"--target universal-apple-darwin"}]'
             || '[{"os":"windows-latest","label":"Windows","target":"","args":""}]'
           ) }}
 
@@ -99,8 +99,11 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          # Both halves of the universal binary need their target installed.
-          targets: ""
+          # Both halves of the universal binary need their target installed —
+          # `universal-apple-darwin` is not itself a rustc target, it is the
+          # two real ones stitched together by `lipo`, so asking for it alone
+          # fails at the first `cargo build`.
+          targets: ${{ matrix.label == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
       - uses: swatinem/rust-cache@v2
         with:
@@ -195,10 +198,14 @@ jobs:
           echo "voices: $(ls "$res/kokoro/voices"/*.bin | wc -l | tr -d ' ')"
           [ -f "$res/lexicon/cmudict.dict" ] && [ -f "$res/lexicon/us_gold.json" ]
 
-          # Reported so the limitation is visible in the log rather than
-          # discovered by an Intel user.
-          echo "architectures: $(lipo -archs "$app/Contents/MacOS/raw-footage-real-story")"
-          lipo -archs "$app/Contents/MacOS/raw-footage-real-story" | grep -q arm64
+          # Both halves, asserted rather than reported. An Intel tester who
+          # downloads an arm64-only build gets "the application cannot be
+          # opened", which reads like a broken download and not like a
+          # deliberate limitation — so the build fails here instead.
+          archs=$(lipo -archs "$app/Contents/MacOS/raw-footage-real-story")
+          echo "architectures: $archs"
+          grep -q arm64 <<<"$archs"
+          grep -q x86_64 <<<"$archs"
 
           # Ad-hoc, but well-formed. Without an explicit signing identity the
           # linker's own signature covers the binary and not the bundle, and
