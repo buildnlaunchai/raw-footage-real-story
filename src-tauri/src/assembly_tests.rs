@@ -1753,28 +1753,30 @@ fn a_long_film_with_captions_renders_in_a_gui_sized_process() {
     // descriptor limit in the first place.
     let inputs = CLIPS * 2 + 1;
 
-    // Stand where the app stands. Restored afterwards so the rest of the suite
-    // is unaffected however this ends.
-    let was = ffmpeg::file_limit();
-    ffmpeg::set_file_limit(256);
-    let under_limit = ffmpeg::file_limit();
+    // Stand where the app stands, on the systems where that means anything.
+    // Restored afterwards so the rest of the suite is unaffected however this
+    // ends. See `descriptors` below for why Windows only watches.
+    let cuff = descriptors::constrain();
 
     let out = fx.dir.join("long.mp4");
     let result =
         ffmpeg::render_rough_cut(&fx.ffmpeg, &render_items, &settings, &ffmpeg::FfmpegCaps::default(), &out);
-    let raised = ffmpeg::file_limit();
-    ffmpeg::set_file_limit(was);
+    let raised = descriptors::current();
+    descriptors::restore(cuff);
 
     println!(
-        "\n  {CLIPS} clips + {CAPTIONS} captions (one track) = {inputs} inputs\n  \
-         limit {under_limit} going in, {raised} once the render raised it",
+        "\n  {CLIPS} clips + {CAPTIONS} captions (one track) = {inputs} inputs{}",
+        descriptors::describe(cuff, raised),
     );
-    assert_eq!(under_limit, 256, "the test failed to constrain itself; it proves nothing");
+    // The film has to render everywhere. Only the ceiling it renders under is
+    // a Unix question.
     result.expect("a long captioned film must render in a GUI-sized process");
-    assert!(
-        raised > inputs as u64,
-        "the limit was raised to {raised}, which is not enough for {inputs} inputs",
-    );
+    if let (Some(_), Some(raised)) = (cuff, raised) {
+        assert!(
+            raised > inputs as u64,
+            "the limit was raised to {raised}, which is not enough for {inputs} inputs",
+        );
+    }
 
     let actual = ffmpeg::probe_duration_ms(&fx.ffprobe, &out).expect("probe");
     println!("  {total}ms planned, {actual}ms rendered");
@@ -1903,5 +1905,69 @@ fn one_overlapping_caption_does_not_shift_the_rest_of_the_film() {
             "caption {name} starts at {got}ms, but its cue said {}ms",
             want[i],
         );
+    }
+}
+
+/// Standing a test where a windowed app stands, where that means anything.
+///
+/// macOS hands a GUI app a 256 file-descriptor soft limit, and a long render
+/// opens far more than that; the app raises its own limit before rendering and
+/// the test above proves it. Windows has no equivalent — no `RLIMIT_NOFILE`,
+/// no `setrlimit`, and a per-process handle ceiling in the millions — so there
+/// is nothing to constrain and nothing to raise.
+///
+/// Deliberately *not* a pair of no-op stubs on Windows. A `set_file_limit`
+/// that quietly did nothing, followed by an assertion that the limit is now
+/// 256, would either fail for the wrong reason or — worse, if the getter were
+/// stubbed to agree — report that the process had been constrained when it had
+/// not. A test that cannot fail is not evidence. So on Windows these return
+/// `None`, the assertions that depend on them are skipped by name, and the
+/// render itself is still checked, because a long captioned film has to build
+/// on both platforms.
+mod descriptors {
+    #[cfg(unix)]
+    use crate::ffmpeg;
+
+    /// Drop to the limit a GUI app is given; returns what to put back.
+    pub fn constrain() -> Option<u64> {
+        #[cfg(unix)]
+        {
+            let was = ffmpeg::file_limit();
+            ffmpeg::set_file_limit(256);
+            assert_eq!(
+                ffmpeg::file_limit(),
+                256,
+                "the test failed to constrain itself; it proves nothing",
+            );
+            Some(was)
+        }
+        #[cfg(not(unix))]
+        None
+    }
+
+    pub fn current() -> Option<u64> {
+        #[cfg(unix)]
+        {
+            Some(ffmpeg::file_limit())
+        }
+        #[cfg(not(unix))]
+        None
+    }
+
+    pub fn restore(was: Option<u64>) {
+        #[cfg(unix)]
+        if let Some(w) = was {
+            ffmpeg::set_file_limit(w);
+        }
+        #[cfg(not(unix))]
+        let _ = was;
+    }
+
+    /// What to add to the test's own line of output.
+    pub fn describe(before: Option<u64>, after: Option<u64>) -> String {
+        match (before, after) {
+            (Some(_), Some(after)) => format!("\n  limit 256 going in, {after} once the render raised it"),
+            _ => "\n  no descriptor ceiling on this platform; the render is what is checked".into(),
+        }
     }
 }

@@ -77,23 +77,14 @@ pub struct FfmpegCaps {
 /// inherit it, which is the point — the descriptors are spent by ffmpeg, not
 /// by us.
 ///
-/// Called before a render rather than at startup so it sits next to the reason
-/// it exists, and runs once.
-pub fn raise_file_limit() {
-    #[cfg(unix)]
-    {
-        use std::sync::Once;
-        static ONCE: Once = Once::new();
-        ONCE.call_once(raise_file_limit_now);
-    }
-}
-
-/// The raise itself, without the once-only guard.
+/// Unix only, and not stubbed on Windows: there is no `RLIMIT_NOFILE` there
+/// and no ceiling of this kind to hit, so a stub would only be somewhere for a
+/// caller to be misled. Callers guard the call instead.
 ///
-/// Separate so a test can drop the limit to the 256 a GUI app is given and
-/// watch this put it back — which is the only way to check the fix under the
-/// conditions that produced the bug, since a test process inherits its shell's
-/// generous limit and would pass either way.
+/// Public so a test can drop the limit to the 256 a GUI app is given and watch
+/// this put it back — the only way to check the fix under the conditions that
+/// produced the bug, since a test process inherits its shell's generous limit
+/// and would pass either way.
 #[cfg(unix)]
 pub fn raise_file_limit_now() {
     // Safety: `getrlimit`/`setrlimit` on a resource this process owns, with a
