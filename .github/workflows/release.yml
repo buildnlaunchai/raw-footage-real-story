@@ -35,9 +35,9 @@ jobs:
         include: >-
           ${{ fromJSON(
             (github.event_name != 'workflow_dispatch' || inputs.platforms == 'both')
-              && '[{"os":"macos-14","label":"macOS","target":"universal-apple-darwin","args":"--target universal-apple-darwin"},{"os":"windows-latest","label":"Windows","target":"","args":""}]'
+              && '[{"os":"macos-14","label":"macOS","target":"aarch64-apple-darwin","args":""},{"os":"windows-latest","label":"Windows","target":"","args":""}]'
             || inputs.platforms == 'macos'
-              && '[{"os":"macos-14","label":"macOS","target":"universal-apple-darwin","args":"--target universal-apple-darwin"}]'
+              && '[{"os":"macos-14","label":"macOS","target":"aarch64-apple-darwin","args":""}]'
             || '[{"os":"windows-latest","label":"Windows","target":"","args":""}]'
           ) }}
 
@@ -99,11 +99,9 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          # Both halves of the universal binary need their target installed —
-          # `universal-apple-darwin` is not itself a rustc target, it is the
-          # two real ones stitched together by `lipo`, so asking for it alone
-          # fails at the first `cargo build`.
-          targets: ${{ matrix.label == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+          # Host target only. A universal binary was tried and cannot be built
+          # today — see the architecture check below for why.
+          targets: ""
 
       - uses: swatinem/rust-cache@v2
         with:
@@ -198,14 +196,26 @@ jobs:
           echo "voices: $(ls "$res/kokoro/voices"/*.bin | wc -l | tr -d ' ')"
           [ -f "$res/lexicon/cmudict.dict" ] && [ -f "$res/lexicon/us_gold.json" ]
 
-          # Both halves, asserted rather than reported. An Intel tester who
-          # downloads an arm64-only build gets "the application cannot be
-          # opened", which reads like a broken download and not like a
-          # deliberate limitation — so the build fails here instead.
+          # Apple Silicon only, and not by choice.
+          #
+          # `--target universal-apple-darwin` fails at the x86_64 half:
+          #
+          #   ort-sys@2.0.0-rc.13: no prebuilt binaries available for
+          #   target x86_64-apple-darwin
+          #
+          # The ONNX Runtime binding ships nothing for Intel macOS, so the
+          # speech model cannot be linked there at all. The way out is ort's
+          # `load-dynamic` feature plus a universal onnxruntime dylib built
+          # here with `lipo` — which changes how the model is loaded on every
+          # platform, including the one whose segfault took a day to find. Not
+          # a thing to do quietly.
+          #
+          # Asserted rather than reported, so that if the arm64 half ever
+          # silently stops being built this fails here instead of reaching a
+          # tester as "the application cannot be opened".
           archs=$(lipo -archs "$app/Contents/MacOS/raw-footage-real-story")
-          echo "architectures: $archs"
+          echo "architectures: $archs  (Intel is blocked upstream by ort-sys)"
           grep -q arm64 <<<"$archs"
-          grep -q x86_64 <<<"$archs"
 
           # Ad-hoc, but well-formed. Without an explicit signing identity the
           # linker's own signature covers the binary and not the bundle, and
