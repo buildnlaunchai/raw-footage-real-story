@@ -58,6 +58,9 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            platform::auth_sign_in,
+            platform::auth_sign_out,
+            platform::auth_current,
             ollama::ollama_generate,
             ollama::ollama_health,
             tts::tts_list_voices,

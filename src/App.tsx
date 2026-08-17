@@ -139,6 +139,9 @@ import {
   type IntroSpec,
   type RenderProgress,
 } from "./lib/assembly";
+import { AUTH_GATE_ENABLED } from "./lib/authGate";
+import { gateFor, letsAppRender, type Gate } from "./lib/entitlement";
+import { GraceBanner, LoginGate } from "./components/LoginGate";
 import "./App.css";
 
 /**
@@ -288,6 +291,29 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [rejected, setRejected] = useState<ImportedMedia[]>([]);
   const [dirty, setDirty] = useState(false);
+
+  /**
+   * The sign-in gate.
+   *
+   * Every one of these is inert while `AUTH_GATE_ENABLED` is false, which is
+   * the default and how every build ships today. The state lives here rather
+   * than behind the flag so that turning the flag on is a one-line change
+   * rather than a refactor — and so this code is compiled and type-checked
+   * even while it is dark.
+   */
+  const [gateSession, setGateSession] = useState<{ email: string } | null>(null);
+  const [gateCached, setGateCached] = useState<Parameters<typeof gateFor>[0]["cached"]>(null);
+  const [gateLive, setGateLive] = useState<Parameters<typeof gateFor>[0]["live"]>({
+    kind: "not-attempted",
+  });
+  const [gateWaiting, setGateWaiting] = useState(false);
+  const [gateError, setGateError] = useState<string | null>(null);
+
+  const gate: Gate = AUTH_GATE_ENABLED
+    ? gateFor({ session: gateSession, cached: gateCached, live: gateLive, now: new Date() })
+    // Not merely "allowed" — the flag being off means there is no gate at all,
+    // and the app must render exactly as it did before this existed.
+    : { state: "allowed" };
   const [savedAt, setSavedAt] = useState<string | null>(null);
 
   // --- story (B) -----------------------------------------------------------
@@ -720,6 +746,60 @@ function App() {
     },
     [title, lines, wordCount, hook, voiced, voice, pronunciations, timelineDoc, language],
   );
+
+
+  /**
+   * Sign in, sign out, and re-check.
+   *
+   * Reachable only when the gate is on. Errors are shown in the gate's own
+   * words rather than swallowed: every state on that screen is a dead end
+   * unless it tells the person what happened.
+   */
+  async function onGateSignIn() {
+    setGateError(null);
+    setGateWaiting(true);
+    try {
+      const who = await invoke<{ email: string; userId: string }>("auth_sign_in");
+      setGateSession({ email: who.email });
+      // Signed in, but entitlement is a separate question and is asked next.
+      setGateLive({ kind: "not-attempted" });
+      await onGateRecheck();
+    } catch (err) {
+      setGateError(errorText(err));
+    } finally {
+      setGateWaiting(false);
+    }
+  }
+
+  function onGateCancel() {
+    setGateWaiting(false);
+    setGateError(null);
+  }
+
+  async function onGateSignOut() {
+    try {
+      await invoke("auth_sign_out");
+    } catch {
+      // Nothing useful to say: the session is being abandoned either way.
+    }
+    setGateSession(null);
+    setGateCached(null);
+    setGateLive({ kind: "not-attempted" });
+    setGateError(null);
+  }
+
+  /**
+   * Ask the platform whether this account is entitled.
+   *
+   * Not yet wired to a licence endpoint — that is the half still waiting on
+   * the backend. Until it exists this reports `unreachable`, which is the
+   * honest answer and, deliberately, the one that leans on the cache rather
+   * than locking anybody out.
+   */
+  async function onGateRecheck() {
+    setGateError(null);
+    setGateLive({ kind: "unreachable" });
+  }
 
   const onSave = useCallback(async () => {
     if (!manifest) return;
@@ -2512,8 +2592,27 @@ function App() {
     </>
   );
 
+  // The gate renders instead of the application, not on top of it: nothing
+  // behind it should mount, subscribe or start work.
+  if (!letsAppRender(gate)) {
+    return (
+      <LoginGate
+        gate={gate}
+        onSignIn={() => void onGateSignIn()}
+        onCancel={onGateCancel}
+        onRecheck={() => void onGateRecheck()}
+        onSignOut={() => void onGateSignOut()}
+        waiting={gateWaiting}
+        error={gateError}
+      />
+    );
+  }
+
   return (
     <div className="lib">
+      {gate.state === "allowed-grace" && (
+        <GraceBanner daysLeft={gate.daysLeft} onRecheck={() => void onGateRecheck()} />
+      )}
       <LibrarySidebar
         view={view}
         onView={(v) => {
