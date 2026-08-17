@@ -234,7 +234,17 @@ fn handles_awkward_sources_and_normalises_them() {
         eprintln!("ffmpeg not available; skipping");
         return;
     };
-    let caps = ffmpeg::FfmpegCaps { zscale: true, tonemap: true, subtitles: true, drawtext: true };
+    // HDR forced on to exercise the tone-mapping path, but the filtergraph
+    // spelling has to come from the build actually installed here — hardcoding
+    // it is the assumption that broke Windows.
+    let probed = ffmpeg::detect(&FfmpegSettings::default()).expect("detect").caps;
+    let caps = ffmpeg::FfmpegCaps {
+        zscale: true,
+        tonemap: true,
+        subtitles: true,
+        drawtext: true,
+        ..probed
+    };
 
     struct Case {
         name: &'static str,
@@ -576,7 +586,17 @@ fn validation_accepts_reports_and_rejects_explicitly() {
         eprintln!("ffmpeg not available; skipping");
         return;
     };
-    let caps = ffmpeg::FfmpegCaps { zscale: true, tonemap: true, subtitles: true, drawtext: true };
+    // HDR forced on to exercise the tone-mapping path, but the filtergraph
+    // spelling has to come from the build actually installed here — hardcoding
+    // it is the assumption that broke Windows.
+    let probed = ffmpeg::detect(&FfmpegSettings::default()).expect("detect").caps;
+    let caps = ffmpeg::FfmpegCaps {
+        zscale: true,
+        tonemap: true,
+        subtitles: true,
+        drawtext: true,
+        ..probed
+    };
 
     // A silent clip is usable, but the user should be told it is silent.
     let ok = fx.dir.join("ok.mp4");

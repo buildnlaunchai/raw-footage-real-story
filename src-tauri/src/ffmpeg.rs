@@ -61,6 +61,24 @@ pub struct FfmpegCaps {
     pub drawtext: bool,
     /// libass. Not used either, and for a worse version of the same reason.
     pub subtitles: bool,
+    /// Whether this build still has the old `-filter_complex_script` option.
+    ///
+    /// The graph has to be handed over in a file — it is far longer than
+    /// Windows will accept on a command line — and how you do that changed.
+    /// `-filter_complex_script` was deprecated in ffmpeg 7.0 in favour of the
+    /// generic "read this option from a file" prefix, `-/filter_complex`, and
+    /// **removed in 9.0**. So the old spelling covers 6.x through 8.x and the
+    /// new one covers 7.0 upwards; neither covers everything.
+    ///
+    /// Probed rather than worked out from the version string, because that
+    /// string is not a number on every build — nightly and distro packages
+    /// report things like `N-113000-g1a2b3c`, and guessing wrong here does not
+    /// degrade anything, it fails the whole render.
+    ///
+    /// Found the hard way: a Mac on 8.1.2 accepted the old option and Windows
+    /// on 9.0 answered `Error splitting the argument list: Option not found`,
+    /// which does not name the option it could not find.
+    pub filter_script_legacy: bool,
 }
 
 /// Give this process, and so every ffmpeg it spawns, enough file descriptors.
@@ -139,11 +157,24 @@ fn probe_caps(ffmpeg: &Path) -> FfmpegCaps {
             .lines()
             .any(|l| l.split_whitespace().nth(1).is_some_and(|f| f == name))
     };
+    // The full option list, which is where the filtergraph-from-a-file
+    // spelling shows up. A second process, but `detect` runs once per render,
+    // not once per frame.
+    let options = Command::new(ffmpeg)
+        .args(["-hide_banner", "-h", "full"])
+        .output()
+        .map(|o| {
+            let mut text = String::from_utf8_lossy(&o.stdout).to_string();
+            text.push_str(&String::from_utf8_lossy(&o.stderr));
+            text
+        })
+        .unwrap_or_default();
     FfmpegCaps {
         zscale: has("zscale"),
         tonemap: has("tonemap"),
         subtitles: has("subtitles"),
         drawtext: has("drawtext"),
+        filter_script_legacy: options.contains("filter_complex_script"),
     }
 }
 
@@ -994,6 +1025,10 @@ pub fn boundary_fades_for_test(settings: &RenderSettings, items: &[RenderItem]) 
 /// The path is an ordinary argument rather than part of the graph, so a colon
 /// in it — a project folder called "Trip: Bangkok" — is safe here in a way it
 /// would not be inside the filtergraph itself.
+fn filter_script_flag(caps: &FfmpegCaps) -> &'static str {
+    if caps.filter_script_legacy { "-filter_complex_script" } else { "-/filter_complex" }
+}
+
 fn write_filter_script(out: &Path, filter: &str) -> Result<PathBuf, FfmpegError> {
     let dir = out.parent().unwrap_or_else(|| Path::new("."));
     let stem = out.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
@@ -1331,7 +1366,9 @@ pub fn render_rough_cut(
 
     let filter = filter.trim_end_matches(';').to_string();
     let script = write_filter_script(out, &filter)?;
-    cmd.args(["-filter_complex_threads", "2"]).arg("-filter_complex_script").arg(&script);
+    cmd.args(["-filter_complex_threads", "2"])
+        .arg(filter_script_flag(caps))
+        .arg(&script);
     cmd.args([
         "-map", &vout, "-map", &aout,
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
@@ -1527,7 +1564,9 @@ pub fn render_intro(
     ));
 
     let script = write_filter_script(out, &filter)?;
-    cmd.args(["-filter_complex_threads", "2"]).arg("-filter_complex_script").arg(&script);
+    cmd.args(["-filter_complex_threads", "2"])
+        .arg(filter_script_flag(caps))
+        .arg(&script);
     cmd.args(["-map", "[outv]", "-map", "[outa]"]);
     cmd.args(["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p"]);
     cmd.args(["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"]);
@@ -1535,4 +1574,62 @@ pub fn render_intro(
 
     run(&mut cmd, "render intro")?;
     Ok(total_ms)
+}
+
+#[cfg(test)]
+mod filter_script_tests {
+    use super::*;
+
+    /// The graph goes in a file, and how you say so depends on the build.
+    ///
+    /// `-filter_complex_script` was deprecated in ffmpeg 7.0 and removed in
+    /// 9.0; `-/filter_complex` arrived in 7.0. So there is no single spelling
+    /// that covers 6.x through 9.x, and picking the wrong one does not degrade
+    /// the render — it fails the whole command with `Error splitting the
+    /// argument list: Option not found`, which does not say which option.
+    ///
+    /// A Mac on 8.1.2 accepted the old spelling and Windows on 9.0 refused it,
+    /// so this is exactly the kind of thing that passes locally and breaks for
+    /// somebody else.
+    #[test]
+    fn the_spelling_follows_what_the_build_admits_to() {
+        let modern = FfmpegCaps { filter_script_legacy: false, ..Default::default() };
+        let legacy = FfmpegCaps { filter_script_legacy: true, ..Default::default() };
+
+        assert_eq!(filter_script_flag(&legacy), "-filter_complex_script");
+        assert_eq!(filter_script_flag(&modern), "-/filter_complex");
+    }
+
+    /// And what this machine's own ffmpeg says is what it is handed.
+    ///
+    /// Guards the probe rather than the mapping: if `-h full` stopped naming
+    /// the option, or the parsing of it drifted, every render on a build that
+    /// needs the old spelling would fail at once.
+    #[test]
+    fn the_probe_agrees_with_the_installed_build() {
+        let Ok(info) = detect(&FfmpegSettings::default()) else {
+            eprintln!("ffmpeg not available; skipping");
+            return;
+        };
+        let flag = filter_script_flag(&info.caps);
+        println!("\n  {} says {flag}", info.version);
+
+        // Ask it directly: hand it a one-filter graph in a file and see whether
+        // it produces a frame. Whichever spelling the probe chose has to work.
+        let dir = std::env::temp_dir().join("rfrs-filter-spelling");
+        let _ = std::fs::create_dir_all(&dir);
+        let graph = dir.join("g.txt");
+        std::fs::write(&graph, "color=c=red:s=32x32:d=1[o]").expect("graph");
+        let out = dir.join("frame.png");
+        let status = Command::new(&info.ffmpeg)
+            .args(["-hide_banner", "-v", "error"])
+            .arg(flag)
+            .arg(&graph)
+            .args(["-map", "[o]", "-frames:v", "1", "-y"])
+            .arg(&out)
+            .status()
+            .expect("spawn ffmpeg");
+        assert!(status.success(), "{flag} was rejected by {}", info.version);
+        assert!(out.is_file(), "{flag} produced no frame");
+    }
 }
