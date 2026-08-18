@@ -23,6 +23,24 @@ concurrency:
 
 jobs:
   build:
+    # The token needs to be able to write a release, and by default it cannot.
+    #
+    # This is why the first tagged build failed at the very last step, with
+    # `Resource not accessible by integration` from the create-a-release
+    # endpoint — everything was built and tested, and then had nowhere to go.
+    #
+    # It went unnoticed because no tagged build had ever run. Every green run
+    # before it was a `workflow_dispatch` check, and those pass `tagName: ''`,
+    # so tauri-action skips release creation entirely. The one step that needs
+    # this permission is the one step dispatch builds never reach.
+    #
+    # Declared here rather than left to the repository's default, which is a
+    # setting somebody can change without touching this file. Naming it makes
+    # the requirement part of the workflow, and narrows the token to the single
+    # scope it actually needs.
+    permissions:
+      contents: write
+
     strategy:
       # Both platforms always finish. A Windows failure that cancels the macOS
       # build tells you half of what the run was for.
