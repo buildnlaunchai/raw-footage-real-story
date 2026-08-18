@@ -148,8 +148,10 @@ Optional. Install from [ollama.com](https://ollama.com) if you want script
 writing to run locally at no cost. The app will offer to download the model it
 needs.
 
-If you would rather not, add an OpenAI API key in the app instead and skip
-Ollama entirely.
+If you would rather not, link an OpenAI key to your BuildnLaunchAI account
+instead and skip Ollama entirely. Keys are managed on your account rather than
+typed into the app, so one key works on every machine you sign in on — the app
+has a button that takes you straight to the page.
 
 ### Narration voices
 
@@ -157,8 +159,10 @@ English narration works out of the box — the voice model and 55 voices are
 inside the app already, nothing to install, no account, no internet.
 
 **Bengali, Hindi, Arabic, Thai, Chinese and Japanese narration need an
-ElevenLabs API key**, which you add in the app and which bills to your own
-ElevenLabs account. The built-in voice model has no Bengali voice at all, so
+ElevenLabs key**, linked to your BuildnLaunchAI account and billing to your own
+ElevenLabs account. As with OpenAI, the key lives on your account rather than on
+this computer; the app links out to the page where you manage it. The built-in
+voice model has no Bengali voice at all, so
 the app will move you to ElevenLabs automatically when it sees a script in one
 of those languages. This is a real limitation of the beta, not a bug.
 

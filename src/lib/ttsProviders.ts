@@ -123,10 +123,20 @@ const FRIENDLY: Record<string, string> = {
   WAV_WRITE_FAILED: "Couldn't write the audio file. Check disk space and permissions.",
   MKDIR_FAILED: "Couldn't write the audio file. Check disk space and permissions.",
   NO_APP_DIR: "Couldn't write the audio file. Check disk space and permissions.",
-  // Cloud
-  MISSING_API_KEY: "Add your ElevenLabs API key to use cloud voices.",
-  INVALID_API_KEY: "That API key was rejected. Check it in your ElevenLabs account.",
-  VOICE_NOT_FOUND: "That voice no longer exists on your ElevenLabs account.",
+  // Cloud — the key comes from the signed-in account, so none of these ask
+  // anybody to find or paste one.
+  KEY_NOT_LINKED:
+    "Your account has no ElevenLabs key available yet. Open your dashboard to add one or allow this app to use it.",
+  KEYS_SIGNED_OUT: "Sign in to use ElevenLabs — its key comes from your account.",
+  KEYS_UNREACHABLE:
+    "Couldn't reach your account to fetch the ElevenLabs key. Check your connection and try again.",
+  KEYS_NOT_CONFIGURED: "This build has no account to fetch provider keys from.",
+  KEYS_MALFORMED: "Your account returned something this app couldn't read.",
+  MISSING_API_KEY:
+    "Your account has no ElevenLabs key available yet. Open your dashboard to add one.",
+  INVALID_API_KEY:
+    "The ElevenLabs key on your account was rejected. Check it on your dashboard.",
+  VOICE_NOT_FOUND: "That voice no longer exists on the ElevenLabs account this key belongs to.",
   QUOTA_EXCEEDED: "You've used your ElevenLabs character quota for this period.",
   RATE_LIMITED: "ElevenLabs is rate-limiting requests. Try again shortly.",
   SERVICE_ERROR: "ElevenLabs had a server error. Try again shortly.",
@@ -349,48 +359,17 @@ export function providerFor(id: ProviderId): TtsProvider {
 
 // --- credentials ------------------------------------------------------------
 //
-// The key itself never crosses into JavaScript. These only ask whether one
-// exists, hand a new one to the keychain, or remove it.
-
-export async function hasApiKey(account = "elevenlabs"): Promise<boolean> {
-  try {
-    return await invoke<boolean>("secret_present", { account });
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Store a key and return whether it is now actually readable.
- *
- * The boolean is the point: the previous version returned void and callers
- * optimistically set their own "key saved" state, which is how the UI came to
- * claim a key existed while generation insisted it did not.
- */
-export async function setApiKey(secret: string, account = "elevenlabs"): Promise<boolean> {
-  try {
-    return await invoke<boolean>("secret_set", { account, secret });
-  } catch (err) {
-    throw asTtsError(err);
-  }
-}
-
-export async function clearApiKey(account = "elevenlabs"): Promise<void> {
-  try {
-    await invoke("secret_clear", { account });
-  } catch (err) {
-    throw asTtsError(err);
-  }
-}
-
-/** Validate a key without storing it. */
-export async function testApiKey(apiKey: string): Promise<CloudUsage> {
-  try {
-    return await invoke<CloudUsage>("elevenlabs_test_key", { apiKey });
-  } catch (err) {
-    throw asTtsError(err);
-  }
-}
+// There is nothing here any more, and that is the point.
+//
+// `hasApiKey`, `setApiKey`, `clearApiKey` and `testApiKey` lived here and were
+// the local-key path: ask the keychain whether a key exists, put one in, take
+// one out, try one before saving it. The key comes from the signed-in account
+// now and only from there, so there is no local state to inspect and nothing
+// for the webview to hand in. See `accountKeys.ts` for what replaced them, and
+// `provider_keys.rs` for why.
+//
+// The key still never crosses into JavaScript. It did not before and it does
+// not now — Rust holds it and makes the call.
 
 export async function fetchUsage(): Promise<CloudUsage> {
   try {

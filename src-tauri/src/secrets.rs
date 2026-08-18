@@ -1,15 +1,28 @@
 //! Credential storage.
 //!
-//! The ElevenLabs key is a live billing credential, so it goes in the OS
-//! keychain rather than beside the ffmpeg path in `settings.json`. A file path
-//! is configuration; a key that spends someone's money is not, and plaintext on
-//! disk is a weaker default than every supported platform already offers for
-//! free.
+//! What is kept here is the **session** — a refresh token, filed under
+//! `buildnlaunchai-session` by [`crate::session`]. That is a credential, so it
+//! goes in the OS keychain rather than beside the ffmpeg path in
+//! `settings.json`: a file path is configuration, a token that gets somebody
+//! into an account is not, and plaintext on disk is a weaker default than
+//! every supported platform already offers for free.
 //!
-//! **The key never reaches the webview.** The frontend asks for synthesis by
-//! name; this module reads the credential and the HTTP call happens in Rust. A
-//! secret the UI never holds cannot leak through devtools, a crash report, or a
-//! logging line somebody adds later without thinking about it.
+//! ## Provider keys are no longer among them
+//!
+//! OpenAI and ElevenLabs keys used to live here too, pasted into the app and
+//! kept per machine. They come from the account now and only from the account
+//! — fetched into memory for the session, never written down. See
+//! [`crate::provider_keys`] for what that bought and what it cost.
+//!
+//! The read path (`get`, `set`, `clear`) stays general rather than being
+//! narrowed to the session account: it is a keychain wrapper, and the
+//! narrowing that matters — no commands the webview can call to write a
+//! provider key — is done by not exposing any.
+//!
+//! **Nothing here reaches the webview.** There are no `#[tauri::command]`s in
+//! this module by design. A secret the UI never holds cannot leak through
+//! devtools, a crash report, or a logging line somebody adds later without
+//! thinking about it.
 
 use serde::Serialize;
 
@@ -27,23 +40,15 @@ impl SecretError {
     }
 }
 
-/// Environment override, checked before the keychain.
+/// Read whatever is filed under an account name.
 ///
-/// Mirrors how `FFMPEG_PATH` works, and makes the whole cloud path testable in
-/// CI without a keychain — which on a headless runner does not exist.
-fn env_key(account: &str) -> Option<String> {
-    let var = match account {
-        "elevenlabs" => "ELEVENLABS_API_KEY",
-        "openai" => "OPENAI_API_KEY",
-        _ => return None,
-    };
-    std::env::var(var).ok().filter(|v| !v.trim().is_empty())
-}
-
+/// No environment override any more. It used to answer `OPENAI_API_KEY` and
+/// `ELEVENLABS_API_KEY` from here, which was the right home while this module
+/// owned provider keys and the wrong one afterwards — the session is the only
+/// thing stored here now, and a session does not come from an environment
+/// variable. Those two variables are still honoured, by the module that owns
+/// them: see [`crate::provider_keys`].
 pub fn get(account: &str) -> Option<String> {
-    if let Some(v) = env_key(account) {
-        return Some(v);
-    }
     keyring::Entry::new(SERVICE, account)
         .ok()
         .and_then(|e| e.get_password().ok())
@@ -78,9 +83,11 @@ pub fn set(account: &str, secret: &str) -> Result<(), SecretError> {
         )),
         Err(e) => Err(SecretError::new(
             "KEYCHAIN_VERIFY_FAILED",
-            format!(
-                "The key could not be saved to your system keychain ({e}).                  Set OPENAI_API_KEY or ELEVENLABS_API_KEY in your environment instead."
-            ),
+            // What fails to save here is the session, so there is no
+            // environment variable to suggest as a way round it. The old text
+            // named the two provider variables, which was advice for a feature
+            // this module no longer has.
+            format!("Your sign-in could not be saved to the system keychain ({e})."),
         )),
     }
 }
@@ -96,72 +103,46 @@ pub fn clear(account: &str) -> Result<(), SecretError> {
     }
 }
 
-/// Whether a key is present, without ever returning it.
-///
-/// The UI needs to know if it should show "connected" or an entry field, and
-/// that question can be answered without the secret crossing the boundary.
-#[tauri::command]
-pub fn secret_present(account: String) -> bool {
-    get(&account).is_some()
-}
-
-/// Stores the secret and returns whether it is now readable.
-///
-/// Returning the verified state rather than unit means the UI has no reason to
-/// track a separate belief about whether a key exists.
-#[tauri::command]
-pub fn secret_set(account: String, secret: String) -> Result<bool, SecretError> {
-    if secret.trim().is_empty() {
-        return Err(SecretError::new("EMPTY_SECRET", "The key is empty."));
-    }
-    set(&account, secret.trim())?;
-    Ok(get(&account).is_some())
-}
-
-#[tauri::command]
-pub fn secret_clear(account: String) -> Result<(), SecretError> {
-    clear(&account)
-}
+// `secret_present`, `secret_set` and `secret_clear` were here, and were the
+// webview's way of writing a provider key to this machine. They are gone with
+// the feature: the account is the only source of a provider key now, so a
+// command that stores one locally has nothing left to be used for, and leaving
+// it registered would leave the removed path reachable from the console.
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Environment variables are process-global, so these assertions live in
-    /// one test rather than three. Split across parallel tests they raced each
-    /// other and failed intermittently — which is a property of the test
-    /// design, not of the code under test.
+    /// The account names this module knows about.
+    ///
+    /// Only one, and that is the assertion: provider keys used to be filed here
+    /// under the providers' own names, and the guarantee that they are not any
+    /// more is that the working part of this file never mentions them.
+    ///
+    /// Read out of the source rather than by calling `get`, because `get`
+    /// reaches the real login keychain — which on macOS blocks on a permission
+    /// prompt and turns a passing suite into a hang. The note on the OpenAI
+    /// test in `openai.rs` learned that the expensive way; this does not repeat
+    /// it.
+    ///
+    /// Only the part above `#[cfg(test)]` is scanned. The tests below it have
+    /// to be able to name what they are checking for, and a test that fails on
+    /// its own list of forbidden words is a test that can never pass.
     #[test]
-    fn env_overrides_take_precedence_and_are_per_account() {
-        // Safety: this is the only test touching these variables, and each is
-        // removed before the next assertion depends on its absence.
-        unsafe { std::env::set_var("ELEVENLABS_API_KEY", "test-key-from-env") };
-        assert_eq!(get("elevenlabs").as_deref(), Some("test-key-from-env"));
-
-        // Whitespace is not a key.
-        unsafe { std::env::set_var("ELEVENLABS_API_KEY", "   ") };
-        assert!(env_key("elevenlabs").is_none());
-        unsafe { std::env::remove_var("ELEVENLABS_API_KEY") };
-
-        // OPENAI_API_KEY is a near-universal variable, so a key exported for
-        // something else is picked up ahead of the keychain. That is the
-        // documented precedence and is what makes CI work, but the mapping
-        // should be deliberate rather than accidental.
-        unsafe { std::env::set_var("OPENAI_API_KEY", "sk-test-openai") };
-        assert_eq!(get("openai").as_deref(), Some("sk-test-openai"));
-        // ...and it must not bleed into the other account. Asked through
-        // `env_key` rather than `get`, because `get` falls through to the
-        // keychain when the variable is absent, and on macOS that blocks on a
-        // permission prompt the moment the test binary changes — which turned
-        // a passing suite into a hang for reasons that had nothing to do with
-        // the code under test.
-        assert!(env_key("elevenlabs").is_none());
-        unsafe { std::env::remove_var("OPENAI_API_KEY") };
-    }
-
-    #[test]
-    fn unknown_accounts_have_no_env_override() {
-        assert!(env_key("something-else").is_none());
+    fn no_provider_account_is_named_in_the_working_code() {
+        let source = include_str!("secrets.rs");
+        let working = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
+        let code: String = working
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for banned in ["OPENAI_API_KEY", "ELEVENLABS_API_KEY", "openai", "elevenlabs"] {
+            assert!(
+                !code.contains(banned),
+                "{banned} is back in the credential store; provider keys belong to the account",
+            );
+        }
     }
 }
 
@@ -175,7 +156,6 @@ mod keychain_roundtrip {
     #[ignore = "writes to the real keychain"]
     fn set_then_get_then_clear() {
         let account = "rfrs-selftest";
-        unsafe { std::env::remove_var("ELEVENLABS_API_KEY") };
 
         let write = super::set(account, "value-under-test");
         println!("\n  set   -> {:?}", write.as_ref().map(|_| "ok").map_err(|e| &e.code));

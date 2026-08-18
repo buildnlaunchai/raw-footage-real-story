@@ -1,15 +1,26 @@
 /**
- * Choosing who writes the script, and — for the paid option — proving the key
- * works before spending anything on it.
+ * Choosing who writes the script, and saying plainly where the paid option's
+ * key comes from.
+ *
+ * It comes from the account, and there is no second answer. This panel used to
+ * carry a password field and a "test and save" button; both are gone, along
+ * with the per-machine keychain entry behind them. What is left in the
+ * unlinked case is one sentence and one button to the dashboard — because that
+ * is genuinely all the app can offer, and a field that stored a key the account
+ * did not know about was the thing making that untrue.
  */
 import { useEffect, useState } from "react";
 import {
   SCRIPT_PROVIDERS,
-  testOpenAiKey,
   type QualityTier,
   type ScriptProviderId,
 } from "../lib/scriptProviders";
-import { clearApiKey, hasApiKey, setApiKey } from "../lib/ttsProviders";
+import {
+  asAccountKeyError,
+  openKeyManagement,
+  statusFor,
+  type ProviderStatus,
+} from "../lib/accountKeys";
 import type { ScriptLanguage } from "../lib/languages";
 
 interface Props {
@@ -30,44 +41,45 @@ export function ScriptProviderSetup({
   usage,
 }: Props) {
   const provider = SCRIPT_PROVIDERS[providerId];
-  const [keyPresent, setKeyPresent] = useState<boolean | null>(null);
-  const [keyInput, setKeyInput] = useState("");
-  const [testing, setTesting] = useState(false);
-  const [keyError, setKeyError] = useState<string | null>(null);
+  const [status, setStatus] = useState<ProviderStatus | null>(null);
+  const [checking, setChecking] = useState(false);
+  /**
+   * Why the account could not be asked — never why a key was refused.
+   *
+   * Kept apart from `status` because "we could not reach your account" and
+   * "your account has no key" want different words and different buttons, and
+   * collapsing them tells an offline user to go and add a key they already
+   * have.
+   */
+  const [problem, setProblem] = useState<{ message: string; manageUrl: string | null } | null>(null);
 
-  useEffect(() => {
+  async function refresh(force = false) {
     if (!provider.capabilities.needsApiKey) {
-      setKeyPresent(null);
+      setStatus(null);
+      setProblem(null);
       return;
     }
-    void hasApiKey("openai").then(setKeyPresent);
-  }, [provider]);
-
-  async function onSaveKey() {
-    setTesting(true);
-    setKeyError(null);
+    setChecking(true);
     try {
-      // Validated with a one-word call before storing, so a typo never becomes
-      // a saved credential that fails mid-generation.
-      await testOpenAiKey(keyInput.trim());
-      const stored = await setApiKey(keyInput.trim(), "openai");
-      // Confirm against the store rather than assuming the write took. A save
-      // that silently fails must not leave the UI claiming otherwise.
-      const present = stored && (await hasApiKey("openai"));
-      setKeyPresent(present);
-      if (!present) {
-        setKeyError(
-          "The key couldn't be saved to your system keychain. Set the matching environment variable instead.",
-        );
-        return;
-      }
-      setKeyInput("");
+      setStatus(await statusFor("openai", force));
+      setProblem(null);
     } catch (err) {
-      setKeyError(err instanceof Error ? err.message : String(err));
+      const e = asAccountKeyError(err);
+      setStatus(null);
+      setProblem({ message: e.message, manageUrl: e.manageUrl });
     } finally {
-      setTesting(false);
+      setChecking(false);
     }
   }
+
+  useEffect(() => {
+    // Re-asked when the chosen provider changes, and not on `refresh`'s
+    // identity — it is redefined every render, so depending on it would ask the
+    // platform once per render.
+    void refresh();
+  }, [provider]);
+
+  const linked = status?.linked === true;
 
   return (
     <div className="provider-picker">
@@ -110,56 +122,77 @@ export function ScriptProviderSetup({
         </div>
       )}
 
-      {provider.capabilities.needsApiKey && keyPresent === false && (
-        <div className="key-entry">
-          <label className="field-label" htmlFor="openai-key">
-            OpenAI API key
-          </label>
-          <div className="voice-row">
-            <input
-              id="openai-key"
-              className="clip-input"
-              type="password"
-              autoComplete="off"
-              spellCheck={false}
-              value={keyInput}
-              placeholder="sk-…"
-              onChange={(e) => setKeyInput(e.currentTarget.value)}
-            />
-            <button
-              type="button"
-              className="primary-button"
-              onClick={onSaveKey}
-              disabled={testing || keyInput.trim().length === 0}
-            >
-              {testing ? "Checking…" : "Test and save"}
-            </button>
-          </div>
-          <p className="placeholder-note">
-            Stored in your system keychain, never in a project file or export.
-          </p>
-          {keyError && (
-            <div className="error" role="alert">
-              <strong>That key didn’t work.</strong>
-              <span>{keyError}</span>
-            </div>
-          )}
-        </div>
-      )}
-
-      {providerId === "openai" && keyPresent && (
-        <>
-          <div className="key-status">
-            <span className="hint">Key saved in your keychain</span>
+      {/* Could not ask. Deliberately not the same screen as "no key". */}
+      {provider.capabilities.needsApiKey && problem && (
+        <div className="warning" role="status">
+          <strong>Couldn’t check your account.</strong>
+          <span>{problem.message}</span>
+          <div className="actions" style={{ marginTop: "0.6rem" }}>
             <button
               type="button"
               className="ghost-button small"
-              onClick={async () => {
-                await clearApiKey("openai");
-                setKeyPresent(false);
-              }}
+              onClick={() => void refresh(true)}
+              disabled={checking}
             >
-              Remove key
+              {checking ? "Checking…" : "Try again"}
+            </button>
+            {problem.manageUrl && (
+              <button
+                type="button"
+                className="ghost-button small"
+                onClick={() => void openKeyManagement("openai", problem.manageUrl ?? undefined)}
+              >
+                Open my dashboard
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Asked, and the answer was no. One sentence, one destination. */}
+      {provider.capabilities.needsApiKey && !problem && status && !linked && (
+        <div className="key-entry">
+          <strong>Your account has no OpenAI key available yet.</strong>
+          <p className="placeholder-note">
+            Keys are managed on your BuildnLaunchAI account, not on this
+            computer, so one key works everywhere you use the app and revoking
+            it takes effect straight away. Add or allow your OpenAI key on the
+            dashboard, then re-check here.
+          </p>
+          <div className="actions">
+            <button
+              type="button"
+              className="primary-button"
+              onClick={() => void openKeyManagement("openai", status.manageUrl)}
+            >
+              Manage my OpenAI key
+            </button>
+            <button
+              type="button"
+              className="ghost-button"
+              onClick={() => void refresh(true)}
+              disabled={checking}
+            >
+              {checking ? "Checking…" : "Re-check"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {providerId === "openai" && linked && (
+        <>
+          <div className="key-status">
+            <span className="hint">
+              {status?.fromEnvironment
+                ? "Using OPENAI_API_KEY from this machine’s environment"
+                : `Using the OpenAI key on your account${status?.hint ? ` (…${status.hint})` : ""}`}
+            </span>
+            <button
+              type="button"
+              className="ghost-button small"
+              onClick={() => void openKeyManagement("openai", status?.manageUrl)}
+            >
+              Manage
             </button>
           </div>
 

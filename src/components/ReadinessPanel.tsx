@@ -21,6 +21,7 @@ import {
   type Probe,
   type Requirements,
 } from "../lib/readiness";
+import { openKeyManagement } from "../lib/accountKeys";
 import { CheckIcon, AlertIcon, RefreshIcon } from "./Icons";
 
 interface Props {
@@ -30,7 +31,7 @@ interface Props {
   ollamaHost: string;
   checking: boolean;
   onRecheck: () => void;
-  /** Take the user to where cloud keys are entered. */
+  /** Take the user to where the cloud providers are set up. */
   onOpenProviders: () => void;
 }
 
@@ -62,22 +63,30 @@ export function ReadinessPanel({
     logEnd.current?.scrollIntoView({ block: "end" });
   }, [log]);
 
+  /**
+   * The re-check, reachable from the listener without being a dependency of it.
+   *
+   * `onRecheck` is a fresh closure on every render of the parent, so having the
+   * subscription depend on it re-subscribed on every render — and `listen`
+   * resolves asynchronously, so each of those left a window with no listener
+   * attached. During a model pull that is every progress line, and the terminal
+   * event arrives immediately after the last of them: squarely inside the
+   * window it opened. The one event the screen actually needed was the one most
+   * likely to be dropped.
+   */
+  const recheck = useRef(onRecheck);
+  recheck.current = onRecheck;
+
+  // Registered once, for the life of the panel.
   useEffect(() => {
     const un = listen<JobLine>("setup:progress", (e) => {
       setLog((l) => [...l.slice(-300), e.payload]);
       if (e.payload.fraction != null) setFraction(e.payload.fraction);
-      if (e.payload.done) {
-        setRunning(null);
-        setFraction(null);
-        // Whatever just finished changed the machine; ask it again rather than
-        // making the user guess whether it worked.
-        onRecheck();
-      }
     });
     return () => {
       void un.then((f) => f());
     };
-  }, [onRecheck]);
+  }, []);
 
   async function copy(text: string) {
     try {
@@ -89,32 +98,42 @@ export function ReadinessPanel({
     }
   }
 
-  async function runInstall(job: string, program: string, args: string[]) {
+  /**
+   * Run one long job and settle the screen from its own return.
+   *
+   * The progress event fills the log; it is deliberately *not* what decides the
+   * job is over. An event can be missed, and a missed one used to leave the
+   * button reading "Installing…" with a re-check that never ran — the state the
+   * user could only escape by quitting the app. The awaited command cannot be
+   * missed, so completion hangs off the promise and the event stream is left to
+   * do the one thing it is good at.
+   */
+  async function run(job: string, work: () => Promise<unknown>) {
     setRunning(job);
     setLog([]);
     try {
-      await invoke("run_installer", { job, program, args });
+      await work();
     } catch (err) {
       setLog((l) => [
         ...l,
         { job, line: String(err), fraction: null, done: true, ok: false },
       ]);
+    } finally {
       setRunning(null);
+      setFraction(null);
+      // Whatever just ran was meant to change this machine. Ask it again
+      // rather than making the user guess whether it worked — and ask after a
+      // failure too, since a half-finished install still changed something.
+      recheck.current();
     }
   }
 
-  async function pull(model: string) {
-    setRunning(`pull:${model}`);
-    setLog([]);
-    try {
-      await invoke("ollama_pull", { host: ollamaHost, model });
-    } catch (err) {
-      setLog((l) => [
-        ...l,
-        { job: model, line: String(err), fraction: null, done: true, ok: false },
-      ]);
-      setRunning(null);
-    }
+  function runInstall(job: string, program: string, args: string[]) {
+    void run(job, () => invoke("run_installer", { job, program, args }));
+  }
+
+  function pull(model: string) {
+    void run(`pull:${model}`, () => invoke("ollama_pull", { host: ollamaHost, model }));
   }
 
   if (!probe) {
@@ -224,9 +243,22 @@ export function ReadinessPanel({
                 script, billed to your own account. This is the quicker start,
                 and the only one that does not need several gigabytes first.
               </p>
-              <button type="button" className="primary-button" onClick={onOpenProviders}>
-                Add an OpenAI key
-              </button>
+              <p>
+                The key comes from your BuildnLaunchAI account rather than being
+                typed in here, so it works on every machine you sign in on.
+              </p>
+              <div className="actions">
+                <button
+                  type="button"
+                  className="primary-button"
+                  onClick={() => void openKeyManagement("openai")}
+                >
+                  Manage my OpenAI key
+                </button>
+                <button type="button" className="ghost-button" onClick={onOpenProviders}>
+                  Script settings
+                </button>
+              </div>
             </div>
 
             <div className="ready-option">

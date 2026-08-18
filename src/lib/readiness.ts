@@ -23,8 +23,22 @@ export type FfmpegState = "missing" | "limited" | "ready";
  */
 export type OllamaState = "unreachable" | "no-models" | "partial" | "ready";
 
+/**
+ * What Rust found, mirrored field for field.
+ *
+ * Written out rather than imported from `assembly.ts` so this module stays
+ * free of `@tauri-apps` and can be tested in plain node. It mirrors
+ * `FfmpegInfo` exactly, which is what lets one probe serve both this screen and
+ * the app's own idea of whether ffmpeg exists — they used to be detected
+ * separately, and a fresh install updated one of them.
+ */
 export interface Probe {
-  ffmpeg: { ffmpeg: string; ffprobe: string; caps: { zscale: boolean } } | null;
+  ffmpeg: {
+    ffmpeg: string;
+    ffprobe: string;
+    version: string;
+    caps: { zscale: boolean; tonemap: boolean; subtitles: boolean };
+  } | null;
   ffmpegError: string | null;
   ollamaModels: string[] | null;
   ollamaError: string | null;
@@ -36,6 +50,15 @@ export interface Requirements {
   fastModel: string;
   /** The final narration; the one the viewer hears. */
   qualityModel: string;
+  /**
+   * Whether the signed-in account has a usable key for each provider.
+   *
+   * "Has a key", not "has saved a key on this machine" — there is no such
+   * thing any more. These are answered by `provider_key_status`, and a machine
+   * that could not reach the platform answers `false` for both: the setup
+   * screen is mostly about what is installed here, and a network problem must
+   * not stop it rendering.
+   */
   hasOpenAiKey: boolean;
   hasElevenLabsKey: boolean;
 }
@@ -136,10 +159,10 @@ export function capabilities(p: Probe, req: Requirements): Capability[] {
     detail: scriptLocal
       ? `Ollama, using ${ol.present.join(" and ")}`
       : req.hasOpenAiKey
-        ? "OpenAI, with your key"
+        ? "OpenAI, using the key on your account"
         : ol.state === "unreachable"
-          ? "Ollama is not running, and no OpenAI key is saved."
-          : "Ollama is running but has no models, and no OpenAI key is saved.",
+          ? "Ollama is not running, and your account has no OpenAI key."
+          : "Ollama is running but has no models, and your account has no OpenAI key.",
     caveat:
       ol.state === "partial" && !req.hasOpenAiKey
         ? `Only ${ol.present[0]} is installed. Scripts will be written by the smaller model, which reads less well than ${ol.missing[0]}.`
@@ -154,7 +177,7 @@ export function capabilities(p: Probe, req: Requirements): Capability[] {
     ready: true,
     blocking: false,
     detail: req.hasElevenLabsKey
-      ? "Built-in voices, or ElevenLabs with your key"
+      ? "Built-in voices, or ElevenLabs using the key on your account"
       : "Built-in voices, included with the app",
   };
 

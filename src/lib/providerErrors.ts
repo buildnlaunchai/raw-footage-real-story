@@ -24,13 +24,25 @@ export class ScriptProviderError extends Error {
 }
 
 const FRIENDLY: Record<string, string> = {
-  MISSING_API_KEY: "Add your OpenAI API key to use cloud script generation.",
-  INVALID_API_KEY: "That API key was rejected. Check it in your OpenAI account.",
-  QUOTA_EXCEEDED: "Your OpenAI credit balance is exhausted. Add credit to continue.",
-  SPEND_LIMIT: "You've hit a spend limit set on your OpenAI account.",
+  // The key comes from the signed-in account, so none of these ask anybody to
+  // find or paste one. `KEY_NOT_LINKED` arrives with a `manageUrl` on the error
+  // itself — see `accountKeys.ts` — which is what the button is built from.
+  KEY_NOT_LINKED:
+    "Your account has no OpenAI key available yet. Open your dashboard to add one or allow this app to use it.",
+  KEYS_SIGNED_OUT: "Sign in to use OpenAI — its key comes from your account.",
+  KEYS_UNREACHABLE:
+    "Couldn't reach your account to fetch the OpenAI key. Check your connection and try again.",
+  KEYS_NOT_CONFIGURED: "This build has no account to fetch provider keys from.",
+  KEYS_MALFORMED: "Your account returned something this app couldn't read.",
+  MISSING_API_KEY:
+    "Your account has no OpenAI key available yet. Open your dashboard to add one.",
+  INVALID_API_KEY: "The OpenAI key on your account was rejected. Check it on your dashboard.",
+  QUOTA_EXCEEDED:
+    "The OpenAI credit balance on that key is exhausted. Add credit to continue.",
+  SPEND_LIMIT: "You've hit a spend limit set on that OpenAI account.",
   RATE_LIMITED: "OpenAI is rate-limiting requests. Try again shortly.",
-  MODEL_NOT_FOUND: "That model isn't available on your OpenAI account.",
-  FORBIDDEN: "Your OpenAI account doesn't have access to that model.",
+  MODEL_NOT_FOUND: "That model isn't available on that OpenAI account.",
+  FORBIDDEN: "That OpenAI account doesn't have access to that model.",
   REFUSED: "The model declined to write this script.",
   SERVICE_ERROR: "OpenAI had a server error. Try again shortly.",
   NETWORK: "Couldn't reach OpenAI. Check your connection.",

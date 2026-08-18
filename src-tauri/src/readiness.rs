@@ -140,6 +140,12 @@ pub async fn run_installer(
 
     emit(&app, &job, format!("$ {} {}", program, args.join(" ")), None);
 
+    // Kept back from the closure so the finishing lines below can still name
+    // what was run after `program` has been moved into it.
+    let ran = program.clone();
+    let worker_app = app.clone();
+    let worker_job = job.clone();
+
     // std::process on Tauri's blocking pool rather than pulling tokio in as a
     // runtime dependency for one subprocess. Both pipes get their own thread so
     // a package manager that reports progress on stderr — most of them — is not
@@ -160,8 +166,8 @@ pub async fn run_installer(
             (child.stderr.take().map(|s| Box::new(s) as Box<dyn std::io::Read + Send>), true),
         ] {
             let Some(stream) = stream else { continue };
-            let app = app.clone();
-            let job = job.clone();
+            let app = worker_app.clone();
+            let job = worker_job.clone();
             pumps.push(std::thread::spawn(move || {
                 for line in BufReader::new(stream).lines().map_while(Result::ok) {
                     // stderr is not failure here — brew and winget both narrate
@@ -178,11 +184,41 @@ pub async fn run_installer(
         }
         Ok::<_, String>(status)
     })
-    .await
-    .map_err(|e| e.to_string())??;
+    .await;
 
-    let ok = result.success();
-    Ok(ok)
+    // Say that it is over, whichever way it went.
+    //
+    // This is the whole reason a finished install used to need the app
+    // restarted. `finish` was written for both jobs and only `ollama_pull`
+    // ever called it, so the panel — which clears its spinner and re-probes on
+    // the terminal event — heard nothing when an install ended. The button sat
+    // on "Installing…", the machine had ffmpeg on it, and the only way to be
+    // told so was to quit and reopen.
+    //
+    // Every exit path emits exactly once: the blocking pool losing the task,
+    // the process failing to start or be waited on, a non-zero exit, and
+    // success. A path that returns without emitting is the bug all over again.
+    let outcome: Result<std::process::ExitStatus, String> = match result {
+        Ok(inner) => inner,
+        Err(e) => Err(format!("the installer could not be run: {e}")),
+    };
+
+    match outcome {
+        Ok(status) if status.success() => {
+            finish(&app, &job, true, format!("{ran} finished"));
+            Ok(true)
+        }
+        Ok(status) => {
+            // A package manager that exits non-zero has usually already said
+            // why on stderr, which is in the log above this line.
+            finish(&app, &job, false, format!("{ran} exited without installing ({status})"));
+            Ok(false)
+        }
+        Err(e) => {
+            finish(&app, &job, false, e.clone());
+            Err(e)
+        }
+    }
 }
 
 /// Pull an Ollama model, streaming its progress.

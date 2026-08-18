@@ -194,13 +194,10 @@ export function makeGenerateFn(
   };
 }
 
-export async function testOpenAiKey(apiKey: string): Promise<TokenUsage> {
-  try {
-    return await invoke<TokenUsage>("openai_test_key", { apiKey, model: OPENAI_MODELS.fast });
-  } catch (err) {
-    throw asScriptProviderError(err);
-  }
-}
+// `testOpenAiKey` was here. It validated a key before the app saved it, which
+// was worth doing while there was a field to paste one into. There is not: the
+// key comes from the account, so there is nothing to validate ahead of time and
+// nothing to save. See `accountKeys.ts`.
 
 /** Does this model honour temperature and seed? Reported, never assumed. */
 export async function probeSampling(model: string): Promise<{

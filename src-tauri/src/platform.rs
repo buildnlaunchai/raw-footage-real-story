@@ -31,8 +31,8 @@
 //! if there is a network connection the platform can be asked for it. So
 //! caching one to disk buys nothing and costs the only thing that matters: a
 //! rotated or revoked key stays live on somebody's machine until a cache
-//! expires. Fetched into memory each session, refetched once on a 401, never
-//! persisted — see [`ProviderKeys`].
+//! expires. Fetched into memory once per session and never persisted — see
+//! [`ProviderKeys`], and [`crate::provider_keys`] for the fetching.
 
 use serde::{Deserialize, Serialize};
 
@@ -65,6 +65,20 @@ pub struct ProviderKey {
     pub key: Option<String>,
     #[serde(default = "byok")]
     pub mode: KeyMode,
+    /// Where to send this person's browser to put that right.
+    ///
+    /// The platform's own link, and preferred over anything composed here: it
+    /// is the side that knows whether this account needs to grant consent
+    /// before a key it already holds may be released, and which page says so.
+    /// Absent is ordinary — a build talking to a backend that does not send it
+    /// falls back to the dashboard address in [`crate::provider_keys`].
+    ///
+    /// Both spellings are accepted. The struct reads camelCase and the field
+    /// was specified as `consent_url`; a desktop binary that takes only one of
+    /// the two and silently offers no way forward on the other is not a trade
+    /// worth making for tidiness.
+    #[serde(default, alias = "consent_url")]
+    pub consent_url: Option<String>,
 }
 
 fn byok() -> KeyMode {
@@ -92,7 +106,7 @@ pub struct ProviderKeys {
 }
 
 fn absent() -> ProviderKey {
-    ProviderKey { present: false, key: None, mode: KeyMode::Byok }
+    ProviderKey { present: false, key: None, mode: KeyMode::Byok, consent_url: None }
 }
 
 /// A session as the identity provider issues it.
@@ -802,6 +816,40 @@ fn resolve(base: Option<String>, anon_key: Option<String>, provider: Option<Stri
         .then_some(PlatformConfig { base, anon_key, provider })
 }
 
+/// The access token this session is using, in memory and nowhere else.
+///
+/// Refresh tokens rotate — spending one retires it — so a second half of the
+/// app that wants an authenticated call must not go and spend another. The
+/// licence check already obtains an access token on launch; this is where it
+/// leaves it so the provider-key fetch can use the same one.
+///
+/// Deliberately not written to disk, for the reason [`crate::session`] gives:
+/// it lives about an hour and is derivable from the refresh token, so putting
+/// it at rest would be a second credential for no benefit.
+static ACCESS: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+pub(crate) fn remember_access(token: &str) {
+    if let Ok(mut slot) = ACCESS.write() {
+        *slot = Some(token.to_string());
+    }
+}
+
+pub(crate) fn current_access() -> Option<String> {
+    ACCESS.read().ok().and_then(|s| s.clone())
+}
+
+/// Drop the token, and whatever was fetched with it.
+///
+/// Called wherever the session ends. Leaving one account's access token — and
+/// the provider keys it bought — in memory for the next person to sign in is
+/// the desktop version of not logging out.
+pub(crate) fn forget_access() {
+    if let Ok(mut slot) = ACCESS.write() {
+        *slot = None;
+    }
+    crate::provider_keys::forget();
+}
+
 #[derive(Debug, serde::Serialize)]
 pub struct GateError {
     pub code: String,
@@ -892,6 +940,10 @@ pub async fn auth_sign_in(app: tauri::AppHandle) -> Result<SignedIn, GateError> 
     })
     .map_err(|e| GateError { code: "STORE".into(), message: e.to_string() })?;
 
+    // A fresh session starts with nothing carried over from the last one.
+    forget_access();
+    remember_access(&tokens.access_token);
+
     let _ = app;
     Ok(SignedIn { email: tokens.user.email, user_id: tokens.user.id })
 }
@@ -915,6 +967,7 @@ pub fn auth_sign_out(app: tauri::AppHandle) -> Result<(), GateError> {
     if let Some(dir) = app_dir(&app) {
         crate::licence_cache::forget(&dir);
     }
+    forget_access();
     crate::session::clear().map_err(|e| GateError { code: "STORE".into(), message: e.to_string() })
 }
 
@@ -1081,6 +1134,7 @@ pub async fn auth_licence(app: tauri::AppHandle) -> Result<Option<LicenceState>,
             // Dead beyond retrying. Forgetting it is what turns a confusing
             // permanent failure into an ordinary "please sign in again".
             let _ = crate::session::clear();
+            forget_access();
             // And the licence with it, for the same reason `auth_sign_out`
             // does: this is a sign-out, arrived at from the other direction.
             // `recall` would refuse the file once the session it names is
@@ -1096,6 +1150,10 @@ pub async fn auth_licence(app: tauri::AppHandle) -> Result<Option<LicenceState>,
     };
     crate::session::replace(&stored, &tokens.refresh_token, &now_iso())
         .map_err(|e| GateError { code: "STORE".into(), message: e.to_string() })?;
+
+    // Kept for the provider-key fetch, which would otherwise have to spend a
+    // second refresh token to ask a question this one can already answer.
+    remember_access(&tokens.access_token);
 
     let answer = licence(&cfg.base, &cfg.anon_key, &tokens.access_token).await.map_err(GateError::from)?;
     let body = answer.body;
@@ -1190,7 +1248,7 @@ pub async fn auth_licence(app: tauri::AppHandle) -> Result<Option<LicenceState>,
 /// period is computed in the frontend with `Date.parse`, which reads that as
 /// `NaN`, and a `NaN` age is infinitely old — which is to say every cached
 /// licence would have gone straight to read-only.
-fn now_iso() -> String {
+pub(crate) fn now_iso() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())

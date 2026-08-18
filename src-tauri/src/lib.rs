@@ -12,6 +12,7 @@ mod licence_cache;
 mod ollama;
 mod openai;
 mod platform;
+mod provider_keys;
 mod project;
 mod store;
 mod store_tests;
@@ -78,16 +79,13 @@ pub fn run() {
             tts::tts_synthesize,
             tts::tts_preview,
             tts::tts_synthesize_line,
-            secrets::secret_present,
-            secrets::secret_set,
-            secrets::secret_clear,
+            provider_keys::provider_key_status,
+            provider_keys::provider_manage_url,
             elevenlabs::elevenlabs_voices,
             elevenlabs::elevenlabs_usage,
-            elevenlabs::elevenlabs_test_key,
             elevenlabs::elevenlabs_synthesize,
             elevenlabs::elevenlabs_synthesize_line,
             openai::openai_generate,
-            openai::openai_test_key,
             openai::openai_probe_sampling,
             assembly::ffmpeg_detect,
             assembly::ffmpeg_set_path,

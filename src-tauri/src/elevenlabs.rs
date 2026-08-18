@@ -1,9 +1,12 @@
-//! ElevenLabs as an optional cloud voice provider (bring your own key).
+//! ElevenLabs as an optional cloud voice provider.
+//!
+//! The key comes from the signed-in account and nowhere else; see
+//! [`crate::provider_keys`].
 //!
 //! The call lives in Rust for two reasons. The webview's origin would face the
 //! usual CORS problem, and more importantly the API key never has to cross into
 //! JavaScript: the frontend asks for synthesis, this module reads the
-//! credential from the keychain and does the work.
+//! credential for the session and does the work.
 //!
 //! Audio is requested as `wav_24000`, which is exactly the format the rest of
 //! the pipeline already speaks — 24kHz mono, matching Kokoro. That removes the
@@ -24,14 +27,23 @@ pub const TARGET_SAMPLE_RATE: u32 = 24_000;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ElevenLabsError {
     pub code: String,
     pub message: String,
+    /// Where to send the browser to fix this, when somewhere would. See the
+    /// same field on [`crate::openai::OpenAiError`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manage_url: Option<String>,
 }
 
 impl ElevenLabsError {
     fn new(code: &str, message: impl Into<String>) -> Self {
-        Self { code: code.into(), message: message.into() }
+        Self { code: code.into(), message: message.into(), manage_url: None }
+    }
+
+    fn from_key_problem(p: crate::provider_keys::KeyProblem) -> Self {
+        Self { code: p.code().into(), message: p.message(), manage_url: p.manage_url() }
     }
 }
 
@@ -95,13 +107,14 @@ fn classify(status: u16, body: &str) -> ElevenLabsError {
     }
 }
 
-fn key() -> Result<String, ElevenLabsError> {
-    crate::secrets::get("elevenlabs").ok_or_else(|| {
-        ElevenLabsError::new(
-            "MISSING_API_KEY",
-            "Add your ElevenLabs API key to use cloud voices.",
-        )
-    })
+/// The key to call ElevenLabs with, from the account it belongs to.
+///
+/// The keychain is no longer consulted; see [`crate::provider_keys`] for why
+/// there is only one source now.
+async fn key() -> Result<String, ElevenLabsError> {
+    crate::provider_keys::key_for(crate::provider_keys::Provider::ElevenLabs)
+        .await
+        .map_err(ElevenLabsError::from_key_problem)
 }
 
 fn client() -> Result<reqwest::Client, ElevenLabsError> {
@@ -150,7 +163,7 @@ pub struct Usage {
 pub async fn elevenlabs_voices() -> Result<Vec<CloudVoice>, ElevenLabsError> {
     let resp = client()?
         .get(format!("{API}/v2/voices"))
-        .header("xi-api-key", key()?)
+        .header("xi-api-key", key().await?)
         .send()
         .await
         .map_err(transport_error)?;
@@ -187,7 +200,7 @@ pub async fn elevenlabs_voices() -> Result<Vec<CloudVoice>, ElevenLabsError> {
 pub async fn elevenlabs_usage() -> Result<Usage, ElevenLabsError> {
     let resp = client()?
         .get(format!("{API}/v1/user/subscription"))
-        .header("xi-api-key", key()?)
+        .header("xi-api-key", key().await?)
         .send()
         .await
         .map_err(transport_error)?;
@@ -208,31 +221,11 @@ pub async fn elevenlabs_usage() -> Result<Usage, ElevenLabsError> {
     })
 }
 
-/// Validate a key without storing it, so the setup screen can say plainly
-/// whether it works before committing it to the keychain.
-#[tauri::command]
-pub async fn elevenlabs_test_key(api_key: String) -> Result<Usage, ElevenLabsError> {
-    let resp = client()?
-        .get(format!("{API}/v1/user/subscription"))
-        .header("xi-api-key", api_key.trim())
-        .send()
-        .await
-        .map_err(transport_error)?;
+// `elevenlabs_test_key` was here, and went for the same reason as its OpenAI
+// twin: it validated a key handed in from the webview, and no key is handed in
+// from the webview any more. `elevenlabs_usage` answers the same question
+// about the key actually in use.
 
-    let status = resp.status().as_u16();
-    let body = resp.text().await.unwrap_or_default();
-    if !(200..300).contains(&status) {
-        return Err(classify(status, &body));
-    }
-    let json: serde_json::Value = serde_json::from_str(&body)
-        .map_err(|e| ElevenLabsError::new("BAD_RESPONSE", e.to_string()))?;
-    Ok(Usage {
-        character_count: json["character_count"].as_u64().unwrap_or(0),
-        character_limit: json["character_limit"].as_u64().unwrap_or(0),
-        tier: json["tier"].as_str().unwrap_or("unknown").to_string(),
-        resets_at_unix: json["next_character_count_reset_unix"].as_i64(),
-    })
-}
 
 // ---------------------------------------------------------------------------
 // Synthesis
@@ -271,7 +264,7 @@ pub async fn synthesize_bytes(
     let resp = client()?
         .post(format!("{API}/v1/text-to-speech/{voice_id}"))
         .query(&[("output_format", format!("wav_{TARGET_SAMPLE_RATE}"))])
-        .header("xi-api-key", key()?)
+        .header("xi-api-key", key().await?)
         .json(&body)
         .send()
         .await
@@ -620,7 +613,7 @@ async fn catalogue() -> Vec<(String, Vec<String>)> {
 async fn fetch_catalogue() -> Option<Vec<(String, Vec<String>)>> {
     let resp = client().ok()?
         .get(format!("{API}/v1/models"))
-        .header("xi-api-key", key().ok()?)
+        .header("xi-api-key", key().await.ok()?)
         .send()
         .await
         .ok()?;
@@ -924,7 +917,7 @@ mod model_survey {
     #[test]
     #[ignore = "needs a real API key"]
     fn which_models_and_languages() {
-        let Some(key) = crate::secrets::get("elevenlabs") else {
+        let Some(key) = std::env::var("ELEVENLABS_API_KEY").ok().filter(|v| !v.trim().is_empty()) else {
             eprintln!("no key available; skipping");
             return;
         };
@@ -984,7 +977,7 @@ mod bengali_ab {
     #[test]
     #[ignore = "needs a real API key; makes billed calls"]
     fn multilingual_v2_versus_v3() {
-        let Some(key) = crate::secrets::get("elevenlabs") else {
+        let Some(key) = std::env::var("ELEVENLABS_API_KEY").ok().filter(|v| !v.trim().is_empty()) else {
             eprintln!("no key available; skipping");
             return;
         };
@@ -1066,7 +1059,7 @@ mod format_check {
     #[test]
     #[ignore = "needs a real API key; makes billed calls"]
     fn wav_24000_is_available_on_each_model() {
-        let Some(key) = crate::secrets::get("elevenlabs") else {
+        let Some(key) = std::env::var("ELEVENLABS_API_KEY").ok().filter(|v| !v.trim().is_empty()) else {
             eprintln!("no key available; skipping");
             return;
         };
@@ -1165,7 +1158,7 @@ mod live_model_choice {
     #[test]
     #[ignore = "needs a real API key"]
     fn bengali_and_english_route_correctly() {
-        if crate::secrets::get("elevenlabs").is_none() {
+        if std::env::var("ELEVENLABS_API_KEY").ok().filter(|v| !v.trim().is_empty()).is_none() {
             eprintln!("no key available; skipping");
             return;
         }

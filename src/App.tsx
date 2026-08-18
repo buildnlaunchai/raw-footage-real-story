@@ -112,10 +112,10 @@ import {
   type TimelineDoc,
 } from "./lib/timeline";
 import { coverageFor, suggestedWordCount } from "./lib/scriptComposerCore";
+import { providerKeyStatus } from "./lib/accountKeys";
 import { audioUrl, concatNarration } from "./lib/voiceover";
 import {
   characterCount,
-  hasApiKey,
   providerFor,
   PROVIDERS,
   type LineFailure,
@@ -628,9 +628,9 @@ function App() {
     loadVoices();
   }, [loadVoices]);
 
-  useEffect(() => {
-    void detectFfmpeg().then(setFfmpeg);
-  }, []);
+  // ffmpeg is not detected separately here any more. `checkReadiness` runs on
+  // mount and sets it from the same probe the setup screen reads, so the two
+  // cannot disagree about a dependency that was installed a moment ago.
 
   /**
    * Pick the stored sign-in back up, and re-check it.
@@ -1875,12 +1875,25 @@ function App() {
   const checkReadiness = useCallback(async () => {
     setProbing(true);
     try {
-      const [p, openai, eleven] = await Promise.all([
+      // The keys are the account's now, so this is one question to the
+      // platform rather than two to the keychain — and it is allowed to fail
+      // without taking the probe with it. Being unable to ask says nothing
+      // about the machine, and the setup screen is largely about the machine.
+      const [p, keys] = await Promise.all([
         invoke<Probe>("readiness_probe", { ollamaHost: OLLAMA_HOST }),
-        hasApiKey("openai"),
-        hasApiKey("elevenlabs"),
+        providerKeyStatus().catch(() => []),
       ]);
+      const openai = keys.some((k) => k.provider === "openai" && k.linked);
+      const eleven = keys.some((k) => k.provider === "elevenlabs" && k.linked);
       setProbe(p);
+      // The same answer, given to the rest of the app.
+      //
+      // `ffmpeg` used to be detected once on mount and never again, so
+      // installing it from this screen left the readiness rows saying "ready"
+      // while import and render stayed disabled behind a `null` — which read
+      // as "the app needs restarting", because restarting was the only thing
+      // that fixed it. One probe, one answer, both readers.
+      setFfmpeg(p.ffmpeg);
       setHasOpenAiKey(openai);
       setHasElevenLabsKey(eleven);
       probeRef.current = p;

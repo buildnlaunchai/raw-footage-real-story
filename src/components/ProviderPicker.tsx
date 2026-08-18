@@ -11,16 +11,18 @@ import { useEffect, useState } from "react";
 import type { ScriptLanguage } from "../lib/languages";
 import {
   characterCount,
-  clearApiKey,
   fetchUsage,
-  hasApiKey,
   PROVIDERS,
-  setApiKey,
-  testApiKey,
   type CloudUsage,
   type ProviderId,
   type VoiceOption,
 } from "../lib/ttsProviders";
+import {
+  asAccountKeyError,
+  openKeyManagement,
+  statusFor,
+  type ProviderStatus,
+} from "../lib/accountKeys";
 
 interface Props {
   providerId: ProviderId;
@@ -60,53 +62,52 @@ export function ProviderPicker({
   const provider = PROVIDERS[providerId];
   // A pasted id is simply one the listing does not contain.
   const listed = voices.some((v) => v.id === voiceId);
-  const [keyPresent, setKeyPresent] = useState<boolean | null>(null);
-  const [keyInput, setKeyInput] = useState("");
-  const [testing, setTesting] = useState(false);
+  const [status, setStatus] = useState<ProviderStatus | null>(null);
+  const [checking, setChecking] = useState(false);
   const [usage, setUsage] = useState<CloudUsage | null>(null);
-  const [keyError, setKeyError] = useState<string | null>(null);
+  /**
+   * Why the account could not be asked. Never why a key was refused — see the
+   * same split in `ScriptProviderSetup`.
+   */
+  const [problem, setProblem] = useState<{ message: string; manageUrl: string | null } | null>(null);
 
-  useEffect(() => {
+  async function refresh(force = false) {
     if (!provider.capabilities.needsApiKey) {
-      setKeyPresent(null);
+      setStatus(null);
+      setProblem(null);
       return;
     }
-    void hasApiKey().then(setKeyPresent);
+    setChecking(true);
+    try {
+      const next = await statusFor("elevenlabs", force);
+      setStatus(next);
+      setProblem(null);
+      // A key that has just appeared is a voice list worth loading.
+      if (next?.linked) onReloadVoices();
+    } catch (err) {
+      const e = asAccountKeyError(err);
+      setStatus(null);
+      setProblem({ message: e.message, manageUrl: e.manageUrl });
+    } finally {
+      setChecking(false);
+    }
+  }
+
+  useEffect(() => {
+    // Re-asked when the chosen provider changes, and not on `refresh`'s
+    // identity — it is redefined every render, so depending on it would ask the
+    // platform once per render.
+    void refresh();
   }, [provider]);
+
+  const linked = status?.linked === true;
 
   // Usage is refreshed whenever it might have changed, and its failure is
   // never fatal — not knowing the quota should not block generating.
   useEffect(() => {
-    if (providerId !== "elevenlabs" || !keyPresent) return;
+    if (providerId !== "elevenlabs" || !linked) return;
     void fetchUsage().then(setUsage).catch(() => setUsage(null));
-  }, [providerId, keyPresent, scriptLines.length]);
-
-  async function onSaveKey() {
-    setTesting(true);
-    setKeyError(null);
-    try {
-      // Validate before storing, so a typo never becomes a saved credential
-      // that fails later with a confusing message.
-      const u = await testApiKey(keyInput.trim());
-      const stored = await setApiKey(keyInput.trim());
-      // Confirm against the store rather than assuming the write took.
-      const present = stored && (await hasApiKey());
-      setKeyPresent(present);
-      if (!present) {
-        setKeyError(
-          "The key couldn't be saved to your system keychain. Set ELEVENLABS_API_KEY instead.",
-        );
-        return;
-      }
-      setUsage(u);
-      setKeyInput("");
-      onReloadVoices();
-    } catch (err) {
-      setKeyError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setTesting(false);
-    }
-  }
+  }, [providerId, linked, scriptLines.length]);
 
   const chars = characterCount(scriptLines);
   const remaining = usage ? usage.characterLimit - usage.characterCount : null;
@@ -156,47 +157,69 @@ export function ProviderPicker({
         </div>
       )}
 
-      {provider.capabilities.needsApiKey && keyPresent === false && (
-        <div className="key-entry">
-          <label className="field-label" htmlFor="api-key">
-            ElevenLabs API key
-          </label>
-          <div className="voice-row">
-            <input
-              id="api-key"
-              className="clip-input"
-              type="password"
-              autoComplete="off"
-              spellCheck={false}
-              value={keyInput}
-              placeholder="Paste your key"
-              onChange={(e) => setKeyInput(e.currentTarget.value)}
-            />
+      {/* Could not ask. Not the same thing as having no key. */}
+      {provider.capabilities.needsApiKey && problem && (
+        <div className="warning" role="status">
+          <strong>Couldn’t check your account.</strong>
+          <span>{problem.message}</span>
+          <div className="actions" style={{ marginTop: "0.6rem" }}>
             <button
               type="button"
-              className="primary-button"
-              onClick={onSaveKey}
-              disabled={testing || keyInput.trim().length === 0}
+              className="ghost-button small"
+              onClick={() => void refresh(true)}
+              disabled={checking}
             >
-              {testing ? "Checking…" : "Test and save"}
+              {checking ? "Checking…" : "Try again"}
             </button>
+            {problem.manageUrl && (
+              <button
+                type="button"
+                className="ghost-button small"
+                onClick={() => void openKeyManagement("elevenlabs", problem.manageUrl ?? undefined)}
+              >
+                Open my dashboard
+              </button>
+            )}
           </div>
-          <p className="placeholder-note">
-            Stored in your system keychain, never in a project file or export.
-          </p>
-          {keyError && (
-            <div className="error" role="alert">
-              <strong>That key didn’t work.</strong>
-              <span>{keyError}</span>
-            </div>
-          )}
         </div>
       )}
 
-      {provider.capabilities.needsApiKey && keyPresent && (
+      {/* Asked, and the answer was no. */}
+      {provider.capabilities.needsApiKey && !problem && status && !linked && (
+        <div className="key-entry">
+          <strong>Your account has no ElevenLabs key available yet.</strong>
+          <p className="placeholder-note">
+            Keys are managed on your BuildnLaunchAI account, not on this
+            computer, so one key works everywhere you use the app and revoking
+            it takes effect straight away. Add or allow your ElevenLabs key on
+            the dashboard, then re-check here.
+          </p>
+          <div className="actions">
+            <button
+              type="button"
+              className="primary-button"
+              onClick={() => void openKeyManagement("elevenlabs", status.manageUrl)}
+            >
+              Manage my ElevenLabs key
+            </button>
+            <button
+              type="button"
+              className="ghost-button"
+              onClick={() => void refresh(true)}
+              disabled={checking}
+            >
+              {checking ? "Checking…" : "Re-check"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {provider.capabilities.needsApiKey && linked && (
         <div className="key-status">
           <span className="hint">
-            Key saved in your keychain
+            {status?.fromEnvironment
+              ? "Using ELEVENLABS_API_KEY from this machine’s environment"
+              : `Using the ElevenLabs key on your account${status?.hint ? ` (…${status.hint})` : ""}`}
             {usage && (
               <>
                 {" · "}
@@ -208,18 +231,14 @@ export function ProviderPicker({
           <button
             type="button"
             className="ghost-button small"
-            onClick={async () => {
-              await clearApiKey();
-              setKeyPresent(false);
-              setUsage(null);
-            }}
+            onClick={() => void openKeyManagement("elevenlabs", status?.manageUrl)}
           >
-            Remove key
+            Manage
           </button>
         </div>
       )}
 
-      {(providerId === "local" || keyPresent) && (
+      {(providerId === "local" || linked) && (
         <>
           <label className="field-label" htmlFor="voice-select">
             Voice

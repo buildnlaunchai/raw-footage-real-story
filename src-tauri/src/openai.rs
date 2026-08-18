@@ -1,4 +1,7 @@
-//! OpenAI as an optional cloud provider for script generation (bring your own key).
+//! OpenAI as an optional cloud provider for script generation.
+//!
+//! The key comes from the signed-in account and nowhere else; see
+//! [`crate::provider_keys`].
 //!
 //! Uses the **Responses API**, which is current; Chat Completions is legacy.
 //! Structured output goes in `text.format` with `strict: true` rather than the
@@ -40,14 +43,27 @@ fn timeout_for(words: Option<u32>) -> Duration {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct OpenAiError {
     pub code: String,
     pub message: String,
+    /// Where to send the browser to fix this, when somewhere would.
+    ///
+    /// Carried on the error rather than pieced together in the UI, because the
+    /// destination depends on what the platform said about *this* account —
+    /// its consent link where there is one, the dashboard otherwise — and that
+    /// is known here and not there.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manage_url: Option<String>,
 }
 
 impl OpenAiError {
     fn new(code: &str, message: impl Into<String>) -> Self {
-        Self { code: code.into(), message: message.into() }
+        Self { code: code.into(), message: message.into(), manage_url: None }
+    }
+
+    fn from_key_problem(p: crate::provider_keys::KeyProblem) -> Self {
+        Self { code: p.code().into(), message: p.message(), manage_url: p.manage_url() }
     }
 }
 
@@ -111,12 +127,15 @@ fn classify(status: u16, body: &str) -> OpenAiError {
     }
 }
 
-fn key_error() -> OpenAiError {
-    OpenAiError::new("MISSING_API_KEY", "Add your OpenAI API key to use cloud script generation.")
-}
-
-fn key() -> Result<String, OpenAiError> {
-    crate::secrets::get("openai").ok_or_else(key_error)
+/// The key to call OpenAI with, from the account it belongs to.
+///
+/// There is no local alternative to fall back to any more, so this either
+/// returns the account's key or returns the reason it cannot — including,
+/// where one exists, the page that fixes it. See [`crate::provider_keys`].
+async fn key() -> Result<String, OpenAiError> {
+    crate::provider_keys::key_for(crate::provider_keys::Provider::OpenAi)
+        .await
+        .map_err(OpenAiError::from_key_problem)
 }
 
 /// Adapt one of our JSON schemas to OpenAI's strict mode.
@@ -185,7 +204,7 @@ pub async fn openai_generate(
     // Roughly how many words are being asked for, so the wait can match.
     words: Option<u32>,
 ) -> Result<OpenAiResult, OpenAiError> {
-    generate_with_key(key()?, model, prompt, system, format, temperature, seed, words).await
+    generate_with_key(key().await?, model, prompt, system, format, temperature, seed, words).await
 }
 
 /// The request itself, with the credential handed in rather than looked up.
@@ -339,34 +358,12 @@ pub fn extract_output(json: &serde_json::Value) -> Result<OpenAiResult, OpenAiEr
     Ok(OpenAiResult { text, usage })
 }
 
-/// Validate a key without storing it, and report what the account can see.
-#[tauri::command]
-pub async fn openai_test_key(api_key: String, model: String) -> Result<TokenUsage, OpenAiError> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(60))
-        .build()
-        .map_err(|e| OpenAiError::new("CLIENT_INIT", e.to_string()))?;
+// `openai_test_key` was here. It took a key from the webview and tried it,
+// which was the point when there was a field to paste one into. There is not:
+// the key comes from the account, and the account is the only thing that can
+// say whether it is good. A command that accepts a credential from JavaScript
+// is a way back to the local path, so it goes with the field it served.
 
-    let resp = client
-        .post(API)
-        .bearer_auth(api_key.trim())
-        .json(&serde_json::json!({
-            "model": model,
-            "input": [{ "role": "user", "content": "Reply with the single word: ok" }],
-        }))
-        .send()
-        .await
-        .map_err(|e| OpenAiError::new("NETWORK", e.to_string()))?;
-
-    let status = resp.status().as_u16();
-    let text = resp.text().await.unwrap_or_default();
-    if !(200..300).contains(&status) {
-        return Err(classify(status, &text));
-    }
-    let json: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|e| OpenAiError::new("BAD_RESPONSE", e.to_string()))?;
-    Ok(extract_output(&json)?.usage)
-}
 
 /// Does this model actually honour `temperature` and `seed`?
 ///
@@ -442,18 +439,33 @@ mod tests {
         assert_eq!(code_for(429, r#"{"error":{"type":"rate_limit_error"}}"#), "RATE_LIMITED");
     }
 
-    /// A missing credential becomes a typed error the UI can act on.
+    /// A missing credential becomes a typed error the UI can act on — and now
+    /// one that carries somewhere to go.
     ///
-    /// This is a pure check on purpose. Two earlier attempts were worse: the
-    /// first asserted `openai_generate` failed, which only held while the
-    /// machine had no key and otherwise made a live billed call; the second
-    /// masked `OPENAI_API_KEY` with a blank value, which made `get()` fall
-    /// through to the keychain and hang on the macOS permission prompt.
+    /// Still a pure check, for the reasons two earlier attempts established:
+    /// asserting `openai_generate` fails only held on a machine with no key and
+    /// otherwise made a live billed call, and blanking the environment variable
+    /// sent the old lookup through to the keychain, where it hung on the macOS
+    /// permission prompt.
+    ///
+    /// What changed is the shape of the answer. There is no local key to add,
+    /// so "MISSING_API_KEY" would be an instruction with nothing behind it; the
+    /// error names the dashboard instead, and the UI renders a button from it.
     #[test]
-    fn missing_key_returns_a_typed_error() {
-        let err = super::key_error();
-        assert_eq!(err.code, "MISSING_API_KEY");
+    fn an_unlinked_key_returns_a_typed_error_with_somewhere_to_go() {
+        let err = super::OpenAiError::from_key_problem(
+            crate::provider_keys::KeyProblem::NotLinked {
+                provider: crate::provider_keys::Provider::OpenAi,
+                manage_url: "https://buildnlaunchai.com/dashboard/keys?provider=openai".into(),
+            },
+        );
+        assert_eq!(err.code, "KEY_NOT_LINKED");
         assert!(!err.message.is_empty(), "the error must carry a message for the UI");
+        assert_eq!(
+            err.manage_url.as_deref(),
+            Some("https://buildnlaunchai.com/dashboard/keys?provider=openai"),
+            "the button on that error has nowhere to go",
+        );
     }
 
     #[test]
@@ -566,7 +578,7 @@ mod param_probe {
     #[tokio::test]
     #[ignore = "needs a real API key"]
     async fn which_sampling_parameters_are_accepted() {
-        if crate::secrets::get("openai").is_none() {
+        if std::env::var("OPENAI_API_KEY").ok().filter(|v| !v.trim().is_empty()).is_none() {
             eprintln!("no key available; skipping");
             return;
         }
@@ -599,14 +611,17 @@ mod param_probe {
 
 #[cfg(test)]
 mod comparison {
-    /// Runs the Node comparison harness with the key from the keychain.
+    /// Runs the Node comparison harness with the key from the environment.
+    ///
+    /// `OPENAI_API_KEY`, which is the one place a provider key comes from
+    /// outside a signed-in session — the keychain no longer holds one.
     ///
     /// The key is handed to the child process in its environment, so it never
     /// reaches disk, a log, or a command line.
     #[test]
     #[ignore = "needs a real API key; makes billed calls"]
     fn ollama_vs_openai() {
-        let Some(key) = crate::secrets::get("openai") else {
+        let Some(key) = std::env::var("OPENAI_API_KEY").ok().filter(|v| !v.trim().is_empty()) else {
             eprintln!("no key available; skipping");
             return;
         };
