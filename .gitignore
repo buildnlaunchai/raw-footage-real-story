@@ -28,6 +28,16 @@ src-tauri/gen/schemas/
 src-tauri/WixTools/
 **/*.rs.bk
 
+# --- Packaged builds -------------------------------------------------------
+# Where a built installer is copied to be tested by hand. The canonical output
+# is under src-tauri/target/, which is already ignored above; this is the copy
+# that gets pulled out of a CI artifact and left at the repo root, and it is
+# tens of megabytes of binary that must never be swept in by `git add -A`.
+#
+# Anchored, so it means this directory and not any directory anywhere that
+# happens to be called "release".
+/release/
+
 # --- Bundled model assets --------------------------------------------------
 # Kokoro weights and voice packs are tracked via Git LFS (see .gitattributes),
 # not ignored: they must ship with the app for the offline guarantee to hold.
