@@ -190,14 +190,34 @@ jobs:
           releaseDraft: true
           prerelease: false
           releaseBody: |
-            Unsigned build. Your OS will warn you before it opens.
-            See INSTALL.md for what the warning says and how to get past it.
+            **This build requires a BuildnLaunchAI account with an active
+            subscription.** The app opens your browser to sign in and never
+            sees your password.
 
-            This build requires a BuildnLaunchAI account with an active
-            subscription. Because the build is unsigned, macOS may not hand the
-            app back its saved sign-in after an update — if it asks you to log
-            in again after updating, that is why, and signing in again is all
-            it needs.
+            You have to be online the first time. After that it keeps working
+            offline for up to a month, and starts reminding you to connect
+            about a week before that runs out. Even past it your existing
+            projects still open and still export — only starting new work waits
+            for a connection.
+
+            If you are refused, the screen says which of four reasons it is,
+            because the way out differs: never subscribed, membership lapsed,
+            account suspended, or a fault at our end. The last two are fixed by
+            emailing support@buildnlaunchai.com rather than by paying again —
+            paying again on a suspended account takes the money and changes
+            nothing. You get the same message offline as online.
+
+            OpenAI and ElevenLabs keys are held against your account rather
+            than typed into the app, so one key works on every machine you sign
+            in on and revoking it takes effect everywhere at once. Neither is
+            required: scripts can be written locally through Ollama, and
+            English narration uses the voices built into the app.
+
+            Unsigned build. Your OS will warn you before it opens. See
+            INSTALL.md for what the warning says and how to get past it —
+            and because it is unsigned, macOS may not hand the app back its
+            saved sign-in after an update. If it asks you to log in again after
+            updating, that is why, and signing in again is all it needs.
 
       # ── gates 2 and 3: is the artifact people download actually usable? ──
       #

@@ -13,7 +13,7 @@ normally.
 
 ## macOS
 
-**Which file:** `Raw Footage, Real Story_0.1.0_aarch64.dmg`
+**Which file:** `Raw Footage, Real Story_0.2.0_aarch64.dmg`
 
 **Apple Silicon only** — an M1, M2, M3 or M4 Mac, running macOS 11 or later.
 
@@ -57,7 +57,7 @@ Anyway" for it. Delete the app and download the `.dmg` again.
 
 ## Windows
 
-**Which file:** `Raw Footage, Real Story_0.1.0_x64-setup.exe` (about 87 MB)
+**Which file:** `Raw Footage, Real Story_0.2.0_x64-setup.exe` (about 87 MB)
 
 64-bit Windows 10 or 11. It installs for your user only, so it does **not** ask
 for an administrator password.
@@ -90,6 +90,22 @@ offline for up to a month, so a trip with no usable wifi is not a problem; it
 starts reminding you to connect about a week before that runs out. Even past
 it, your existing projects still open and still export — only starting new work
 waits for a connection.
+
+### Your OpenAI and ElevenLabs keys live on your account too
+
+If you use either cloud service, its key is held against your BuildnLaunchAI
+account rather than typed into the app. There is no key box on this build and
+nothing kept on your computer — the app fetches the key for each session and
+forgets it when you quit.
+
+That means one key works on every machine you sign in on, and revoking it on
+your dashboard takes effect everywhere at once rather than leaving a copy live
+in a keychain somebody has to remember to clear.
+
+Where a key is missing, or where you have not yet allowed the app to use one,
+the screen says which of those it is and gives you a button straight to the
+page that fixes it. Neither service is required: script writing runs locally
+through Ollama, and English narration uses the voices built into the app.
 
 ### If it asks you to sign in again after an update
 
