@@ -43,6 +43,11 @@ sha2 = "0.10"
 # them for correctness rather than incidentally.
 getrandom = "0.3"
 base64 = "0.22"
+# Licence tokens are RS256 JWTs signed by the platform. Verified offline, so
+# a cached entitlement is evidence rather than an editable file — see
+# src/licence.rs. Its crypto is `ring`, which rustls already pulls in, so this
+# adds a parser and not a second crypto stack.
+jsonwebtoken = "9"
 tauri-plugin-dialog = "2.7.2"
 
 # For `setrlimit` only. A GUI app inherits macOS's 256-descriptor soft limit

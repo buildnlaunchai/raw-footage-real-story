@@ -140,8 +140,16 @@ import {
   type RenderProgress,
 } from "./lib/assembly";
 import { AUTH_GATE_ENABLED } from "./lib/authGate";
-import { gateFor, letsAppRender, type Gate } from "./lib/entitlement";
-import { GraceBanner, LoginGate } from "./components/LoginGate";
+import {
+  allowsNewProjects,
+  fromLicence,
+  gateFor,
+  letsAppRender,
+  type CachedLicence,
+  type Gate,
+  type LicenceState,
+} from "./lib/entitlement";
+import { GraceBanner, LoginGate, ReadOnlyBanner } from "./components/LoginGate";
 import "./App.css";
 
 /**
@@ -610,6 +618,46 @@ function App() {
     void detectFfmpeg().then(setFfmpeg);
   }, []);
 
+  /**
+   * Pick the stored sign-in back up, and re-check it.
+   *
+   * Without this a session survives in the keychain and nothing reads it, so
+   * every launch shows the sign-in screen to somebody who signed in
+   * yesterday — the storage half working and the restoring half missing.
+   *
+   * Only when the gate is on: with the flag off there is no gate to restore
+   * into, and a launch should not be touching the keychain or the network for
+   * a screen nobody will see.
+   */
+  useEffect(() => {
+    if (!AUTH_GATE_ENABLED) return;
+    let cancelled = false;
+    void (async () => {
+      const who = await invoke<{ email: string } | null>("auth_current").catch(() => null);
+      // Nobody stored is the signed-out screen, which `gateFor` reaches from
+      // a null session without consulting anything else.
+      if (cancelled || !who) return;
+      setGateSession({ email: who.email });
+      // What this machine last knew, read before the live check rather than
+      // after it, and this order is the whole reason the grace period works.
+      // `onGateRecheck` can take a TCP timeout to discover there is no
+      // network; if it gets there with nothing behind it, `gateFor` has no
+      // cache to fall back on and lands on `offline-first-run` — the one
+      // state that blocks somebody who has been paying for a year. Loading
+      // the last answer first means the fallback exists before it is needed.
+      const remembered = await invoke<CachedLicence | null>("auth_cached_licence").catch(() => null);
+      if (cancelled) return;
+      if (remembered) setGateCached(remembered);
+      // Until this returns the gate reads `checking`, which is the one honest
+      // thing to show: signed in, and not yet known to be entitled.
+      await onGateRecheck();
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // Once, on launch.
+  }, []);
+
   // --- project lifecycle ---------------------------------------------------
 
   function resetVideoState() {
@@ -625,6 +673,16 @@ function App() {
   }
 
   async function onCreate(name: string) {
+    // Checked here and not only on the button. The gallery hides the way in
+    // when this is false, but a hidden control is a suggestion, and this is
+    // the single function that starts new work — so this is where the rule
+    // belongs. Existing projects deliberately go on opening and exporting;
+    // see `read-only` in entitlement.ts for why holding somebody's finished
+    // film hostage is a different and worse thing than gating new work.
+    if (!allowsNewProjects(gate)) {
+      setError("Connect to the internet to start a new project. Everything already here still opens and still exports.");
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -791,14 +849,41 @@ function App() {
   /**
    * Ask the platform whether this account is entitled.
    *
-   * Not yet wired to a licence endpoint — that is the half still waiting on
-   * the backend. Until it exists this reports `unreachable`, which is the
-   * honest answer and, deliberately, the one that leans on the cache rather
-   * than locking anybody out.
+   * The mapping from what comes back to what the gate does is the whole
+   * `entitlement.ts` rule in three lines, and the third one is the one that
+   * matters: **anything that is not a definite answer becomes `unreachable`,
+   * never `inactive`.** A refused request is a refused *token* — a real "this
+   * subscription is not active" arrives as a perfectly successful response
+   * that says so. Collapsing the two would show a login wall to somebody on a
+   * plane holding the footage they are on that trip to cut.
    */
   async function onGateRecheck() {
     setGateError(null);
-    setGateLive({ kind: "unreachable" });
+    try {
+      const state = await invoke<LicenceState | null>("auth_licence");
+      if (!state) {
+        // The stored session was refused and has been forgotten. Signed out
+        // is the truthful state, not an error to explain.
+        setGateSession(null);
+        setGateCached(null);
+        setGateLive({ kind: "not-attempted" });
+        return;
+      }
+      const { live, cached } = fromLicence(state);
+      setGateLive(live);
+      // `checkedAt` is the platform's clock, not this machine's — see
+      // `LicenceState` in platform.rs.
+      setGateCached(cached);
+    } catch (err) {
+      setGateLive({ kind: "unreachable" });
+      // Said out loud, but not as a refusal: the gate falls back to the cache
+      // and the person is told why it could not check.
+      setGateError(errorText(err));
+      // A session the platform has retired is cleared in the backend; ask who
+      // is signed in now rather than assuming it survived.
+      const who = await invoke<{ email: string } | null>("auth_current").catch(() => null);
+      if (!who) setGateSession(null);
+    }
   }
 
   const onSave = useCallback(async () => {
@@ -2613,6 +2698,9 @@ function App() {
       {gate.state === "allowed-grace" && (
         <GraceBanner daysLeft={gate.daysLeft} onRecheck={() => void onGateRecheck()} />
       )}
+      {gate.state === "read-only" && (
+        <ReadOnlyBanner daysOffline={gate.daysOffline} onRecheck={() => void onGateRecheck()} />
+      )}
       <LibrarySidebar
         view={view}
         onView={(v) => {
@@ -2624,6 +2712,7 @@ function App() {
         openProjectId={manifest?.project.id ?? null}
         onOpenProject={openProjectById}
         onNewProject={() => setView("projects")}
+        canCreate={allowsNewProjects(gate)}
         onRefresh={() => void refreshLibrary()}
         refreshing={refreshing}
         storage={storage}
@@ -2697,6 +2786,7 @@ function App() {
             projects={projects}
             onRefresh={refreshLibrary}
             onCreate={onCreate}
+            canCreate={allowsNewProjects(gate)}
             // The one way in, so opening a collection cannot mean two
             // different things. This used to route to Home, which was the
             // workspace until Home was deliberately emptied — after which

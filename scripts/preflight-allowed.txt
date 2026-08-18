@@ -1,0 +1,23 @@
+# Secret-shaped strings that are not secrets, allowed by SHA-256 of the
+# exact matched string. Read scripts/preflight.sh for the rule. Adding a line
+# here is a deliberate act: check what the value is before you do it.
+#
+# A failing scan prints the hash it wants, so allowing something is a copy of
+# one line — which is the point at which somebody has to decide whether the
+# string really is publishable.
+
+# The Supabase project's publishable ("anon") key — src-tauri/src/platform.rs.
+# Published in every web page the platform serves; row-level security is what
+# protects the data behind it. The service_role key is NOT this and must never
+# be added here.
+13339e97428d14335f8a36e738a841a312b45706316282047d56bc7bbf7f59c9
+
+# Licence-token fixtures — src-tauri/src/licence.rs. RS256 tokens signed by a
+# 2048-bit key generated for these tests and thrown away; only its public half
+# is in the repository, at src-tauri/keys/testing-only.pub.pem. They assert
+# nothing about any real account and unlock nothing.
+babd16463139dcc056429a4b99b6e13fc35a3d3ba3e0cccb5a8085d260cfa5db
+f8436b6677d12d38381ca0650d1f3a845efb1ac0c993f480556015970aa8a9b2
+3c40d232169622e929fba21745d48278d918865c7c65bdfecc4f0e7c78e9b7dd
+c7919677b01be680babeada10f8b816daedb1afcfc27fccb6a6b10d7b2de4ab1
+1062b1cd138ff7879ba96140a670f95d9cc99ff13cecb06e2d86d00ff1f45c17

@@ -61,6 +61,44 @@ export type LiveCheck =
   | { kind: "unreachable" }
   | { kind: "not-attempted" };
 
+/**
+ * What `auth_licence` hands back after asking the platform.
+ *
+ * `null` from the command is not this shape and not an error: it means the
+ * stored session was refused and forgotten, and the honest state is signed
+ * out.
+ */
+export interface LicenceState {
+  active: boolean;
+  /** ISO-8601 from the platform's own `Date` header, not this machine's clock. */
+  checkedAt: string;
+  status?: string;
+  plan?: string;
+  /**
+   * Whether the signature on the platform's licence token was actually
+   * checked. `false` is the honest answer for a build with no key compiled in
+   * yet — it does **not** mean the check failed.
+   *
+   * Nothing may be written to disk on a `false`: an unsigned entitlement at
+   * rest on somebody's machine is a suggestion, not evidence.
+   */
+  verified: boolean;
+}
+
+/**
+ * A licence answer, as the two pieces of gate state it becomes.
+ *
+ * Both come from one response on purpose: a live check that updates the cache
+ * to a different account's answer, or updates it with this machine's clock, is
+ * how a grace period silently becomes wrong.
+ */
+export function fromLicence(state: LicenceState): { live: LiveCheck; cached: CachedLicence } {
+  return {
+    live: { kind: state.active ? "active" : "inactive" },
+    cached: { active: state.active, checkedAt: state.checkedAt },
+  };
+}
+
 export interface GateInput {
   /** Null when nobody is signed in on this machine. */
   session: { email: string } | null;

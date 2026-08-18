@@ -7,6 +7,8 @@ mod assembly_tests;
 mod ffmpeg;
 mod g2p;
 mod hdr_check;
+mod licence;
+mod licence_cache;
 mod ollama;
 mod openai;
 mod platform;
@@ -37,6 +39,13 @@ pub fn run() {
         let _ = resources::init_from_exe();
         std::process::exit(selftest::probe_model(&path));
     }
+    // `--licence-probe <access-token>`: what does the platform actually
+    // answer? The one thing about this wiring that cannot be settled without
+    // a real signed-in user, made a single command rather than a rebuild.
+    if let Some(i) = args.iter().position(|a| a == "--licence-probe") {
+        let token = args.get(i + 1).cloned().unwrap_or_default();
+        std::process::exit(platform::probe_licence(&token));
+    }
 
 
     tauri::Builder::default()
@@ -61,6 +70,8 @@ pub fn run() {
             platform::auth_sign_in,
             platform::auth_sign_out,
             platform::auth_current,
+            platform::auth_licence,
+            platform::auth_cached_licence,
             ollama::ollama_generate,
             ollama::ollama_health,
             tts::tts_list_voices,

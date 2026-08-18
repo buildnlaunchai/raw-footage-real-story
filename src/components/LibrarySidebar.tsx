@@ -25,6 +25,8 @@ interface Props {
   openProjectId: string | null;
   onOpenProject: (id: string) => void;
   onNewProject: () => void;
+  /** False past the grace period — see `allowsNewProjects` in entitlement.ts. */
+  canCreate: boolean;
   /** Re-read projects and storage from disk. */
   onRefresh: () => void;
   refreshing: boolean;
@@ -55,6 +57,7 @@ export function LibrarySidebar({
   openProjectId,
   onOpenProject,
   onNewProject,
+  canCreate,
   onRefresh,
   refreshing,
   storage,
@@ -131,7 +134,8 @@ export function LibrarySidebar({
             type="button"
             className="lib-add"
             onClick={onNewProject}
-            title="New project"
+            disabled={!canCreate}
+            title={canCreate ? "New project" : "Connect to the internet to start a new project"}
             aria-label="New project"
           >
             +

@@ -3987,3 +3987,11 @@ kbd {
   color: #ffe8b0;
   font-size: 0.88rem;
 }
+
+/* Past the grace period rather than approaching it. A shade further along the
+   same scale, not a red alert: the app behind this still works, and the person
+   reading it is offline and already knows it. */
+.gate-banner.is-stale {
+  background: #3a2a20;
+  color: #ffd6b8;
+}

@@ -10,6 +10,7 @@ import {
   WARN_AFTER_DAYS,
   allowsNewProjects,
   daysBetween,
+  fromLicence,
   gateFor,
   letsAppRender,
 } from "../.test-build/lib/entitlement.js";
@@ -150,6 +151,45 @@ test("a clock set into the past does not extend the grace period", () => {
   // Rolling the machine clock back would otherwise make the cache look newer
   // than it is. Ages clamp at zero rather than going negative.
   assert.equal(daysBetween(new Date(NOW.getTime() + 86400000).toISOString(), NOW), 0);
+});
+
+test("a licence answer becomes both halves of the gate's state at once", () => {
+  const { live, cached } = fromLicence({
+    active: true,
+    checkedAt: "2026-08-17T21:04:25Z",
+    status: "active",
+    verified: true,
+  });
+  assert.deepEqual(live, { kind: "active" });
+  // The cache records what the platform said and when the platform said it —
+  // not when this machine thinks it heard.
+  assert.deepEqual(cached, { active: true, checkedAt: "2026-08-17T21:04:25Z" });
+});
+
+test("a licence the platform says no to is inactive, and is cached as such", () => {
+  const { live, cached } = fromLicence({
+    active: false,
+    checkedAt: "2026-08-17T21:04:25Z",
+    status: "canceled",
+    verified: true,
+  });
+  assert.deepEqual(live, { kind: "inactive" });
+  // Cached as a "no" on purpose: going offline afterwards must not launder a
+  // real refusal into a month of grace.
+  assert.equal(cached.active, false);
+  const g = gateFor({ session: SESSION, cached, live: { kind: "unreachable" }, now: NOW });
+  assert.equal(g.state, "no-licence");
+});
+
+test("a check that never landed leans on the cache instead of refusing", () => {
+  // The rule the whole design rests on, stated where it can be broken: a
+  // failed check is `unreachable`, never `inactive`. This is what App.tsx's
+  // catch does, pinned here so a "simplification" that maps an error to a
+  // refusal has to argue with a test first.
+  const cached = fromLicence({ active: true, checkedAt: daysAgo(2), verified: true }).cached;
+  const g = gateFor({ session: SESSION, cached, live: { kind: "unreachable" }, now: NOW });
+  assert.equal(g.state, "allowed");
+  assert.equal(letsAppRender(g), true);
 });
 
 test("the gate ships off unless something says otherwise, exactly", () => {

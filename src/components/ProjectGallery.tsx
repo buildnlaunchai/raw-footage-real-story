@@ -31,6 +31,12 @@ interface Props {
   /** Re-read projects, storage and the clip library after a change here. */
   onRefresh: () => void | Promise<void>;
   onCreate: (name: string) => void;
+  /**
+   * False once the grace period has run out. Existing projects still open and
+   * still export — only starting new ones waits for a connection. The rule
+   * itself is `allowsNewProjects` in entitlement.ts; this only renders it.
+   */
+  canCreate: boolean;
   onOpen: (id: string) => void;
   busy: boolean;
   error: string | null;
@@ -50,6 +56,7 @@ export function ProjectGallery({
   projects,
   onRefresh,
   onCreate,
+  canCreate,
   onOpen,
   busy,
   error,
@@ -297,13 +304,22 @@ export function ProjectGallery({
         <div className="section-head">
           <h2>Projects</h2>
           {!naming && (
-            <button type="button" className="gallery-ghost" onClick={() => setNaming(true)}>
+            <button
+              type="button"
+              className="gallery-ghost"
+              onClick={() => setNaming(true)}
+              disabled={!canCreate}
+              // Said on the control rather than only in the banner: somebody
+              // who reaches for this button is owed the reason here, where
+              // they are looking.
+              title={canCreate ? undefined : "Connect to the internet to start a new project"}
+            >
               + New project
             </button>
           )}
         </div>
 
-        {naming && (
+        {naming && canCreate && (
           <form
             className="gallery-new"
             onSubmit={(e) => {

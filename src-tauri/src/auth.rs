@@ -21,10 +21,25 @@
 //!
 //! The listener binds `127.0.0.1` only, never `0.0.0.0`, so nothing off this
 //! machine can reach it. The port is whatever the OS hands out rather than a
-//! fixed number. It serves exactly one request and closes. And the `state`
-//! value sent out has to come back unchanged, which is what makes a callback
-//! somebody else triggered — a link in an email, say — fail instead of logging
-//! you into their account.
+//! fixed number. It serves one login and closes.
+//!
+//! The real defence is PKCE, not `state`. A code somebody else's browser
+//! delivers here cannot be spent: the token exchange sends *our* verifier, and
+//! the server checks it against the challenge that started *their* login. So a
+//! stray callback ends in a failed exchange and no session, which is the
+//! outcome `state` exists to produce.
+//!
+//! `state` is carried anyway, because it turns that failure into a cheaper and
+//! clearer one — but it is carried **in the redirect URI's query string**
+//! rather than as an authorize parameter. GoTrue mints its own `state` for the
+//! leg between itself and the identity provider and does not pass ours
+//! through; what it does preserve is whatever is already in `redirect_to`.
+//! Hence `…/callback?state=…`, which the project's redirect allow-list accepts
+//! and which comes back intact alongside the `?code=`.
+//!
+//! Because it is a courtesy rather than the control, a callback that arrives
+//! carrying a code and *no* state at all is accepted. One carrying the wrong
+//! state is not. See [`Pending::handle`].
 //!
 //! Nothing here is a secret the binary has to keep. That is the property PKCE
 //! buys: the code is useless without the verifier, the verifier never leaves
@@ -55,9 +70,13 @@ pub enum AuthError {
     Listen(String),
     /// Nobody came back before [`CALLBACK_TIMEOUT`].
     TimedOut,
-    /// The browser came back, but not with what was sent out. Treated as
+    /// The browser came back carrying a `state` that is not ours. Treated as
     /// hostile rather than as a mistake — see [`Pending::wait`].
     StateMismatch,
+    /// A request with nothing in its query. Internal to the accept loop and
+    /// never returned to a caller: the reply asks the browser to re-send
+    /// whatever is in the fragment as a query, and the wait continues.
+    Fragment,
     /// The identity provider itself refused, and said why.
     Denied(String),
     Io(String),
@@ -69,6 +88,7 @@ impl std::fmt::Display for AuthError {
             Self::Listen(e) => write!(f, "could not open a local port to receive the login: {e}"),
             Self::TimedOut => write!(f, "the login was not completed in time"),
             Self::StateMismatch => write!(f, "the login response did not match this request"),
+            Self::Fragment => write!(f, "the login response arrived with nothing in it"),
             Self::Denied(why) => write!(f, "sign-in was refused: {why}"),
             Self::Io(e) => write!(f, "the login could not be read: {e}"),
         }
@@ -137,8 +157,12 @@ impl Pending {
     }
 
     /// Where the browser should send the user back to.
+    ///
+    /// The `state` rides here rather than as an authorize parameter — see the
+    /// module docs. The value is base64url by construction, so there is
+    /// nothing in it that needs escaping in a query string.
     pub fn redirect_uri(&self) -> String {
-        format!("http://127.0.0.1:{}/callback", self.port)
+        format!("http://127.0.0.1:{}/callback?state={}", self.port, self.state)
     }
 
     /// Wait for the one request we care about, and return the code in it.
@@ -154,9 +178,10 @@ impl Pending {
         while Instant::now() < deadline {
             match self.listener.accept() {
                 Ok((stream, _)) => match self.handle(stream) {
-                    // A request that was not ours: keep waiting rather than
-                    // failing the whole sign-in.
-                    Err(AuthError::StateMismatch) => continue,
+                    // A request that was not ours, or one whose payload is in
+                    // the fragment and is about to be re-sent as a query:
+                    // keep waiting rather than failing the whole sign-in.
+                    Err(AuthError::StateMismatch | AuthError::Fragment) => continue,
                     other => return other,
                 },
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -180,13 +205,31 @@ impl Pending {
         let target = line.split_whitespace().nth(1).unwrap_or_default().to_string();
         let params = query_params(&target);
 
-        let result = match (params.get("code"), params.get("state"), params.get("error")) {
-            (_, _, Some(err)) => {
+        let result = match (params.get("code"), params.get("error")) {
+            (_, Some(err)) => {
                 let detail = params.get("error_description").cloned().unwrap_or_else(|| err.clone());
                 Err(AuthError::Denied(detail))
             }
-            (Some(code), Some(state), _) if state == &self.state => Ok(code.clone()),
-            _ => Err(AuthError::StateMismatch),
+            (Some(code), None) => match params.get("state") {
+                // Ours, and it says so.
+                Some(state) if state == &self.state => Ok(code.clone()),
+                // Somebody else's. Refused — this is the case the value is
+                // carried for.
+                Some(_) => Err(AuthError::StateMismatch),
+                // A code and no state at all. Accepted, because PKCE is what
+                // makes a code worth anything and an injected one still cannot
+                // be spent; refusing here would instead mean a five-minute
+                // hang the first time the platform changes how it forwards
+                // query parameters.
+                None => Ok(code.clone()),
+            },
+            // Neither a code nor a reason. The state we put in the redirect
+            // may well be here — that is not the question. The question is
+            // that the *answer* is missing, and the likeliest reason is that
+            // it was delivered in the URL fragment, which a server cannot see
+            // because the browser never sends it. The reply below asks the
+            // browser to hand it over as a query instead.
+            (None, None) => Err(AuthError::Fragment),
         };
 
         // The browser is left on a page rather than a dead connection, because
@@ -194,6 +237,7 @@ impl Pending {
         let body = match &result {
             Ok(_) => PAGE_OK,
             Err(AuthError::StateMismatch) => PAGE_IGNORED,
+            Err(AuthError::Fragment) => PAGE_RECOVER_FRAGMENT,
             Err(_) => PAGE_FAILED,
         };
         let _ = write!(
@@ -270,6 +314,27 @@ const PAGE_IGNORED: &str = "<!doctype html><meta charset=utf-8><title>Ignored</t
 <h1 style=\"font-size:1.3rem\">Nothing to do here.</h1>\
 <p>This link didn't come from a sign-in the app started, so it was ignored.</p>";
 
+/// Asks the browser to re-send the URL fragment as a query string.
+///
+/// A fragment is never transmitted — `#error=access_denied&…` reaches the
+/// browser and stops there, so this process sees a bare `GET /callback` and
+/// has no idea anything went wrong. That is not hypothetical: the platform
+/// delivers some refusals exactly that way, and without this the app would sit
+/// silently for five minutes and then report a timeout to somebody who watched
+/// themselves decline a consent screen ten seconds earlier.
+///
+/// Four lines of script, replacing rather than pushing so the tab's back
+/// button is not littered, and a no-op when there is no fragment — in which
+/// case the page reads as the "nothing to do here" it is.
+const PAGE_RECOVER_FRAGMENT: &str = "<!doctype html><meta charset=utf-8><title>Finishing sign-in</title>\
+<body style=\"font:16px system-ui;padding:3rem;max-width:30rem;margin:auto\">\
+<h1 style=\"font-size:1.3rem\">Nothing to do here.</h1>\
+<p>If a sign-in was in progress, it is finishing now — go back to the app.</p>\
+<script>\
+var h=location.hash.slice(1);\
+if(h){location.replace(location.pathname+(location.search?location.search+'&':'?')+h)}\
+</script>";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -317,19 +382,85 @@ mod tests {
         let addr = p.listener.local_addr().unwrap();
         assert!(addr.ip().is_loopback(), "reachable from off this machine: {addr}");
         assert_ne!(p.port(), 0);
-        assert_eq!(p.redirect_uri(), format!("http://127.0.0.1:{}/callback", p.port()));
+        // The state travels in the redirect URI, because the platform does not
+        // forward an authorize-level one. See the module docs.
+        assert_eq!(p.redirect_uri(), format!("http://127.0.0.1:{}/callback?state=s", p.port()));
     }
 
-    /// The happy path, end to end over a real socket.
+    /// The redirect URI has to be one the platform's allow-list accepts, and
+    /// what it accepts is a loopback address on any port at `/callback`. A
+    /// change of path or host here is a change that fails only in production.
+    #[test]
+    fn the_redirect_uri_is_the_shape_the_allow_list_registers() {
+        let p = Pending::bind("xyz").expect("bind");
+        let uri = p.redirect_uri();
+        assert!(uri.starts_with("http://127.0.0.1:"), "{uri}");
+        let (_, query) = uri.split_once('?').expect("the state has to be in the query");
+        assert!(uri[..uri.len() - query.len() - 1].ends_with("/callback"), "{uri}");
+        assert_eq!(query, "state=xyz");
+    }
+
+    /// The happy path, end to end over a real socket — with the state coming
+    /// back in the query the redirect URI put it in, and the code appended
+    /// beside it, which is how the platform delivers it.
     #[test]
     fn a_matching_callback_yields_its_code() {
         let pending = Pending::bind("the-state").expect("bind");
         let port = pending.port();
         std::thread::spawn(move || {
             let mut s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
-            let _ = s.write_all(b"GET /callback?code=abc123&state=the-state HTTP/1.1\r\n\r\n");
+            let _ = s.write_all(b"GET /callback?state=the-state&code=abc123 HTTP/1.1\r\n\r\n");
         });
         assert_eq!(pending.wait(Duration::from_secs(5)).expect("code"), "abc123");
+    }
+
+    /// If the platform ever stops preserving the query it was given, the code
+    /// still arrives and must still be usable: PKCE, not `state`, is what
+    /// makes a code worth anything, and an injected one cannot be exchanged.
+    /// Refusing here would turn a harmless change into a silent five-minute
+    /// hang for every user.
+    #[test]
+    fn a_code_with_no_state_at_all_is_still_accepted() {
+        let pending = Pending::bind("ours").expect("bind");
+        let port = pending.port();
+        std::thread::spawn(move || {
+            let mut s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+            let _ = s.write_all(b"GET /callback?code=abc123 HTTP/1.1\r\n\r\n");
+        });
+        assert_eq!(pending.wait(Duration::from_secs(5)).expect("code"), "abc123");
+    }
+
+    /// A refusal delivered in the fragment is invisible to this process, so
+    /// the first request has to be answered with something that turns it into
+    /// a second, visible one. Here that second request is made by hand; in a
+    /// browser the script in the reply makes it.
+    #[test]
+    fn a_response_hidden_in_the_fragment_is_asked_for_again() {
+        let pending = Pending::bind("s").expect("bind");
+        let port = pending.port();
+        std::thread::spawn(move || {
+            // What a browser sends for `…/callback?state=s#error=access_denied`:
+            // the fragment is not on the wire at all.
+            if let Ok(mut s) = TcpStream::connect(("127.0.0.1", port)) {
+                let _ = s.write_all(b"GET /callback?state=s HTTP/1.1\r\n\r\n");
+                let mut reply = String::new();
+                use std::io::Read as _;
+                let _ = s.read_to_string(&mut reply);
+                // The reply has to contain the script that re-sends it, or a
+                // real browser would stop here.
+                assert!(reply.contains("location.hash"), "no recovery script in the reply");
+            }
+            // What that script then requests.
+            if let Ok(mut s) = TcpStream::connect(("127.0.0.1", port)) {
+                let _ = s.write_all(
+                    b"GET /callback?state=s&error=access_denied&error_description=Access+denied HTTP/1.1\r\n\r\n",
+                );
+            }
+        });
+        match pending.wait(Duration::from_secs(5)) {
+            Err(AuthError::Denied(why)) => assert_eq!(why, "Access denied"),
+            other => panic!("expected the refusal to surface, got {other:?}"),
+        }
     }
 
     /// A callback for somebody else's login must not become our session.

@@ -109,31 +109,17 @@ export function LoginGate({
           </>
         );
 
-      // Past the grace period. Not a locked door — the app renders behind
-      // this, and existing work still opens and exports. See `read-only` in
-      // entitlement.ts for why.
-      case "read-only":
-        return (
-          <>
-            <p className="gate-lede">
-              It's been {gate.daysOffline} days since your subscription could be checked.
-            </p>
-            <p className="gate-note">
-              Your projects still open and still export. Connect to the internet to start new ones.
-            </p>
-            <div className="gate-actions">
-              <button type="button" className="primary-button" onClick={onRecheck}>
-                Check now
-              </button>
-            </div>
-          </>
-        );
-
-      // Neither of these should ever reach this component — the app renders
-      // instead — but returning something honest beats rendering nothing if a
-      // caller gets the condition wrong.
+      // None of these three should ever reach this component: `letsAppRender`
+      // is true for all of them, so the app renders and this does not.
+      //
+      // `read-only` used to be written out here in full, which was the bug —
+      // a screen that could never appear, describing a restriction nothing
+      // enforced. It is not a door, it is a banner over a working app, and it
+      // now lives in `ReadOnlyBanner` below. Returning something honest still
+      // beats rendering nothing if a caller gets the condition wrong.
       case "allowed":
       case "allowed-grace":
+      case "read-only":
         return <p className="gate-lede">Signed in.</p>;
     }
   }
@@ -194,6 +180,36 @@ export function GraceBanner({ daysLeft, onRecheck }: { daysLeft: number; onReche
       <span>
         Connect to the internet within {daysLeft} {daysLeft === 1 ? "day" : "days"} to keep using
         the app.
+      </span>
+      <button type="button" className="ghost-button small" onClick={onRecheck}>
+        Check now
+      </button>
+    </div>
+  );
+}
+
+/**
+ * The strip shown once the grace period has run out.
+ *
+ * Still a banner and still not a dialog, for a stronger version of the same
+ * reason: this is the person who has been offline for a month, which makes
+ * them the least able of anyone to act on a modal demanding they connect. The
+ * app is behind it, their projects open, and their finished work exports — the
+ * only thing withheld is starting something new, and the copy says so rather
+ * than leaving them to discover it by clicking a button that does nothing.
+ */
+export function ReadOnlyBanner({
+  daysOffline,
+  onRecheck,
+}: {
+  daysOffline: number;
+  onRecheck: () => void;
+}) {
+  return (
+    <div className="gate-banner is-stale" role="status">
+      <span>
+        It's been {daysOffline} days since your subscription could be checked. Your projects still
+        open and still export — connect to the internet to start new ones.
       </span>
       <button type="button" className="ghost-button small" onClick={onRecheck}>
         Check now

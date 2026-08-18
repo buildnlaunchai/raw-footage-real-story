@@ -1,8 +1,22 @@
 //! Talking to the BuildnLaunchAI platform: tokens, licence, provider keys.
 //!
-//! Everything here is addressed by a base URL passed in rather than compiled
-//! against a constant, which is what lets the tests point it at a stub on
-//! loopback and lets staging and production differ without a rebuild.
+//! Every request here is addressed by a base URL passed in rather than by a
+//! constant reached for at the call site, which is what lets the tests point
+//! it at a stub on loopback and lets staging and production differ without a
+//! rebuild. The default that base resolves to *is* compiled in — see
+//! [`config`] for why that is not a contradiction.
+//!
+//! ## The four addresses
+//!
+//! One Supabase project hosts all of them, so one base URL is enough:
+//!
+//! | what                | where                                  |
+//! |---------------------|----------------------------------------|
+//! | start a login       | `{base}/auth/v1/authorize`             |
+//! | code → session      | `{base}/auth/v1/token?grant_type=pkce` |
+//! | refresh → session   | `{base}/auth/v1/token?grant_type=refresh_token` |
+//! | is this account in? | `{base}/functions/v1/desktop-licence`  |
+//! | what keys do we hold? | `{base}/functions/v1/desktop-keys`   |
 //!
 //! ## Nothing in this file is a secret
 //!
@@ -189,15 +203,118 @@ async fn post_tokens(
 /// Authenticated with the access token, never with anything long-lived, and
 /// the answer is held in memory for the life of the session only.
 pub async fn provider_keys(base: &str, anon_key: &str, access_token: &str) -> Result<ProviderKeys, PlatformError> {
-    let url = format!("{}/api/desktop/keys", base.trim_end_matches('/'));
-    let resp = client()?
+    read(get(base, "desktop-keys", anon_key, access_token).await?).await
+}
+
+/// What `desktop-licence` answers with.
+///
+/// Two overlapping accounts of the same fact, and they are not equals. The
+/// plain fields are what the app reads *now*, on a live answer that arrived
+/// over TLS from a host with a valid certificate. `licence_token` is what
+/// survives being written down — see [`crate::licence`] for why that
+/// distinction is the whole design.
+///
+/// Every field is optional. The exact spelling of a JSON key is the platform's
+/// to choose and a desktop binary that hard-fails on an unexpected one is a
+/// desktop binary that locks people out when the backend adds a field.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LicenceResponse {
+    #[serde(default, alias = "entitled")]
+    pub active: Option<bool>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub plan: Option<String>,
+    /// The signed assertion. British and American spellings both accepted,
+    /// because getting this wrong would silently disable verification rather
+    /// than fail loudly, and one word is not worth that risk.
+    #[serde(
+        default,
+        alias = "licence_token",
+        alias = "license_token",
+        alias = "licenseToken"
+    )]
+    pub licence_token: Option<String>,
+}
+
+impl LicenceResponse {
+    /// What the plain fields say, by the same rule the signed claims use.
+    pub fn entitled(&self) -> bool {
+        crate::licence::LicenceClaims {
+            sub: String::new(),
+            exp: 0,
+            iat: 0,
+            iss: None,
+            active: self.active,
+            status: self.status.clone(),
+            plan: None,
+            extra: Default::default(),
+        }
+        .entitled()
+    }
+}
+
+/// Ask whether this account is entitled.
+///
+/// GET rather than POST: it reads and changes nothing, and the function
+/// accepts both. There is no body to get wrong.
+///
+/// ### Binding a cached licence to an account
+///
+/// The cache exists now — [`crate::licence_cache`] — and with it the check
+/// this used to defer: a stored licence is refused unless its signed `sub` is
+/// the account signed in on this machine, which is what stops one
+/// subscriber's cache file from working on a friend's laptop.
+///
+/// The other half of the old note, verifying the *session* token offline
+/// against `{base}/auth/v1/.well-known/jwks.json` and matching its `sub`, was
+/// left out on purpose rather than forgotten. It cannot run where it would be
+/// needed: offline there is no access token to check, because obtaining one
+/// means reaching the platform, which is the thing that is not possible. When
+/// there *is* a connection the live answer settles entitlement outright and
+/// the cache is not consulted at all. It would be a verifier that only runs
+/// when its answer does not matter.
+pub async fn licence(base: &str, anon_key: &str, access_token: &str) -> Result<LicenceAnswer, PlatformError> {
+    let resp = get(base, "desktop-licence", anon_key, access_token).await?;
+    // Read off the response before the body consumes it.
+    let served_at = resp
+        .headers()
+        .get(reqwest::header::DATE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(http_date_to_iso);
+    Ok(LicenceAnswer { body: read(resp).await?, served_at })
+}
+
+/// A licence answer, and the platform's own idea of what time it is.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LicenceAnswer {
+    pub body: LicenceResponse,
+    /// From the response's `Date` header, which every HTTP server sends. The
+    /// grace period counts from this rather than from the local clock: a
+    /// laptop set forward would otherwise expire its own grace, and one set
+    /// back would extend it for as long as it stayed wrong.
+    pub served_at: Option<String>,
+}
+
+async fn get(
+    base: &str,
+    function: &str,
+    anon_key: &str,
+    access_token: &str,
+) -> Result<reqwest::Response, PlatformError> {
+    let url = format!("{}/functions/v1/{function}", base.trim_end_matches('/'));
+    client()?
         .get(url)
+        // The gateway reads the bearer and would let this through without an
+        // apikey header; it is sent anyway because every other Supabase client
+        // sends it and a gateway that starts requiring it should not be a
+        // surprise outage.
         .header("apikey", anon_key)
         .bearer_auth(access_token)
         .send()
         .await
-        .map_err(|e| PlatformError::Unreachable(e.to_string()))?;
-    read(resp).await
+        .map_err(|e| PlatformError::Unreachable(e.to_string()))
 }
 
 fn client() -> Result<reqwest::Client, PlatformError> {
@@ -304,6 +421,32 @@ mod tests {
         }
     }
 
+    /// Three different services sit behind one hostname and each phrases a
+    /// refusal its own way. All three of these were copied from real
+    /// responses; a reason that comes out blank is a person staring at
+    /// "BuildnLaunchAI refused (401):" and nothing else.
+    #[tokio::test]
+    async fn every_refusal_shape_the_platform_actually_sends_is_readable() {
+        for (body, expected) in [
+            // The Supabase gateway, when no bearer is present at all.
+            (r#"{"code":"UNAUTHORIZED_NO_AUTH_HEADER","message":"Missing authorization header"}"#,
+             "Missing authorization header"),
+            // The gateway again, on a token that is not a JWT.
+            (r#"{"code":"UNAUTHORIZED_INVALID_JWT_FORMAT","message":"Invalid JWT"}"#, "Invalid JWT"),
+            // The edge function itself, past the gateway.
+            (r#"{"error":"not authenticated"}"#, "not authenticated"),
+            // GoTrue, which uses `msg` and puts a number in `code`.
+            (r#"{"code":404,"error_code":"flow_state_not_found","msg":"invalid flow state, no valid flow state found"}"#,
+             "invalid flow state, no valid flow state found"),
+        ] {
+            let (base, _) = stub("401 Unauthorized", Box::leak(body.to_string().into_boxed_str()));
+            match licence(&base, "anon", "at").await {
+                Err(PlatformError::Refused { message, .. }) => assert_eq!(message, expected),
+                other => panic!("expected a refusal for {body}, got {other:?}"),
+            }
+        }
+    }
+
     /// Unreachable is not refused. This distinction decides whether somebody
     /// keeps working on a plane or is shown a login wall.
     #[tokio::test]
@@ -341,7 +484,62 @@ mod tests {
         assert!(k.elevenlabs.key.is_none());
         assert!(k.elevenlabs.hint().is_none());
 
-        assert!(seen.recv().unwrap().contains("Bearer at-1"), "the request was not authenticated");
+        let req = seen.recv().unwrap();
+        assert!(req.contains("Bearer at-1"), "the request was not authenticated");
+        // The path is the edge function's, not the `/api/desktop/…` the stub
+        // era guessed at.
+        assert!(req.contains("GET /functions/v1/desktop-keys"), "wrong endpoint: {req}");
+    }
+
+    /// The licence endpoint, at the address it really lives at.
+    #[tokio::test]
+    async fn the_licence_is_asked_for_at_the_platforms_own_address() {
+        let (base, seen) = stub(
+            "200 OK",
+            r#"{"active":true,"status":"active","plan":"pro","licence_token":"a.b.c"}"#,
+        );
+        let a = licence(&base, "anon-key", "at-1").await.expect("licence");
+
+        assert!(a.body.entitled());
+        assert_eq!(a.body.plan.as_deref(), Some("pro"));
+        assert_eq!(a.body.licence_token.as_deref(), Some("a.b.c"));
+
+        let req = seen.recv().unwrap();
+        assert!(req.contains("GET /functions/v1/desktop-licence"), "wrong endpoint: {req}");
+        assert!(req.contains("Bearer at-1"), "the request was not authenticated");
+        assert!(req.contains("apikey: anon-key"), "the project key was not sent: {req}");
+    }
+
+    /// The exact spelling of the token field is the platform's to pick, and
+    /// getting it wrong here would not fail — it would quietly leave the
+    /// signature unchecked, which is the worst way for this to be wrong.
+    #[test]
+    fn the_licence_token_is_found_under_either_spelling() {
+        for body in [
+            r#"{"licence_token":"a.b.c"}"#,
+            r#"{"license_token":"a.b.c"}"#,
+            r#"{"licenceToken":"a.b.c"}"#,
+            r#"{"licenseToken":"a.b.c"}"#,
+        ] {
+            let r: LicenceResponse = serde_json::from_str(body).expect("parses");
+            assert_eq!(r.licence_token.as_deref(), Some("a.b.c"), "missed it in {body}");
+        }
+    }
+
+    /// A response carrying fields this build has never seen must still parse:
+    /// the alternative is a backend deploy locking every desktop out.
+    #[test]
+    fn an_unfamiliar_licence_response_still_parses_rather_than_locking_anyone_out() {
+        let r: LicenceResponse =
+            serde_json::from_str(r#"{"status":"trialing","seats":4,"renewsAt":"2026-09-01"}"#)
+                .expect("parses");
+        assert!(r.entitled(), "a trial is a live entitlement");
+        assert!(r.licence_token.is_none());
+
+        // And an empty body is read as "not entitled" rather than as an error,
+        // because a licence that says nothing grants nothing.
+        let r: LicenceResponse = serde_json::from_str("{}").expect("parses");
+        assert!(!r.entitled());
     }
 
     /// Credits mode does not exist yet; the shape that will carry it does.
@@ -358,26 +556,81 @@ mod tests {
 
 // ── where the platform lives ────────────────────────────────────────────────
 
-/// The two things needed to talk to the platform, neither of them secret.
+/// The production project. Overridable at runtime; see [`config`].
+const DEFAULT_BASE: &str = "https://pezsxoynjjsipfnpfvva.supabase.co";
+
+/// The project's **publishable** key.
+///
+/// This is not a secret and treating it as one would be a costume rather than
+/// a control. Supabase serves it in every web page of the platform, and it is
+/// readable with `strings` on any downloaded binary no matter how it gets in
+/// there — so injecting it at build time would hide it from the repository and
+/// from nobody else, at the price of a build that silently ships unable to
+/// sign anybody in. Row-level security behind it is what protects the data.
+///
+/// The `service_role` key is the opposite of this in every respect and must
+/// never come near this process. `scripts/preflight.sh` greps for it.
+///
+/// preflight-allow: publishable-anon-key
+const DEFAULT_ANON_KEY: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBlenN4b3luampzaXBmbnBmdnZhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODM5NjczMDksImV4cCI6MjA5OTU0MzMwOX0.rxBUNnceRXQNsWWh7ATS1QRIrG318UYHnakNu7iqNrI";
+
+/// Which identity provider `/auth/v1/authorize` should hand off to.
+///
+/// GoTrue has no provider-less authorize endpoint — asking for one answers
+/// `Unsupported provider: Provider  could not be found` — so this is required,
+/// not decorative. Google is the only external provider enabled on the project
+/// today, and it is what the manual end-to-end run went through.
+///
+/// A name rather than a hardcode so that enabling a second provider is an
+/// environment variable and not a release.
+const DEFAULT_PROVIDER: &str = "google";
+
+/// Everything needed to talk to the platform. None of it is a secret.
 pub struct PlatformConfig {
     pub base: String,
-    /// The project's publishable key. Safe in the binary and safe in a log;
-    /// it is in every web page the platform serves. Row-level security is what
-    /// protects the data behind it.
+    /// See [`DEFAULT_ANON_KEY`].
     pub anon_key: String,
+    pub provider: String,
 }
 
-/// Read the platform's address from the environment.
+/// Where the platform lives, for this run.
 ///
-/// Environment rather than a constant for the same reason every other
-/// endpoint here is: staging and production must differ without a rebuild,
-/// and nothing about the deployment should be baked into an artifact people
-/// download. Absent means "not configured", which the commands report as such
-/// rather than failing with a network error against an empty URL.
+/// Compiled-in defaults, overridden by the environment. The original design
+/// here was environment-only, on the principle that nothing about a deployment
+/// belongs in an artifact people download — but a downloaded artifact has no
+/// environment to read, so that principle produced a binary that could only
+/// ever report "not configured" to the person who downloaded it. The values
+/// are published anyway. What the environment is still good for is pointing a
+/// build at staging without recompiling, which it still does.
+///
+/// `None` remains reachable: blank the constants, or set either variable to an
+/// empty string, and the commands report an unconfigured build rather than
+/// firing requests at an empty URL.
 pub fn config() -> Option<PlatformConfig> {
-    let base = std::env::var("BUILDNLAUNCH_AUTH_URL").ok()?;
-    let anon_key = std::env::var("BUILDNLAUNCH_ANON_KEY").ok()?;
-    (!base.is_empty() && !anon_key.is_empty()).then_some(PlatformConfig { base, anon_key })
+    resolve(
+        std::env::var("BUILDNLAUNCH_AUTH_URL").ok(),
+        std::env::var("BUILDNLAUNCH_ANON_KEY").ok(),
+        std::env::var("BUILDNLAUNCH_AUTH_PROVIDER").ok(),
+    )
+}
+
+/// The resolution rule, apart from the environment so it can be tested without
+/// mutating process-wide state that other tests are reading in parallel.
+fn resolve(base: Option<String>, anon_key: Option<String>, provider: Option<String>) -> Option<PlatformConfig> {
+    // An empty override is a deliberate "off", not an absent one. Anything
+    // else and `BUILDNLAUNCH_AUTH_URL=` in a shell would silently mean
+    // production.
+    fn pick(given: Option<String>, fallback: &str) -> String {
+        match given {
+            Some(v) => v.trim().to_string(),
+            None => fallback.to_string(),
+        }
+    }
+    let base = pick(base, DEFAULT_BASE);
+    let anon_key = pick(anon_key, DEFAULT_ANON_KEY);
+    let provider = pick(provider, DEFAULT_PROVIDER);
+    (!base.is_empty() && !anon_key.is_empty() && !provider.is_empty())
+        .then_some(PlatformConfig { base, anon_key, provider })
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -411,6 +664,28 @@ pub struct SignedIn {
     pub user_id: String,
 }
 
+/// Where the browser is sent to start a login.
+///
+/// `provider` is required by GoTrue and there is no hosted login page in front
+/// of it: the browser goes from here straight to the identity provider, which
+/// is the "no web login page" half of the design. `response_type` is *not*
+/// sent — GoTrue does not read it, and a parameter that looks meaningful and
+/// is ignored is worse than one that is absent.
+///
+/// Sending `code_challenge` is what makes this a PKCE flow. There is no
+/// separate `flow_type` switch on the wire; the challenge is the switch, and
+/// its presence is why the callback arrives as `?code=` for
+/// `grant_type=pkce` rather than as a token in a fragment.
+fn authorize_url(cfg: &PlatformConfig, challenge: &str, redirect_uri: &str) -> String {
+    format!(
+        "{}/auth/v1/authorize?provider={}&code_challenge={}&code_challenge_method=S256&redirect_to={}",
+        cfg.base.trim_end_matches('/'),
+        urlencode(&cfg.provider),
+        urlencode(challenge),
+        urlencode(redirect_uri),
+    )
+}
+
 /// Open the browser, wait for the callback, and establish a session.
 ///
 /// Blocking on a background thread rather than async throughout, because the
@@ -423,13 +698,7 @@ pub async fn auth_sign_in(app: tauri::AppHandle) -> Result<SignedIn, GateError> 
     let pending = crate::auth::Pending::bind(&pkce.state)
         .map_err(|e| GateError { code: "LISTEN".into(), message: e.to_string() })?;
 
-    let url = format!(
-        "{}/authorize?response_type=code&code_challenge={}&code_challenge_method=S256&redirect_to={}",
-        cfg.base.trim_end_matches('/'),
-        pkce.challenge,
-        urlencode(&pending.redirect_uri()),
-    );
-    tauri_plugin_opener::open_url(&url, None::<&str>)
+    tauri_plugin_opener::open_url(&authorize_url(&cfg, &pkce.challenge, &pending.redirect_uri()), None::<&str>)
         .map_err(|e| GateError { code: "BROWSER".into(), message: e.to_string() })?;
 
     // Tauri's own runtime rather than a direct tokio dependency: the waiting
@@ -458,10 +727,59 @@ pub async fn auth_sign_in(app: tauri::AppHandle) -> Result<SignedIn, GateError> 
     Ok(SignedIn { email: tokens.user.email, user_id: tokens.user.id })
 }
 
+/// Where this app keeps its own files. `None` on a platform that will not say,
+/// which the callers treat as "no cache", never as an error: an offline grace
+/// that cannot be written is a worse day later, not a failure now.
+fn app_dir(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
+    use tauri::Manager;
+    app.path().app_data_dir().ok()
+}
+
 /// Forget the session on this machine.
+///
+/// And the cached licence with it. The cross-check in `licence_cache::recall`
+/// would refuse it for the next person to sign in anyway, but leaving one
+/// account's entitlement on disk after they asked to be signed out is not the
+/// behaviour the words "sign out" describe.
 #[tauri::command]
-pub fn auth_sign_out() -> Result<(), GateError> {
+pub fn auth_sign_out(app: tauri::AppHandle) -> Result<(), GateError> {
+    if let Some(dir) = app_dir(&app) {
+        crate::licence_cache::forget(&dir);
+    }
     crate::session::clear().map_err(|e| GateError { code: "STORE".into(), message: e.to_string() })
+}
+
+/// What the last successful check found, for a launch that cannot make a new
+/// one. Shaped to `CachedLicence` in `entitlement.ts`.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecalledLicence {
+    pub active: bool,
+    pub checked_at: String,
+}
+
+/// What this machine last knew, without touching the network.
+///
+/// Called on launch beside [`auth_current`], and before [`auth_licence`] is
+/// given its chance to fail: the whole point of a cache is to already be in
+/// place when the live check comes back with nothing.
+///
+/// A cache that does not survive [`crate::licence_cache::recall`] is deleted
+/// rather than kept. It would fail the same way on every future launch, and a
+/// file that is only ever going to be rejected is better gone than lingering
+/// for somebody to find and wonder about.
+#[tauri::command]
+pub fn auth_cached_licence(app: tauri::AppHandle) -> Option<RecalledLicence> {
+    let stored = crate::session::load()?;
+    let dir = app_dir(&app)?;
+    let cached = crate::licence_cache::load(&dir)?;
+    match crate::licence_cache::recall(&cached, &stored.user_id, crate::licence::EMBEDDED_PUBLIC_KEY) {
+        Some(r) => Some(RecalledLicence { active: r.active, checked_at: r.checked_at }),
+        None => {
+            crate::licence_cache::forget(&dir);
+            None
+        }
+    }
 }
 
 /// Who, if anyone, is signed in — without touching the network.
@@ -470,14 +788,206 @@ pub fn auth_current() -> Option<SignedIn> {
     crate::session::load().map(|s| SignedIn { email: s.email, user_id: s.user_id })
 }
 
+/// The answer the gate is waiting for.
+///
+/// `checkedAt` is what the month-long grace period counts from, so it comes
+/// from the platform's `Date` header rather than this machine's clock — a
+/// laptop with the date set forward would otherwise expire its own grace, and
+/// one set back would extend it indefinitely.
+///
+/// `verified` says whether the signature on `licence_token` was checked, not
+/// whether it passed: a build with no key compiled in reports `false` here and
+/// that is the honest answer. Nothing may be cached to disk on a `false`.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LicenceState {
+    pub active: bool,
+    pub checked_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+    pub verified: bool,
+}
+
+/// Ask the platform whether this account is entitled, right now.
+///
+/// The sequence matters and is not rearrangeable:
+///
+/// 1. Read the stored session. No session is not an error — it is the
+///    signed-out state, and the gate already renders it.
+/// 2. Spend the refresh token for an access token.
+/// 3. **Write the rotated refresh token down before using anything.** A crash
+///    between the server retiring the old token and this process saving the
+///    new one signs somebody out permanently, so a failed write stops here
+///    rather than being logged and stepped over. See `session::replace`.
+/// 4. Ask about the licence.
+///
+/// A refusal at step 2 is the one case that clears the session: the platform
+/// has said this refresh token is dead, and keeping it would mean retrying it
+/// on every launch forever. A refusal at step 4 is *not* — the account is real
+/// and merely unentitled, which the gate has its own screen for.
+#[tauri::command]
+pub async fn auth_licence(app: tauri::AppHandle) -> Result<Option<LicenceState>, GateError> {
+    let cfg = config().ok_or_else(GateError::not_configured)?;
+    let Some(stored) = crate::session::load() else { return Ok(None) };
+
+    let tokens = match refresh(&cfg.base, &cfg.anon_key, &stored.refresh_token).await {
+        Ok(t) => t,
+        Err(e) if e.is_unauthorised() => {
+            // Dead beyond retrying. Forgetting it is what turns a confusing
+            // permanent failure into an ordinary "please sign in again".
+            let _ = crate::session::clear();
+            // And the licence with it, for the same reason `auth_sign_out`
+            // does: this is a sign-out, arrived at from the other direction.
+            // `recall` would refuse the file once the session it names is
+            // gone, so this changes no decision — it just declines to leave
+            // one account's entitlement lying about after the session that
+            // earned it has been thrown away.
+            if let Some(dir) = app_dir(&app) {
+                crate::licence_cache::forget(&dir);
+            }
+            return Err(GateError::from(e));
+        }
+        Err(e) => return Err(GateError::from(e)),
+    };
+    crate::session::replace(&stored, &tokens.refresh_token, &now_iso())
+        .map_err(|e| GateError { code: "STORE".into(), message: e.to_string() })?;
+
+    let answer = licence(&cfg.base, &cfg.anon_key, &tokens.access_token).await.map_err(GateError::from)?;
+    let body = answer.body;
+
+    // The signed token wins over the plain fields where both are present and
+    // the signature was actually checked. Where it is not checkable — no key
+    // compiled in yet — the live answer over TLS stands on its own, and
+    // `verified: false` travels with it so nothing downstream mistakes it for
+    // something worth writing to disk.
+    //
+    // The key is in the binary and `sub` was confirmed against a real account
+    // to be the auth user id, so `matches` is comparing the right two things.
+    // What is still unproven is the *yes* answer: every live response seen so
+    // far has been `active: false`, so no build has yet watched `entitled()`
+    // read whatever word an entitled account produces. If the platform says
+    // "paid" or "subscribed" rather than `active: true`, `trialing` or
+    // "active", this returns a refusal to somebody who has paid — check it
+    // with `--licence-probe` against an entitled account before the gate is
+    // turned on for anyone.
+    let user_id = if stored.user_id.is_empty() { tokens.user.id.clone() } else { stored.user_id.clone() };
+    let (active, verified) = match body.licence_token.as_deref().map(crate::licence::verify) {
+        // A good licence and nothing to hold it against. `matches` would say
+        // false — correctly, since an empty id matches nobody — and falling
+        // through to the arm below would refuse a paying customer over a
+        // missing field rather than a missing entitlement. The honest answer
+        // is that this build could not check, so the plain fields stand and
+        // `verified: false` travels with them: an entitlement that could not
+        // be bound to an account is exactly what must never reach the disk.
+        Some(Ok(_)) if user_id.is_empty() => (body.entitled(), false),
+        Some(Ok(v)) if v.matches(&user_id) => (v.entitled(), true),
+        // Signed, valid, and about somebody else. Not a licence for this
+        // account, and not something to fall back to the plain fields over.
+        Some(Ok(_)) => (false, true),
+        Some(Err(crate::licence::LicenceError::NoKey)) | None => (body.entitled(), false),
+        Some(Err(e)) => return Err(GateError { code: "LICENCE".into(), message: e.to_string() }),
+    };
+
+    let checked_at = answer.served_at.unwrap_or_else(now_iso);
+
+    // What survives this launch, and it is deliberately not symmetrical.
+    //
+    // A *verified* answer is written down whichever way it went. Caching a
+    // "no" matters as much as caching a "yes": without it, somebody who was
+    // refused could close the lid, go offline and have the refusal quietly
+    // become a month of grace.
+    //
+    // An answer that could not be verified is a different thing, and the two
+    // directions are not the same risk. Where it says **no**, the old cache is
+    // thrown away — this request reached the platform, so the person is
+    // blocked at this moment regardless of what is on disk, and deleting a
+    // stale "yes" cannot lock out anybody who is not already locked out.
+    // Where it says **yes**, whatever is cached is left exactly as it is. This
+    // build has nothing signed to write, and destroying the one record
+    // standing between a paying customer and `offline-first-run` — because a
+    // backend stopped sending a field — is the failure `entitlement.ts` is
+    // organised around avoiding.
+    if let Some(dir) = app_dir(&app) {
+        match (verified, body.licence_token.as_deref()) {
+            (true, Some(token)) => {
+                let record = crate::licence_cache::Cached {
+                    licence_token: token.to_string(),
+                    checked_at: checked_at.clone(),
+                };
+                if let Err(e) = crate::licence_cache::store(&dir, &record) {
+                    // Not returned: the check itself succeeded, and failing
+                    // this only costs an offline grace the person may never
+                    // need. Loud on stderr so it is not silent either.
+                    eprintln!("the licence could not be cached for offline use: {e}");
+                }
+            }
+            (false, _) if !active => crate::licence_cache::forget(&dir),
+            _ => {}
+        }
+    }
+
+    Ok(Some(LicenceState {
+        active,
+        checked_at,
+        status: body.status,
+        plan: body.plan,
+        verified,
+    }))
+}
+
+/// Now, as ISO-8601 UTC.
+///
+/// A real timestamp rather than the `@1755…` this used to produce: the grace
+/// period is computed in the frontend with `Date.parse`, which reads that as
+/// `NaN`, and a `NaN` age is infinitely old — which is to say every cached
+/// licence would have gone straight to read-only.
 fn now_iso() -> String {
-    // Seconds since the epoch is enough to order two saves and to show
-    // staleness; a full calendar implementation is not worth a dependency.
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    format!("@{secs}")
+    iso_from_epoch(secs)
+}
+
+/// Seconds since the epoch as `YYYY-MM-DDTHH:MM:SSZ`.
+///
+/// Hinnant's civil-from-days, which is exact for every date in range and is
+/// twenty lines against a calendar crate's dependency tree.
+pub(crate) fn iso_from_epoch(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    // Shift the epoch to 0000-03-01 so leap days land at the end of the cycle.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", rem / 3600, (rem % 3600) / 60, rem % 60)
+}
+
+/// An RFC 7231 `Date` header — `Mon, 17 Aug 2026 21:04:25 GMT` — as ISO-8601.
+///
+/// Reformatted rather than passed through because the frontend parses this
+/// with `Date.parse`, and while that happens to accept both, the cache is
+/// compared and stored as one shape everywhere else.
+fn http_date_to_iso(header: &str) -> Option<String> {
+    const MONTHS: [&str; 12] =
+        ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    let mut parts = header.split_whitespace();
+    let _weekday = parts.next()?;
+    let day: u32 = parts.next()?.parse().ok()?;
+    let month_name = parts.next()?;
+    let month = MONTHS.iter().position(|m| *m == month_name)? + 1;
+    let year: i64 = parts.next()?.parse().ok()?;
+    let mut hms = parts.next()?.split(':');
+    let (h, mi, s) = (hms.next()?, hms.next()?, hms.next()?);
+    Some(format!("{year:04}-{month:02}-{day:02}T{h}:{mi}:{s}Z"))
 }
 
 fn urlencode(s: &str) -> String {
@@ -494,31 +1004,368 @@ fn urlencode(s: &str) -> String {
 }
 
 #[cfg(test)]
+mod live_tests {
+    //! Against the real platform, over the real network.
+    //!
+    //! Ignored by default so an offline machine and a CI runner without egress
+    //! both stay green, and run by hand when the wiring changes:
+    //!
+    //! ```text
+    //! cargo test --lib live_tests -- --ignored --nocapture
+    //! ```
+    //!
+    //! Nothing here signs anybody in, spends anything, or writes anything.
+    //! Every request is one this code makes in production, with a credential
+    //! that is either absent or deliberately worthless — which is enough to
+    //! prove the addresses are right, because a wrong address answers 404 and
+    //! these answer 401.
+    use super::*;
+
+    /// The one that would have failed in a beta.
+    ///
+    /// The stub-era URL was `{base}/authorize` with no provider. The real one
+    /// is `/auth/v1/authorize?provider=…`, and getting either wrong is a
+    /// browser opening on an error page after somebody clicked "Sign in".
+    #[tokio::test]
+    #[ignore = "hits the real platform"]
+    async fn the_authorize_url_really_does_send_the_browser_to_the_provider() {
+        let cfg = config().expect("configured");
+        let url = authorize_url(&cfg, "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM", "http://127.0.0.1:49152/callback?state=t");
+
+        // No redirect following: the redirect *is* the thing being checked.
+        let resp = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("client")
+            .get(&url)
+            .send()
+            .await
+            .expect("reachable");
+
+        assert_eq!(resp.status(), 302, "the platform did not hand off to a provider: {url}");
+        let location = resp.headers()[reqwest::header::LOCATION].to_str().expect("a location").to_string();
+        assert!(location.starts_with("https://"), "not sent to a provider: {location}");
+        // And it carries our loopback address through, which is what makes the
+        // callback come back here rather than to the site's home page.
+        assert!(
+            location.contains("127.0.0.1%3A49152%2Fcallback"),
+            "the redirect was dropped, so the allow-list did not accept it: {location}"
+        );
+        println!("→ {url}\n← 302 {location}");
+    }
+
+    /// An unauthenticated licence request is refused, and says so in words.
+    ///
+    /// Two things at once: the endpoint is where this code thinks it is — a
+    /// wrong path answers 404, not 401 — and the reason survives the trip into
+    /// `PlatformError`, so the gate has something to show a person.
+    #[tokio::test]
+    #[ignore = "hits the real platform"]
+    async fn the_licence_endpoint_refuses_an_unauthenticated_request() {
+        let cfg = config().expect("configured");
+        for token in ["", "not-a-jwt"] {
+            match licence(&cfg.base, &cfg.anon_key, token).await {
+                Err(PlatformError::Refused { status, message }) => {
+                    assert_eq!(status, 401, "expected a refusal, got {status}: {message}");
+                    assert!(!message.is_empty(), "refused with no reason to show anyone");
+                    println!("token {token:?} → 401 {message}");
+                }
+                other => panic!("expected a 401, got {other:?}"),
+            }
+        }
+    }
+
+    /// The same, for the keys endpoint. Its path moved from the invented
+    /// `/api/desktop/keys` to the edge function that exists.
+    #[tokio::test]
+    #[ignore = "hits the real platform"]
+    async fn the_keys_endpoint_refuses_an_unauthenticated_request() {
+        let cfg = config().expect("configured");
+        match provider_keys(&cfg.base, &cfg.anon_key, "not-a-jwt").await {
+            Err(PlatformError::Refused { status, message }) => {
+                assert_eq!(status, 401, "{message}");
+                println!("→ 401 {message}");
+            }
+            other => panic!("expected a 401, got {other:?}"),
+        }
+    }
+
+    /// `grant_type=pkce` with `auth_code` and `code_verifier` is the exchange
+    /// this code performs. A backend that did not know that grant would answer
+    /// 400 `unsupported_grant_type`; one that does answers that this
+    /// particular code was never issued, which is the correct complaint.
+    #[tokio::test]
+    #[ignore = "hits the real platform"]
+    async fn the_token_endpoint_speaks_the_pkce_grant() {
+        let cfg = config().expect("configured");
+        match exchange_code(&cfg.base, &cfg.anon_key, "never-issued", "never-used").await {
+            Err(PlatformError::Refused { status, message }) => {
+                assert!(
+                    message.contains("flow state"),
+                    "the grant itself was rejected, not the code ({status}): {message}"
+                );
+                println!("→ {status} {message}");
+            }
+            other => panic!("expected a refusal about the code, got {other:?}"),
+        }
+    }
+
+    /// Not used by anything yet, and recorded because it was the assumption
+    /// that turned out wrong: the project signs *session* tokens with ES256
+    /// through this endpoint, not HS256. If the offline cache ever gains the
+    /// extra `sub`-matching check described on [`licence`], this is where its
+    /// key comes from.
+    #[tokio::test]
+    #[ignore = "hits the real platform"]
+    async fn the_projects_session_tokens_are_es256() {
+        let cfg = config().expect("configured");
+        let jwks: serde_json::Value = reqwest::get(format!(
+            "{}/auth/v1/.well-known/jwks.json",
+            cfg.base.trim_end_matches('/')
+        ))
+        .await
+        .expect("reachable")
+        .json()
+        .await
+        .expect("json");
+        let algs: Vec<&str> =
+            jwks["keys"].as_array().expect("keys").iter().filter_map(|k| k["alg"].as_str()).collect();
+        assert!(algs.contains(&"ES256"), "session tokens are not ES256 any more: {jwks}");
+        println!("→ {algs:?}");
+    }
+}
+
+// ── the live pass ───────────────────────────────────────────────────────────
+
+/// `--licence-probe <access-token>`: print what `desktop-licence` really says.
+///
+/// Everything else about this wiring can be settled from a machine with no
+/// account — the 401s, the URLs, the parsing, the verifier. The one thing that
+/// cannot is the *shape* of a successful answer, which needs a real session
+/// token from a real signed-in user. Rather than guess at field names and find
+/// out in a beta, this prints the raw JSON beside what this build made of it,
+/// so the two can be compared by eye in one command:
+///
+/// ```text
+/// ./Raw\ Footage\ Real\ Story.app/Contents/MacOS/… --licence-probe eyJ…
+/// ```
+///
+/// Get the token from the same manual PKCE round trip the flow uses: it is
+/// the `access_token` in the `grant_type=pkce` response.
+///
+/// Prints, and stores, nothing. The token is read from the argument and dies
+/// with the process.
+pub fn probe_licence(access_token: &str) -> i32 {
+    let Some(cfg) = config() else {
+        eprintln!("not configured: no platform URL or anon key");
+        return 2;
+    };
+    if access_token.trim().is_empty() {
+        eprintln!("usage: --licence-probe <access-token>");
+        return 2;
+    }
+    println!("→ GET {}/functions/v1/desktop-licence", cfg.base.trim_end_matches('/'));
+    println!(
+        "  signature checking: {}",
+        if crate::licence::verification_available() {
+            "on — keys/hub-jwt-public.pem holds a key"
+        } else {
+            "OFF — keys/hub-jwt-public.pem is still the placeholder"
+        }
+    );
+
+    // Tauri's runtime rather than a direct tokio dependency, which is only in
+    // dev-dependencies and should stay there.
+    tauri::async_runtime::block_on(async {
+        let resp = match get(&cfg.base, "desktop-licence", &cfg.anon_key, access_token.trim()).await {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("{e}");
+                return 1;
+            }
+        };
+        let status = resp.status();
+        let served_at =
+            resp.headers().get(reqwest::header::DATE).and_then(|v| v.to_str().ok()).map(str::to_string);
+        let text = resp.text().await.unwrap_or_default();
+
+        println!("← {status}   Date: {}", served_at.as_deref().unwrap_or("(none)"));
+        println!("\n--- raw body ---\n{text}\n");
+        if !status.is_success() {
+            return 1;
+        }
+
+        match serde_json::from_str::<LicenceResponse>(&text) {
+            Ok(body) => {
+                println!("--- as this build reads it ---");
+                println!("  active (plain fields): {}", body.entitled());
+                println!("  status: {:?}   plan: {:?}", body.status, body.plan);
+                match body.licence_token.as_deref() {
+                    None => println!(
+                        "  licence_token: ABSENT — the offline cache would have nothing signed \
+                         to rest on. Check the field name against the raw body above."
+                    ),
+                    Some(t) => {
+                        println!("  licence_token: present ({} chars)", t.len());
+                        match crate::licence::claims_unverified(t) {
+                            Ok(c) => println!("  claims (UNVERIFIED): {}", serde_json::to_string_pretty(&c).unwrap_or_default()),
+                            Err(e) => println!("  claims could not be read: {e}"),
+                        }
+                        println!(
+                            "  signature: {}",
+                            match crate::licence::verify(t) {
+                                Ok(v) => format!("verified, sub={}", v.claims().sub),
+                                Err(e) => format!("NOT CHECKED — {e}"),
+                            }
+                        );
+                    }
+                }
+                0
+            }
+            Err(e) => {
+                eprintln!("the body did not parse as a licence response: {e}");
+                1
+            }
+        }
+    })
+}
+
+#[cfg(test)]
 mod command_tests {
     use super::*;
 
-    /// A build with no platform configured says so, rather than trying to
-    /// reach an empty URL and reporting a network error.
+    /// The shape `auth_cached_licence` hands the frontend is `CachedLicence`
+    /// in `src/lib/entitlement.ts`, and the two are checked against each other
+    /// here because nothing else checks them at all.
+    ///
+    /// A command whose field names drift is not a compile error in either
+    /// language; it is a `undefined` in the webview and a gate that decides
+    /// somebody has never been checked. `checkedAt` in particular is what the
+    /// grace period is counted from, and `Date.parse(undefined)` is `NaN`,
+    /// which `daysBetween` reads as infinitely old — every returning user sent
+    /// straight to read-only by a rename.
     #[test]
-    fn an_unconfigured_build_is_a_state_not_a_failure() {
-        // Safety: these two variables are read nowhere else, and the test is
-        // asserting their absence rather than depending on a value.
-        unsafe {
-            std::env::remove_var("BUILDNLAUNCH_AUTH_URL");
-            std::env::remove_var("BUILDNLAUNCH_ANON_KEY");
-        }
-        assert!(config().is_none());
+    fn the_cached_licence_reaches_the_frontend_under_the_names_it_reads() {
+        let json = serde_json::to_value(RecalledLicence {
+            active: true,
+            checked_at: "2026-08-18T09:00:00Z".into(),
+        })
+        .expect("serialises");
+
+        assert_eq!(json["active"], serde_json::json!(true));
+        assert_eq!(json["checkedAt"], serde_json::json!("2026-08-18T09:00:00Z"));
+        assert!(json.get("checked_at").is_none(), "snake_case leaked across the boundary: {json}");
+    }
+
+    /// With nothing in the environment, a downloaded build talks to
+    /// production. This is the case that used to report "not configured" to
+    /// everyone who was not running from a shell with the variables set.
+    #[test]
+    fn a_build_with_no_environment_still_knows_where_the_platform_is() {
+        let c = resolve(None, None, None).expect("configured");
+        assert_eq!(c.base, "https://pezsxoynjjsipfnpfvva.supabase.co");
+        assert!(c.anon_key.starts_with("eyJ"), "the publishable key is missing");
+        assert_eq!(c.provider, "google");
+    }
+
+    /// Pointing a build at staging must not need a recompile.
+    #[test]
+    fn the_environment_overrides_the_compiled_in_default() {
+        let c = resolve(
+            Some("https://staging.example.com/".into()),
+            Some("staging-anon".into()),
+            Some("github".into()),
+        )
+        .expect("configured");
+        assert_eq!(c.base, "https://staging.example.com/");
+        assert_eq!(c.anon_key, "staging-anon");
+        assert_eq!(c.provider, "github");
+    }
+
+    /// An explicitly empty value is a way to switch the gate off entirely, and
+    /// has to stay one — otherwise there is no way to get an unconfigured
+    /// build any more, and `NOT_CONFIGURED` becomes unreachable.
+    #[test]
+    fn an_empty_override_means_unconfigured_rather_than_production() {
+        assert!(resolve(Some(String::new()), None, None).is_none());
+        assert!(resolve(None, Some("  ".into()), None).is_none());
         assert_eq!(GateError::not_configured().code, "NOT_CONFIGURED");
     }
 
+    /// The `service_role` key must never be what this ships with. A
+    /// belt-and-braces reading of the compiled-in key's own claims, so that
+    /// pasting the wrong one in fails here rather than in the wild.
+    #[test]
+    fn the_compiled_in_key_is_the_publishable_one() {
+        use base64::Engine;
+        let payload = DEFAULT_ANON_KEY.split('.').nth(1).expect("a JWT");
+        let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload).expect("base64url");
+        let claims: serde_json::Value = serde_json::from_slice(&raw).expect("json");
+        assert_eq!(claims["role"], "anon", "this is not the publishable key: {claims}");
+        assert_eq!(claims["ref"], "pezsxoynjjsipfnpfvva", "wrong project: {claims}");
+    }
+
+    /// The whole authorize URL, because every part of it has been wrong once.
+    ///
+    /// `/auth/v1/` was missing, which answered 404. `provider` was missing,
+    /// which answered `Unsupported provider`. Both were quiet failures that
+    /// only a real project could reveal.
+    #[test]
+    fn the_authorize_url_is_the_one_the_platform_answers() {
+        let cfg = resolve(None, None, None).expect("configured");
+        let url = authorize_url(&cfg, "the-challenge", "http://127.0.0.1:49152/callback?state=xyz");
+        assert_eq!(
+            url,
+            "https://pezsxoynjjsipfnpfvva.supabase.co/auth/v1/authorize\
+             ?provider=google&code_challenge=the-challenge&code_challenge_method=S256\
+             &redirect_to=http%3A%2F%2F127.0.0.1%3A49152%2Fcallback%3Fstate%3Dxyz"
+        );
+        // A trailing slash on the base must not produce a doubled one.
+        let cfg = resolve(Some("https://x.example.com/".into()), None, None).expect("configured");
+        assert!(authorize_url(&cfg, "c", "r").starts_with("https://x.example.com/auth/v1/authorize?"));
+    }
+
     /// The redirect has to survive being put in a query string, or the
-    /// provider sends the browser somewhere that is not us.
+    /// provider sends the browser somewhere that is not us. The `state` in it
+    /// is what makes the encoding load-bearing rather than cosmetic: an
+    /// unencoded `?` would truncate the whole parameter.
     #[test]
     fn the_redirect_is_encoded_for_a_query_string() {
         assert_eq!(
             urlencode("http://127.0.0.1:49152/callback"),
             "http%3A%2F%2F127.0.0.1%3A49152%2Fcallback"
         );
+        assert_eq!(
+            urlencode("http://127.0.0.1:49152/callback?state=a-b_c"),
+            "http%3A%2F%2F127.0.0.1%3A49152%2Fcallback%3Fstate%3Da-b_c"
+        );
+    }
+
+    /// The grace period is measured in days between two timestamps, and the
+    /// frontend measures it with `Date.parse`. A stamp that reads as `NaN`
+    /// there is an infinitely old cache, which is read-only for everybody.
+    #[test]
+    fn timestamps_are_the_shape_the_grace_period_can_be_measured_in() {
+        assert_eq!(iso_from_epoch(0), "1970-01-01T00:00:00Z");
+        assert_eq!(iso_from_epoch(1_787_000_665), "2026-08-17T21:04:25Z");
+        // A leap day, because the arithmetic is the only part worth doubting.
+        assert_eq!(iso_from_epoch(1_709_164_800), "2024-02-29T00:00:00Z");
+        assert!(now_iso().ends_with('Z') && now_iso().len() == 20, "{}", now_iso());
+    }
+
+    /// The check time comes from the platform's clock, off its own `Date`
+    /// header, so a laptop with the wrong date cannot lengthen or shorten its
+    /// own grace period.
+    #[test]
+    fn the_servers_own_clock_is_understood() {
+        assert_eq!(
+            http_date_to_iso("Mon, 17 Aug 2026 21:04:25 GMT").as_deref(),
+            Some("2026-08-17T21:04:25Z")
+        );
+        // Anything unexpected falls back to the local clock rather than
+        // producing a stamp that cannot be parsed.
+        assert_eq!(http_date_to_iso("whenever"), None);
+        assert_eq!(http_date_to_iso("Mon, 17 Aug 2026"), None);
     }
 
     /// Unreachable has to stay distinguishable after crossing into the UI, or

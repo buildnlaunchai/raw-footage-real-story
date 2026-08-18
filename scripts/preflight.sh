@@ -33,13 +33,36 @@ SECRET_PATTERNS=(
   'xi-api-key[[:space:]]*[:=][[:space:]]*['"'"'"][^'"'"'"]{8,}'   # ElevenLabs, inline
   'sk_[a-f0-9]{32,}'                                              # ElevenLabs key shape
 )
+# Not every secret-shaped string is a secret. A Supabase *publishable* key is a
+# JWT, is printed in every web page the platform serves, and has to be in the
+# binary for a downloaded copy to sign anyone in; the RS256 tokens the licence
+# tests verify against are signed by a throwaway key that was destroyed after
+# generating them.
+#
+# Those are allowed by the SHA-256 of the exact string, one per line in
+# `preflight-allowed.txt`, so that a *different* secret-shaped string still
+# fails. Nothing is allowed by file, by line number, or by pattern — the only
+# way past this is to have written the value down here on purpose.
+ALLOWED="$(dirname "$0")/preflight-allowed.txt"
+sha() { if command -v shasum >/dev/null; then shasum -a 256 | cut -d' ' -f1; else sha256sum | cut -d' ' -f1; fi; }
+allowed() { [ -f "$ALLOWED" ] && grep -qx "$1" "$ALLOWED"; }
+
 for pattern in "${SECRET_PATTERNS[@]}"; do
-  if hits=$(grep -rInE "${EXCLUDES[@]}" "$pattern" "${SCAN_DIRS[@]}" 2>/dev/null); then
+  # -o so the hash is of the secret itself and not of whatever line it sits on,
+  # which would let a rename or a reindent quietly re-admit it.
+  while IFS= read -r hit; do
+    [ -n "$hit" ] || continue
+    where=${hit%%:*}; rest=${hit#*:}; line=${rest%%:*}; match=${rest#*:}
+    digest=$(printf '%s' "$match" | sha)
+    if allowed "$digest"; then continue; fi
     bad "  secret-shaped string found:"
-    printf '%s\n' "$hits" | sed 's/^/    /'
-  fi
+    # The first few characters and the hash, never the value: enough to
+    # recognise it, and enough to allow it deliberately if it turns out to be
+    # publishable. The whole string is not printed into a CI log.
+    printf '    %s:%s  starts %s…  sha256 %s\n' "$where" "$line" "${match:0:12}" "$digest"
+  done <<< "$(grep -rInoE "${EXCLUDES[@]}" "$pattern" "${SCAN_DIRS[@]}" 2>/dev/null || true)"
 done
-[ "$fail" -eq 0 ] && ok "  clean"
+[ "$fail" -eq 0 ] && ok "  clean — $(grep -cvE '^\s*(#|$)' "$ALLOWED" 2>/dev/null || echo 0) string(s) allowed by hash"
 
 # --- 2. .env.local is not tracked ------------------------------------------
 say "→ checking .env.local is not tracked by git"
