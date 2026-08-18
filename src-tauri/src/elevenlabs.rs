@@ -31,19 +31,32 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 pub struct ElevenLabsError {
     pub code: String,
     pub message: String,
-    /// Where to send the browser to fix this, when somewhere would. See the
-    /// same field on [`crate::openai::OpenAiError`].
+    /// Where to send the browser to fix this, exactly as the platform
+    /// addressed it.
+    ///
+    /// Carried on the error rather than pieced together in the UI, because
+    /// nothing outside the response can know it: the destination follows the
+    /// reason the key was withheld, and one of the three is a page with no
+    /// provider in its address at all.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub manage_url: Option<String>,
+    pub consent_url: Option<String>,
+    /// What to put on the button that opens it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action_label: Option<&'static str>,
 }
 
 impl ElevenLabsError {
     fn new(code: &str, message: impl Into<String>) -> Self {
-        Self { code: code.into(), message: message.into(), manage_url: None }
+        Self { code: code.into(), message: message.into(), consent_url: None, action_label: None }
     }
 
     fn from_key_problem(p: crate::provider_keys::KeyProblem) -> Self {
-        Self { code: p.code().into(), message: p.message(), manage_url: p.manage_url() }
+        Self {
+            code: p.code().into(),
+            message: p.message(),
+            consent_url: p.consent_url(),
+            action_label: p.action_label(),
+        }
     }
 }
 

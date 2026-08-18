@@ -51,38 +51,80 @@ pub enum KeyMode {
     Platform,
 }
 
+/// Why a provider slot is withheld, in the platform's own word.
+///
+/// Three, and they are not interchangeable — each names a different thing
+/// being wrong and a different page that fixes it:
+///
+/// - `consent_required` — a key exists, and this app has not been granted
+///   permission to read it. Saying "you have no key" here is simply false, and
+///   the dashboard's provider page cannot grant the permission either.
+/// - `no_key` — nothing is stored. The vault is where one gets added.
+/// - `key_invalid` — something is stored and was rejected. Needs replacing.
+///
+/// Carried as an `Option<String>` on the wire and narrowed here, so a word this
+/// build has never seen is *not* an error: it decides nothing, falls back to
+/// the generic wording, and the `consent_url` beside it still works. That is
+/// the same treatment [`LicenceResponse::reason`] gets and for the same reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WithheldReason {
+    ConsentRequired,
+    NoKey,
+    KeyInvalid,
+}
+
+impl WithheldReason {
+    pub fn parse(s: Option<&str>) -> Option<Self> {
+        match s? {
+            "consent_required" => Some(Self::ConsentRequired),
+            "no_key" => Some(Self::NoKey),
+            "key_invalid" => Some(Self::KeyInvalid),
+            _ => None,
+        }
+    }
+}
+
 /// One provider's credentials as the platform reports them.
 ///
 /// `present: false` with no key is a real answer and a different one from an
-/// empty string: it means "this person has not saved an OpenAI key with us",
-/// which the app should answer with "add one on your dashboard" rather than
-/// "your key was rejected".
+/// empty string: it means "this app cannot use an OpenAI key on your behalf
+/// right now", which the app answers with the link the platform sent rather
+/// than with "your key was rejected".
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderKey {
     pub present: bool,
     #[serde(default)]
     pub key: Option<String>,
-    #[serde(default = "byok")]
-    pub mode: KeyMode,
-    /// Where to send this person's browser to put that right.
+    /// Whose key it is, when this slot says. Absent means "as the response
+    /// says at the top level" — see [`ProviderKeys::mode`], which is where the
+    /// confirmed shape carries it.
+    #[serde(default)]
+    pub mode: Option<KeyMode>,
+    /// Where to send this person's browser, from the platform and only from
+    /// the platform.
     ///
-    /// The platform's own link, and preferred over anything composed here: it
-    /// is the side that knows whether this account needs to grant consent
-    /// before a key it already holds may be released, and which page says so.
-    /// Absent is ordinary — a build talking to a backend that does not send it
-    /// falls back to the dashboard address in [`crate::provider_keys`].
+    /// Sent on every withheld slot, and the app composes no alternative. It
+    /// could not compose a correct one if it tried: the destination follows
+    /// `reason`, not the provider, and `consent_required` goes to a page whose
+    /// address has no provider in it at all. A guess would be a button that
+    /// looks right and lands somewhere that cannot help.
     ///
-    /// Both spellings are accepted. The struct reads camelCase and the field
-    /// was specified as `consent_url`; a desktop binary that takes only one of
-    /// the two and silently offers no way forward on the other is not a trade
-    /// worth making for tidiness.
+    /// Still an `Option` at this boundary despite being a required field, and
+    /// that is deliberate. Making it mandatory would mean a response missing it
+    /// fails to parse *as a whole* — taking both providers' keys down over a
+    /// cosmetic field, in a binary already on somebody's machine that cannot be
+    /// hotfixed. It is read as "no button" instead. See the note on
+    /// [`LicenceResponse`] about desktop binaries and unexpected JSON.
+    ///
+    /// Both spellings are accepted: the struct reads camelCase and the
+    /// confirmed shape sends `consent_url`.
     #[serde(default, alias = "consent_url")]
     pub consent_url: Option<String>,
-}
-
-fn byok() -> KeyMode {
-    KeyMode::Byok
+    /// Why it is withheld. See [`WithheldReason`].
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 impl ProviderKey {
@@ -93,20 +135,52 @@ impl ProviderKey {
         let tail: String = k.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
         (!tail.is_empty()).then_some(tail)
     }
+
+    /// The link to offer, or nothing.
+    ///
+    /// Whitespace is not a link. A slot carrying `""` would otherwise hand the
+    /// browser nowhere, which is worse than showing no button at all — the
+    /// button is the only thing on that screen a person can act on, so it has
+    /// to be absent rather than inert.
+    pub fn consent_link(&self) -> Option<String> {
+        self.consent_url.as_deref().map(str::trim).filter(|u| !u.is_empty()).map(str::to_string)
+    }
+
+    pub fn withheld_reason(&self) -> Option<WithheldReason> {
+        WithheldReason::parse(self.reason.as_deref())
+    }
 }
 
 /// What the platform holds for this person, this session. Memory only.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderKeys {
+    /// Whose keys these are, for the response as a whole.
+    ///
+    /// The confirmed shape carries it here rather than per provider. A slot may
+    /// still override it — see [`ProviderKey::mode`] — which costs nothing and
+    /// means the two shapes do not have to be told apart.
+    #[serde(default = "byok")]
+    pub mode: KeyMode,
     #[serde(default = "absent")]
     pub openai: ProviderKey,
     #[serde(default = "absent")]
     pub elevenlabs: ProviderKey,
 }
 
+impl ProviderKeys {
+    /// Whose key a given slot is, top-level unless the slot says otherwise.
+    pub fn mode_of(&self, key: &ProviderKey) -> KeyMode {
+        key.mode.unwrap_or(self.mode)
+    }
+}
+
+fn byok() -> KeyMode {
+    KeyMode::Byok
+}
+
 fn absent() -> ProviderKey {
-    ProviderKey { present: false, key: None, mode: KeyMode::Byok, consent_url: None }
+    ProviderKey { present: false, key: None, mode: None, consent_url: None, reason: None }
 }
 
 /// A session as the identity provider issues it.
@@ -526,7 +600,7 @@ mod tests {
         let k = provider_keys(&base, "anon", "at-1").await.expect("keys");
 
         assert!(k.openai.present);
-        assert_eq!(k.openai.mode, KeyMode::Byok);
+        assert_eq!(k.mode_of(&k.openai), KeyMode::Byok);
         // Only ever the last four, so nothing longer reaches a screen or a log.
         assert_eq!(k.openai.hint().as_deref(), Some("1234"));
 
@@ -726,14 +800,31 @@ mod tests {
     }
 
     /// Credits mode does not exist yet; the shape that will carry it does.
+    ///
+    /// It is carried at the top level in the confirmed response, and a slot may
+    /// still override it. Reading both means the two spellings never have to be
+    /// told apart — and means a per-slot `platform` arriving one day is
+    /// understood rather than silently read as the user's own key.
     #[test]
     fn the_platform_mode_is_understood_before_it_is_offered() {
-        let k: ProviderKey =
-            serde_json::from_str(r#"{"present":true,"key":"x","mode":"platform"}"#).expect("parses");
+        let k: ProviderKeys =
+            serde_json::from_str(r#"{"mode":"platform","openai":{"present":true,"key":"x"}}"#)
+                .expect("parses");
         assert_eq!(k.mode, KeyMode::Platform);
-        // And an older backend that omits it still means the user's own key.
-        let k: ProviderKey = serde_json::from_str(r#"{"present":true,"key":"x"}"#).expect("parses");
-        assert_eq!(k.mode, KeyMode::Byok);
+        assert_eq!(k.mode_of(&k.openai), KeyMode::Platform, "the top-level mode did not reach the slot");
+
+        // A slot that disagrees wins for that slot only.
+        let k: ProviderKeys = serde_json::from_str(
+            r#"{"mode":"platform","openai":{"present":true,"key":"x","mode":"byok"}}"#,
+        )
+        .expect("parses");
+        assert_eq!(k.mode_of(&k.openai), KeyMode::Byok);
+        assert_eq!(k.mode_of(&k.elevenlabs), KeyMode::Platform, "one slot's override leaked");
+
+        // And a response that omits it entirely still means the user's own key.
+        let k: ProviderKeys =
+            serde_json::from_str(r#"{"openai":{"present":true,"key":"x"}}"#).expect("parses");
+        assert_eq!(k.mode_of(&k.openai), KeyMode::Byok);
     }
 }
 
@@ -1376,6 +1467,82 @@ mod live_tests {
                     println!("token {token:?} → 401 {message}");
                 }
                 other => panic!("expected a 401, got {other:?}"),
+            }
+        }
+    }
+
+    /// The confirmed shape, against the real endpoint, with a real session.
+    ///
+    /// The one thing no stub can check: that the platform actually sends what
+    /// it says it sends. Everything else about `consent_url` is verified
+    /// against a hand-written copy of the contract, which proves the parser
+    /// matches the document and nothing about whether the document matches the
+    /// server.
+    ///
+    /// Prints the shape rather than asserting a particular account's contents —
+    /// whether this tester happens to have an OpenAI key linked is a fact about
+    /// them, not about the API. What it *does* assert is the contract: every
+    /// withheld slot carries an absolute `consent_url`.
+    ///
+    /// **Never prints key material.** Presence, the last four characters, the
+    /// reason and the link — the link is a public URL and the rest is what the
+    /// UI already shows.
+    ///
+    /// Spends a refresh token, which rotates it and writes the replacement back
+    /// exactly as a launch does. That is routine — `auth_licence` does it every
+    /// time the app opens — but it does mean this touches the real keychain, so
+    /// expect a permission prompt from a test binary that is not the signed
+    /// app.
+    #[tokio::test]
+    #[ignore = "hits the real platform and spends a refresh token"]
+    async fn the_keys_endpoint_sends_the_shape_it_promised() {
+        let cfg = config().expect("configured");
+        let Some(stored) = crate::session::load() else {
+            eprintln!("no session on this machine; sign in to the app first");
+            return;
+        };
+
+        let tokens = refresh(&cfg.base, &cfg.anon_key, &stored.refresh_token)
+            .await
+            .expect("the stored session could not be refreshed");
+        // Written down before it is used, exactly as the app does it.
+        crate::session::replace(&stored, &tokens.refresh_token, &now_iso())
+            .expect("the rotated token must be saved before it is spent");
+
+        let keys = provider_keys(&cfg.base, &cfg.anon_key, &tokens.access_token)
+            .await
+            .expect("keys");
+
+        println!("\n  response mode: {:?}", keys.mode);
+        for (name, k) in [("openai", &keys.openai), ("elevenlabs", &keys.elevenlabs)] {
+            println!(
+                "    {name:<11} present={} mode={:?} hint={:?} reason={:?}",
+                k.present,
+                keys.mode_of(k),
+                k.hint(),
+                k.reason,
+            );
+            println!("      consent_url: {:?}", k.consent_link());
+
+            if k.present {
+                assert!(k.key.is_some(), "{name} says present with no key to use");
+                continue;
+            }
+
+            // The contract: required on every withheld slot, and absolute.
+            let link = k.consent_link().unwrap_or_else(|| {
+                panic!("{name} is withheld and sent no consent_url — the app has no button to show")
+            });
+            assert!(
+                link.starts_with("https://"),
+                "{name} sent a relative consent_url ({link}); the app opens it as-is and cannot resolve it",
+            );
+
+            // And the reason, if sent, must be one the app has been taught —
+            // an unknown word is tolerated but worth seeing in the output.
+            match k.withheld_reason() {
+                Some(r) => println!("      understood as: {r:?}"),
+                None => println!("      reason not recognised by this build (falls back to generic wording)"),
             }
         }
     }

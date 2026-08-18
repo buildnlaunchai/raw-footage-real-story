@@ -11,6 +11,15 @@
  * exactly one thing to offer: a button to the page where the key is managed.
  * There is no field, because there is nothing this app can do with a key typed
  * into it.
+ *
+ * ## The link is the platform's, not ours
+ *
+ * Every withheld slot arrives with a `consentUrl`, and that is opened verbatim.
+ * This file contains no dashboard address and composes none — it cannot, since
+ * the destination follows *why* the key is withheld rather than which provider
+ * it is, and `consent_required` lands on a page with no provider in its address
+ * at all. A composed link would have looked right and opened a page that could
+ * not grant the permission being asked for.
  */
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -19,6 +28,20 @@ export type ProviderSlug = "openai" | "elevenlabs";
 
 /** Whose key, and therefore who is billed. `platform` does not exist yet. */
 export type KeyMode = "byok" | "platform";
+
+/**
+ * Why a provider is withheld, in the platform's own word.
+ *
+ * Three situations that are not interchangeable, and the app must not blur
+ * them: `consentRequired` means the key exists and this app has not been
+ * allowed to read it, so describing it as a missing key sends the person
+ * looking for a problem they do not have.
+ *
+ * `undefined` where the platform said nothing, or said a word this build has
+ * not been taught. That decides nothing — the message falls back to wording
+ * true of all three, and the link beside it is still the platform's.
+ */
+export type WithheldReason = "consent_required" | "no_key" | "key_invalid";
 
 /**
  * One provider's standing, as reported by Rust.
@@ -35,13 +58,23 @@ export interface ProviderStatus {
   mode: KeyMode;
   hint: string | null;
   /**
-   * Where the browser goes to put it right.
+   * Where the browser goes, exactly as the platform addressed it.
    *
-   * The platform's own consent link when it sent one, and the dashboard
-   * addressed to this provider otherwise. Always populated, so a button built
-   * from it always has somewhere to go.
+   * Opened as-is: never joined to a base, never appended to, never composed.
+   * The destination follows `reason` rather than the provider — one of the
+   * three is a page with no provider in its address at all — so nothing outside
+   * the response is in a position to work it out.
+   *
+   * Absent when the key works, and absent in the case the contract says cannot
+   * happen. The rule for rendering is just: a button if there is a URL, no
+   * button if there is not. Never a button pointing nowhere.
    */
-  manageUrl: string;
+  consentUrl?: string;
+  reason?: WithheldReason;
+  /** What to tell the person. Absent when the key works. */
+  message?: string;
+  /** What to put on the button that opens `consentUrl`. */
+  actionLabel?: string;
   /** The key came from the environment — a CI and development arrangement. */
   fromEnvironment: boolean;
 }
@@ -56,13 +89,20 @@ export interface ProviderStatus {
  */
 export class AccountKeyError extends Error {
   code: string;
-  manageUrl: string | null;
+  consentUrl: string | null;
+  actionLabel: string | null;
 
-  constructor(code: string, message: string, manageUrl: string | null = null) {
+  constructor(
+    code: string,
+    message: string,
+    consentUrl: string | null = null,
+    actionLabel: string | null = null,
+  ) {
     super(message);
     this.name = "AccountKeyError";
     this.code = code;
-    this.manageUrl = manageUrl;
+    this.consentUrl = consentUrl;
+    this.actionLabel = actionLabel;
   }
 }
 
@@ -70,8 +110,18 @@ export function asAccountKeyError(err: unknown): AccountKeyError {
   if (err instanceof AccountKeyError) return err;
   if (err instanceof Error) return new AccountKeyError("UNKNOWN", err.message);
   if (typeof err === "object" && err !== null && "code" in err) {
-    const e = err as { code: string; message?: string; manageUrl?: string };
-    return new AccountKeyError(e.code, e.message ?? e.code, e.manageUrl ?? null);
+    const e = err as {
+      code: string;
+      message?: string;
+      consentUrl?: string;
+      actionLabel?: string;
+    };
+    return new AccountKeyError(
+      e.code,
+      e.message ?? e.code,
+      e.consentUrl ?? null,
+      e.actionLabel ?? null,
+    );
   }
   return new AccountKeyError("UNKNOWN", String(err));
 }
@@ -100,22 +150,25 @@ export async function statusFor(
 }
 
 /**
- * Where to send somebody for a provider, without asking the platform anything.
+ * Open the page where this provider's key is managed.
  *
- * For the screens that need a destination while offline or signed out — the
- * setup screen among them, which is reachable before any of this is known.
+ * Takes the URL it is given, or asks for the current one. There is no third
+ * option and no address written down in this file: if neither produces a link,
+ * this throws rather than opening something invented, because a button that
+ * lands on the wrong page is worse than one that admits it cannot help — the
+ * person follows it, finds nothing that fixes their problem, and has no reason
+ * to think the app sent them somewhere wrong.
  */
-export async function manageUrlFor(provider: ProviderSlug): Promise<string> {
-  try {
-    return await invoke<string>("provider_manage_url", { provider });
-  } catch {
-    // The command cannot really fail, and a button with no destination is the
-    // one outcome worth writing a fallback for.
-    return `https://buildnlaunchai.com/dashboard/keys?provider=${provider}`;
+export async function openKeyManagement(
+  provider: ProviderSlug,
+  url?: string | null,
+): Promise<void> {
+  const target = url ?? (await statusFor(provider))?.consentUrl ?? null;
+  if (!target) {
+    throw new AccountKeyError(
+      "NO_CONSENT_URL",
+      "Your account didn't say where to manage this key. Try again in a moment.",
+    );
   }
-}
-
-/** Open the page where this provider's key is managed. */
-export async function openKeyManagement(provider: ProviderSlug, url?: string): Promise<void> {
-  await openUrl(url ?? (await manageUrlFor(provider)));
+  await openUrl(target);
 }

@@ -24,6 +24,13 @@
 //! is how the test suite and CI exercise the cloud providers at all, on a
 //! runner with no keychain and nobody to sign in as. See [`env_override`].
 //!
+//! ## Where the "fix this" link comes from
+//!
+//! From the platform, verbatim, or not at all. Every withheld slot carries a
+//! `consent_url` and the app opens exactly that. It does not join it to a base,
+//! append to it, or fall back to one of its own — see the note where the
+//! composed URL used to be for why a guess is worse than nothing here.
+//!
 //! ## Nothing is written down
 //!
 //! Keys live in memory for the session and are dropped when it ends. The
@@ -31,17 +38,24 @@
 //! connection, and with one the platform can simply be asked — so caching to
 //! disk buys nothing and costs revocation.
 
-use crate::platform::{self, KeyMode, PlatformError, ProviderKey, ProviderKeys};
+use crate::platform::{self, KeyMode, PlatformError, ProviderKey, ProviderKeys, WithheldReason};
 use serde::Serialize;
 
-/// Where somebody manages the keys held against their account.
-///
-/// The fallback, and only the fallback. Whenever the platform sends a
-/// `consentUrl` for a provider that is used instead — it is the side that
-/// knows whether this account has yet agreed to release a key it already
-/// holds, and which page to land on to say so. Composing a URL here is what
-/// happens when it sends nothing.
-const DASHBOARD_KEYS: &str = "https://buildnlaunchai.com/dashboard/keys";
+// There is no dashboard address in this file, and that is the design.
+//
+// A composed URL was here — `{dashboard}/keys?provider={slug}` — as a fallback
+// for a backend that sent no link. It has gone, because the confirmed shape
+// sends one on every withheld slot and because the composition was wrong in the
+// case that matters most: the destination follows the *reason*, not the
+// provider. `consent_required` belongs at `/dashboard/keys/desktop`, which has
+// no provider in its path at all, and is the one page that can grant an app
+// permission to read a key. A guessed provider link would have looked correct,
+// opened cleanly, and left the person on a page that could not fix their
+// problem — the worst of the three possible failures, because it does not look
+// like one.
+//
+// So the app renders the platform's link or renders no button. It never
+// invents a destination.
 
 /// The two providers this applies to.
 ///
@@ -121,9 +135,20 @@ pub enum KeyProblem {
     SignedOut,
     /// The platform could not be reached. Says nothing about the account.
     Unreachable(String),
-    /// The platform answered, and it holds no usable key for this provider —
-    /// or holds one this account has not consented to release.
-    NotLinked { provider: Provider, manage_url: String },
+    /// The platform answered, and this app cannot use a key for this provider.
+    ///
+    /// Three different situations behind one variant, told apart by `reason` —
+    /// and they must be told apart, because "your account has no key" is
+    /// simply false for `consent_required`, where the key exists and only the
+    /// permission is missing.
+    NotLinked {
+        provider: Provider,
+        reason: Option<WithheldReason>,
+        /// The platform's own link. `None` only if it sent none, which the
+        /// confirmed shape says it will not — the app still has to render
+        /// something rather than a button pointing nowhere.
+        consent_url: Option<String>,
+    },
     /// The platform answered with something unexpected.
     Malformed(String),
 }
@@ -155,20 +180,62 @@ impl KeyProblem {
             Self::Unreachable(e) => format!(
                 "Couldn't reach your account to fetch provider keys. Check your connection and try again. ({e})"
             ),
-            Self::NotLinked { provider, .. } => format!(
-                "Your account has no {} key available yet. Open your dashboard to add one or allow this app to use it.",
-                provider.label()
-            ),
+            Self::NotLinked { provider, reason, .. } => withheld_message(*provider, *reason),
             Self::Malformed(e) => format!("Your account returned something unreadable ({e})."),
         }
     }
 
-    /// The page that fixes it, when a page can.
-    pub fn manage_url(&self) -> Option<String> {
+    /// The page that fixes it, exactly as the platform addressed it.
+    pub fn consent_url(&self) -> Option<String> {
         match self {
-            Self::NotLinked { manage_url, .. } => Some(manage_url.clone()),
+            Self::NotLinked { consent_url, .. } => consent_url.clone(),
             _ => None,
         }
+    }
+
+    /// What to put on the button that opens it.
+    pub fn action_label(&self) -> Option<&'static str> {
+        match self {
+            Self::NotLinked { reason, .. } => Some(action_label(*reason)),
+            _ => None,
+        }
+    }
+}
+
+/// What to tell somebody about a withheld provider.
+///
+/// One place, shared by the error path and the settings screen, for the same
+/// reason `entitlement.ts` keeps `blockedBy` in one place: two copies of a
+/// reason-to-wording mapping is how the same situation comes to be described
+/// two different ways depending on which screen you arrived from.
+///
+/// An unrecognised or absent reason gets wording that is true of all three. It
+/// claims nothing about which of them it is, because it does not know — and the
+/// link beside it is still the right link either way.
+fn withheld_message(provider: Provider, reason: Option<WithheldReason>) -> String {
+    let name = provider.label();
+    match reason {
+        Some(WithheldReason::ConsentRequired) => format!(
+            "Your {name} key is on your account, but this app hasn't been allowed to use it yet. That permission is granted once, on your dashboard.",
+        ),
+        Some(WithheldReason::NoKey) => format!(
+            "Your account has no {name} key yet. Add one on your dashboard and it will work on every machine you sign in on.",
+        ),
+        Some(WithheldReason::KeyInvalid) => format!(
+            "The {name} key on your account was rejected by {name}. Replace it on your dashboard.",
+        ),
+        None => format!(
+            "This app can't use an {name} key from your account yet. Your dashboard has the details.",
+        ),
+    }
+}
+
+fn action_label(reason: Option<WithheldReason>) -> &'static str {
+    match reason {
+        Some(WithheldReason::ConsentRequired) => "Allow this app",
+        Some(WithheldReason::NoKey) => "Add a key",
+        Some(WithheldReason::KeyInvalid) => "Replace the key",
+        None => "Open my dashboard",
     }
 }
 
@@ -197,17 +264,6 @@ fn env_override(provider: Provider) -> Option<String> {
         Provider::ElevenLabs => "ELEVENLABS_API_KEY",
     };
     std::env::var(var).ok().filter(|v| !v.trim().is_empty())
-}
-
-/// Where to send the browser for this provider.
-///
-/// The platform's own link wins. It is the side that knows whether the account
-/// holds a key awaiting consent or holds nothing at all, and those are two
-/// different pages; guessing between them from out here would be guessing.
-fn manage_url(provider: Provider, key: Option<&ProviderKey>) -> String {
-    key.and_then(|k| k.consent_url.clone())
-        .filter(|u| !u.trim().is_empty())
-        .unwrap_or_else(|| format!("{DASHBOARD_KEYS}?provider={}", provider.slug()))
 }
 
 /// Ask the platform what it holds, or hand back what it said earlier.
@@ -279,7 +335,8 @@ pub async fn key_for(provider: Provider) -> Result<String, KeyProblem> {
         Some(k) if held.present && !k.is_empty() => Ok(k.to_string()),
         _ => Err(KeyProblem::NotLinked {
             provider,
-            manage_url: manage_url(provider, Some(&held)),
+            reason: held.withheld_reason(),
+            consent_url: held.consent_link(),
         }),
     }
 }
@@ -302,9 +359,25 @@ pub struct ProviderStatus {
     pub mode: KeyMode,
     /// The last four characters of the key in use, when there is one.
     pub hint: Option<String>,
-    /// Where the browser goes to put it right. Always populated, so a screen
-    /// never has to decide what to do with a button that has nowhere to go.
-    pub manage_url: String,
+    /// The platform's link, verbatim, or nothing.
+    ///
+    /// `None` where the key works — a usable slot carries no consent link,
+    /// because there is nothing to consent to — and `None` in the case the
+    /// confirmed shape says cannot happen, a withheld slot with no link. The UI
+    /// renders a button only when this is `Some`, which is the whole of its
+    /// rule.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consent_url: Option<String>,
+    /// Which of the three situations this is, when the platform said.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<WithheldReason>,
+    /// What to tell the person. `None` when the key works and there is nothing
+    /// to explain.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// What to put on the button that opens `consent_url`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action_label: Option<&'static str>,
     /// True when the key is coming from the environment rather than the
     /// account — a development and CI arrangement, surfaced rather than hidden
     /// so nobody debugs a dashboard that is not being consulted.
@@ -316,13 +389,21 @@ pub struct ProviderStatus {
 pub struct KeyError {
     pub code: String,
     pub message: String,
+    /// The platform's link, when the failure is one a page can fix.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub manage_url: Option<String>,
+    pub consent_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action_label: Option<&'static str>,
 }
 
 impl From<KeyProblem> for KeyError {
     fn from(p: KeyProblem) -> Self {
-        Self { code: p.code().into(), message: p.message(), manage_url: p.manage_url() }
+        Self {
+            code: p.code().into(),
+            message: p.message(),
+            consent_url: p.consent_url(),
+            action_label: p.action_label(),
+        }
     }
 }
 
@@ -354,13 +435,19 @@ pub async fn provider_key_status(refresh: bool) -> Result<Vec<ProviderStatus>, K
             }
             let held = p.of(&keys);
             let usable = held.present && held.key.as_deref().is_some_and(|k| !k.trim().is_empty());
+            let reason = held.withheld_reason();
             ProviderStatus {
                 provider: p.slug(),
                 label: p.label(),
                 linked: usable,
-                mode: held.mode,
+                mode: keys.mode_of(&held),
                 hint: held.hint(),
-                manage_url: manage_url(*p, Some(&held)),
+                // Only ever what the platform sent, and only where there is
+                // something to fix.
+                consent_url: (!usable).then(|| held.consent_link()).flatten(),
+                reason: (!usable).then_some(reason).flatten(),
+                message: (!usable).then(|| withheld_message(*p, reason)),
+                action_label: (!usable).then(|| action_label(reason)),
                 from_environment: false,
             }
         })
@@ -374,100 +461,177 @@ fn from_environment(p: Provider) -> ProviderStatus {
         linked: true,
         mode: KeyMode::Byok,
         hint: env_override(p).map(|k| k.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect()),
-        manage_url: manage_url(p, None),
+        consent_url: None,
+        reason: None,
+        message: None,
+        action_label: None,
         from_environment: true,
     }
 }
 
-/// Where to send somebody for one provider, without asking the platform
-/// anything.
-///
-/// For the screens that need a destination while offline or signed out — the
-/// readiness panel among them. Falls back to the dashboard, which is the right
-/// answer when there is no session to have a consent link for.
-#[tauri::command]
-pub fn provider_manage_url(provider: String) -> String {
-    match Provider::parse(&provider) {
-        Some(p) => {
-            let held = cached().map(|k| p.of(&k));
-            manage_url(p, held.as_ref())
-        }
-        None => DASHBOARD_KEYS.to_string(),
-    }
-}
+// `provider_manage_url` was here. It answered "where does this provider's
+// button go?" without asking the platform, which it could only do while there
+// was a URL to compose. There is not, and there should not be: the answer lives
+// in the response and nowhere else, so the screens ask `provider_key_status`
+// like everything else does. One command, one source.
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn key_with(consent: Option<&str>, present: bool) -> ProviderKey {
+    fn withheld(reason: &str, consent: Option<&str>) -> ProviderKey {
         ProviderKey {
-            present,
-            key: present.then(|| "sk-proj-abcd1234".to_string()),
-            mode: KeyMode::Byok,
+            present: false,
+            key: None,
+            mode: None,
             consent_url: consent.map(str::to_string),
+            reason: Some(reason.to_string()),
         }
     }
 
-    /// The platform's link is used verbatim when it sends one. It is the only
-    /// side that knows whether this account is missing a key or merely has not
-    /// consented to release one, and those are different pages.
+    /// The exact response the platform confirmed, parsed field for field.
+    ///
+    /// Written out verbatim rather than paraphrased: this is the contract, and
+    /// a test that restates it in the shape the code already expects proves
+    /// nothing. Note `consent_url` in snake_case and `mode` at the top level —
+    /// both differ from what this struct would guess on its own.
     #[test]
-    fn the_platforms_own_consent_link_wins() {
-        let k = key_with(Some("https://buildnlaunchai.com/consent?app=rfrs&provider=openai"), false);
+    fn the_confirmed_response_shape_parses() {
+        let body = r#"{
+          "mode": "byok",
+          "openai":     { "present": true,  "key": "sk-abcd1234" },
+          "elevenlabs": { "present": false, "reason": "no_key",
+                          "consent_url": "https://buildnlaunchai.com/dashboard/keys?provider=elevenlabs" }
+        }"#;
+        let keys: ProviderKeys = serde_json::from_str(body).expect("the confirmed shape must parse");
+
+        assert!(keys.openai.present);
+        assert_eq!(keys.openai.hint().as_deref(), Some("1234"));
+        // A working slot carries no link, and needs none.
+        assert_eq!(keys.openai.consent_link(), None);
+
+        assert!(!keys.elevenlabs.present);
+        assert_eq!(keys.elevenlabs.withheld_reason(), Some(WithheldReason::NoKey));
         assert_eq!(
-            manage_url(Provider::OpenAi, Some(&k)),
-            "https://buildnlaunchai.com/consent?app=rfrs&provider=openai",
+            keys.elevenlabs.consent_link().as_deref(),
+            Some("https://buildnlaunchai.com/dashboard/keys?provider=elevenlabs"),
         );
+
+        // Mode is carried once, at the top, and applies to both slots.
+        assert_eq!(keys.mode, KeyMode::Byok);
+        assert_eq!(keys.mode_of(&keys.openai), KeyMode::Byok);
+        assert_eq!(keys.mode_of(&keys.elevenlabs), KeyMode::Byok);
     }
 
-    /// And a backend that sends none still leaves the user with somewhere to
-    /// go. A button with no destination is worse than the key entry it
-    /// replaced.
+    /// The link is opened as it arrives — not joined, not appended to, not
+    /// normalised.
+    ///
+    /// `consent_required` is the case that makes this matter: its page has no
+    /// provider in the address, so anything composed from a provider slug is
+    /// not merely a different URL but a page that cannot grant the permission
+    /// being asked for.
     #[test]
-    fn without_one_the_dashboard_is_addressed_per_provider() {
-        assert_eq!(
-            manage_url(Provider::OpenAi, Some(&key_with(None, false))),
-            "https://buildnlaunchai.com/dashboard/keys?provider=openai",
-        );
-        assert_eq!(
-            manage_url(Provider::ElevenLabs, Some(&key_with(None, false))),
-            "https://buildnlaunchai.com/dashboard/keys?provider=elevenlabs",
-        );
-        // Nothing known at all — signed out, nothing fetched — still resolves.
-        assert_eq!(
-            manage_url(Provider::ElevenLabs, None),
-            "https://buildnlaunchai.com/dashboard/keys?provider=elevenlabs",
-        );
+    fn every_reasons_link_is_passed_through_untouched() {
+        for (reason, url) in [
+            ("consent_required", "https://buildnlaunchai.com/dashboard/keys/desktop"),
+            ("no_key", "https://buildnlaunchai.com/dashboard/keys?provider=openai"),
+            ("key_invalid", "https://buildnlaunchai.com/dashboard/keys?provider=openai"),
+        ] {
+            let k = withheld(reason, Some(url));
+            assert_eq!(k.consent_link().as_deref(), Some(url), "{reason} was not passed through");
+        }
     }
 
-    /// An empty string is not a link. A backend sending `""` would otherwise
-    /// hand the browser nowhere, which is the one outcome the fallback exists
-    /// to prevent.
+    /// Nothing in this module composes a URL any more.
+    ///
+    /// Read out of the source, because the guarantee is the *absence* of code
+    /// and there is no value to assert against. A fallback creeping back in is
+    /// exactly the regression that would go unnoticed: it would look like a
+    /// button that works, and only somebody with `consent_required` would ever
+    /// find out it was the wrong page.
+    #[test]
+    fn no_dashboard_address_is_composed_anywhere_here() {
+        let source = include_str!("provider_keys.rs");
+        let working = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
+        let code: String = working
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        // Addresses only. The *word* "dashboard" is wanted in the messages —
+        // telling somebody where to go in prose is the job — so banning it
+        // caught the copy this module is supposed to contain. What must never
+        // appear is a host or a scheme, because those are the makings of a URL.
+        for banned in ["buildnlaunchai.com", "https://", "http://"] {
+            assert!(
+                !code.contains(banned),
+                "{banned} is back in the working code; the link belongs to the platform",
+            );
+        }
+    }
+
+    /// `consent_required` must never be described as a missing key.
+    ///
+    /// The key exists. Telling somebody to go and add one they already have
+    /// sends them looking for a problem that is not there, and the page that
+    /// actually fixes it is not the one that wording implies.
+    #[test]
+    fn consent_required_is_not_described_as_a_missing_key() {
+        let m = withheld_message(Provider::ElevenLabs, Some(WithheldReason::ConsentRequired));
+        assert!(m.contains("ElevenLabs"), "does not say which provider: {m}");
+        assert!(m.contains("permission") || m.contains("allowed"), "does not say what is missing: {m}");
+        assert!(!m.contains("no ElevenLabs key"), "claims the key is absent when it is not: {m}");
+        // And the three situations must not share one sentence.
+        let no_key = withheld_message(Provider::ElevenLabs, Some(WithheldReason::NoKey));
+        let invalid = withheld_message(Provider::ElevenLabs, Some(WithheldReason::KeyInvalid));
+        assert_ne!(m, no_key);
+        assert_ne!(m, invalid);
+        assert_ne!(no_key, invalid);
+    }
+
+    /// A word this build has never seen decides nothing and blocks nothing.
+    ///
+    /// The same rule `entitlement.ts` applies to licence reasons: a desktop
+    /// binary with opinions about vocabulary it has not been taught is one that
+    /// breaks when the backend adds a word. The generic wording is true of all
+    /// three, and the link beside it is still the platform's.
+    #[test]
+    fn an_unknown_reason_falls_back_to_wording_that_claims_nothing() {
+        let k = withheld("some_future_reason", Some("https://buildnlaunchai.com/somewhere"));
+        assert_eq!(k.withheld_reason(), None, "an unknown word must not be forced into one of the three");
+        assert_eq!(k.consent_link().as_deref(), Some("https://buildnlaunchai.com/somewhere"));
+
+        let m = withheld_message(Provider::OpenAi, None);
+        for claim in ["no OpenAI key", "rejected", "permission"] {
+            assert!(!m.contains(claim), "claims to know which situation it is: {m}");
+        }
+    }
+
+    /// A missing link is one absent button, not a failure to read the response.
+    ///
+    /// The field is required by the contract, so this should never happen. It
+    /// is handled anyway because the alternative — refusing to parse — takes
+    /// *both* providers' keys down over a field that only draws a button, in a
+    /// binary already on somebody's machine.
+    #[test]
+    fn a_slot_missing_its_link_still_parses_and_still_delivers_the_other_key() {
+        let body = r#"{
+          "mode": "byok",
+          "openai":     { "present": true, "key": "sk-abcd1234" },
+          "elevenlabs": { "present": false, "reason": "no_key" }
+        }"#;
+        let keys: ProviderKeys = serde_json::from_str(body).expect("a missing link must not fail the parse");
+        assert_eq!(keys.elevenlabs.consent_link(), None, "no link means no button");
+        // The point of tolerating it: OpenAI still works.
+        assert_eq!(keys.openai.hint().as_deref(), Some("1234"));
+    }
+
+    /// Whitespace is not a link. An inert button is worse than no button — it
+    /// is the only thing on that screen a person can act on.
     #[test]
     fn an_empty_consent_url_is_not_treated_as_one() {
-        let k = key_with(Some("   "), false);
-        assert_eq!(
-            manage_url(Provider::OpenAi, Some(&k)),
-            "https://buildnlaunchai.com/dashboard/keys?provider=openai",
-        );
-    }
-
-    /// `present: false` is answered with a place to go, never with a
-    /// complaint about the key being wrong.
-    #[test]
-    fn an_unlinked_provider_reports_where_to_go_and_does_not_blame_a_key() {
-        let p = KeyProblem::NotLinked {
-            provider: Provider::ElevenLabs,
-            manage_url: manage_url(Provider::ElevenLabs, None),
-        };
-        assert_eq!(p.code(), "KEY_NOT_LINKED");
-        assert!(p.manage_url().is_some(), "nowhere for the button to go");
-        let m = p.message();
-        assert!(m.contains("ElevenLabs"), "does not say which provider: {m}");
-        for banned in ["paste", "Paste", "keychain", "enter your key"] {
-            assert!(!m.contains(banned), "still offers a local key: {m}");
-        }
+        assert_eq!(withheld("no_key", Some("   ")).consent_link(), None);
+        assert_eq!(withheld("no_key", Some("")).consent_link(), None);
     }
 
     /// Being offline must never be reported as a missing key. One is fixed by
@@ -477,7 +641,26 @@ mod tests {
     fn unreachable_is_not_confused_with_unlinked() {
         let p: KeyProblem = PlatformError::Unreachable("dns".into()).into();
         assert_eq!(p.code(), "KEYS_UNREACHABLE");
-        assert!(p.manage_url().is_none(), "offered a dashboard trip for a network problem");
+        assert!(p.consent_url().is_none(), "offered a dashboard trip for a network problem");
+        assert!(p.action_label().is_none(), "offered a button for a network problem");
+    }
+
+    /// No message anywhere here offers to store a key on this machine.
+    #[test]
+    fn nothing_offers_a_local_key() {
+        let mut messages = vec![
+            KeyProblem::SignedOut.message(),
+            KeyProblem::NotConfigured.message(),
+            KeyProblem::Unreachable("x".into()).message(),
+        ];
+        for r in [None, Some(WithheldReason::ConsentRequired), Some(WithheldReason::NoKey), Some(WithheldReason::KeyInvalid)] {
+            messages.push(withheld_message(Provider::OpenAi, r));
+        }
+        for m in messages {
+            for banned in ["paste", "Paste", "keychain", "enter your key", "this Mac"] {
+                assert!(!m.contains(banned), "still offers a local key: {m}");
+            }
+        }
     }
 
     /// The environment variables are read here, are per provider, and do not
@@ -520,14 +703,23 @@ mod tests {
     /// The status a screen renders must never be able to carry the key.
     #[test]
     fn a_status_carries_a_hint_and_never_the_key() {
-        let held = key_with(None, true);
+        let held = ProviderKey {
+            present: true,
+            key: Some("sk-proj-abcd1234".into()),
+            mode: None,
+            consent_url: None,
+            reason: None,
+        };
         let status = ProviderStatus {
             provider: Provider::OpenAi.slug(),
             label: Provider::OpenAi.label(),
             linked: true,
-            mode: held.mode,
+            mode: KeyMode::Byok,
             hint: held.hint(),
-            manage_url: manage_url(Provider::OpenAi, Some(&held)),
+            consent_url: None,
+            reason: None,
+            message: None,
+            action_label: None,
             from_environment: false,
         };
         let json = serde_json::to_string(&status).expect("serialises");

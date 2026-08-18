@@ -80,7 +80,6 @@ pub fn run() {
             tts::tts_preview,
             tts::tts_synthesize_line,
             provider_keys::provider_key_status,
-            provider_keys::provider_manage_url,
             elevenlabs::elevenlabs_voices,
             elevenlabs::elevenlabs_usage,
             elevenlabs::elevenlabs_synthesize,

@@ -51,7 +51,9 @@ export function ScriptProviderSetup({
    * collapsing them tells an offline user to go and add a key they already
    * have.
    */
-  const [problem, setProblem] = useState<{ message: string; manageUrl: string | null } | null>(null);
+  const [problem, setProblem] = useState<
+    { message: string; consentUrl: string | null; actionLabel: string | null } | null
+  >(null);
 
   async function refresh(force = false) {
     if (!provider.capabilities.needsApiKey) {
@@ -66,7 +68,7 @@ export function ScriptProviderSetup({
     } catch (err) {
       const e = asAccountKeyError(err);
       setStatus(null);
-      setProblem({ message: e.message, manageUrl: e.manageUrl });
+      setProblem({ message: e.message, consentUrl: e.consentUrl, actionLabel: e.actionLabel });
     } finally {
       setChecking(false);
     }
@@ -136,13 +138,14 @@ export function ScriptProviderSetup({
             >
               {checking ? "Checking…" : "Try again"}
             </button>
-            {problem.manageUrl && (
+            {/* Only ever the platform's own link, and only if it sent one. */}
+            {problem.consentUrl && (
               <button
                 type="button"
                 className="ghost-button small"
-                onClick={() => void openKeyManagement("openai", problem.manageUrl ?? undefined)}
+                onClick={() => void openKeyManagement("openai", problem.consentUrl)}
               >
-                Open my dashboard
+                {problem.actionLabel ?? "Open my dashboard"}
               </button>
             )}
           </div>
@@ -152,21 +155,25 @@ export function ScriptProviderSetup({
       {/* Asked, and the answer was no. One sentence, one destination. */}
       {provider.capabilities.needsApiKey && !problem && status && !linked && (
         <div className="key-entry">
-          <strong>Your account has no OpenAI key available yet.</strong>
+          {/* The platform's own words for which of the three situations this
+              is. Not written here, because "no key" and "not allowed yet" are
+              different things and only the response knows which. */}
+          <strong>{status.message}</strong>
           <p className="placeholder-note">
             Keys are managed on your BuildnLaunchAI account, not on this
             computer, so one key works everywhere you use the app and revoking
-            it takes effect straight away. Add or allow your OpenAI key on the
-            dashboard, then re-check here.
+            it takes effect straight away.
           </p>
           <div className="actions">
-            <button
-              type="button"
-              className="primary-button"
-              onClick={() => void openKeyManagement("openai", status.manageUrl)}
-            >
-              Manage my OpenAI key
-            </button>
+            {status.consentUrl && (
+              <button
+                type="button"
+                className="primary-button"
+                onClick={() => void openKeyManagement("openai", status.consentUrl)}
+              >
+                {status.actionLabel ?? "Open my dashboard"}
+              </button>
+            )}
             <button
               type="button"
               className="ghost-button"
@@ -187,13 +194,6 @@ export function ScriptProviderSetup({
                 ? "Using OPENAI_API_KEY from this machine’s environment"
                 : `Using the OpenAI key on your account${status?.hint ? ` (…${status.hint})` : ""}`}
             </span>
-            <button
-              type="button"
-              className="ghost-button small"
-              onClick={() => void openKeyManagement("openai", status?.manageUrl)}
-            >
-              Manage
-            </button>
           </div>
 
           <span className="field-label">Model</span>

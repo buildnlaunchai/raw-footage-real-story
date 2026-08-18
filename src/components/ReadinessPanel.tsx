@@ -21,7 +21,7 @@ import {
   type Probe,
   type Requirements,
 } from "../lib/readiness";
-import { openKeyManagement } from "../lib/accountKeys";
+import { asAccountKeyError, openKeyManagement } from "../lib/accountKeys";
 import { CheckIcon, AlertIcon, RefreshIcon } from "./Icons";
 
 interface Props {
@@ -56,6 +56,16 @@ export function ReadinessPanel({
   const [log, setLog] = useState<JobLine[]>([]);
   const [fraction, setFraction] = useState<number | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
+  /**
+   * Why the key page could not be opened.
+   *
+   * It can genuinely fail now: the destination comes from the platform, and
+   * this screen is reachable while signed out or offline, when there is nothing
+   * to have asked. Saying so is the honest answer — the alternative was a
+   * button built from an address the app made up, which opened cleanly and
+   * landed somewhere that could not help.
+   */
+  const [keyLinkError, setKeyLinkError] = useState<string | null>(null);
   const logEnd = useRef<HTMLDivElement | null>(null);
 
   // A long install with no output looks hung, so the tail is always visible.
@@ -87,6 +97,15 @@ export function ReadinessPanel({
       void un.then((f) => f());
     };
   }, []);
+
+  async function openKeyPage() {
+    setKeyLinkError(null);
+    try {
+      await openKeyManagement("openai");
+    } catch (err) {
+      setKeyLinkError(asAccountKeyError(err).message);
+    }
+  }
 
   async function copy(text: string) {
     try {
@@ -251,7 +270,7 @@ export function ReadinessPanel({
                 <button
                   type="button"
                   className="primary-button"
-                  onClick={() => void openKeyManagement("openai")}
+                  onClick={() => void openKeyPage()}
                 >
                   Manage my OpenAI key
                 </button>
@@ -259,6 +278,11 @@ export function ReadinessPanel({
                   Script settings
                 </button>
               </div>
+              {keyLinkError && (
+                <p className="ready-caveat" role="alert">
+                  {keyLinkError}
+                </p>
+              )}
             </div>
 
             <div className="ready-option">

@@ -69,7 +69,9 @@ export function ProviderPicker({
    * Why the account could not be asked. Never why a key was refused — see the
    * same split in `ScriptProviderSetup`.
    */
-  const [problem, setProblem] = useState<{ message: string; manageUrl: string | null } | null>(null);
+  const [problem, setProblem] = useState<
+    { message: string; consentUrl: string | null; actionLabel: string | null } | null
+  >(null);
 
   async function refresh(force = false) {
     if (!provider.capabilities.needsApiKey) {
@@ -87,7 +89,7 @@ export function ProviderPicker({
     } catch (err) {
       const e = asAccountKeyError(err);
       setStatus(null);
-      setProblem({ message: e.message, manageUrl: e.manageUrl });
+      setProblem({ message: e.message, consentUrl: e.consentUrl, actionLabel: e.actionLabel });
     } finally {
       setChecking(false);
     }
@@ -171,13 +173,14 @@ export function ProviderPicker({
             >
               {checking ? "Checking…" : "Try again"}
             </button>
-            {problem.manageUrl && (
+            {/* Only ever the platform's own link, and only if it sent one. */}
+            {problem.consentUrl && (
               <button
                 type="button"
                 className="ghost-button small"
-                onClick={() => void openKeyManagement("elevenlabs", problem.manageUrl ?? undefined)}
+                onClick={() => void openKeyManagement("elevenlabs", problem.consentUrl)}
               >
-                Open my dashboard
+                {problem.actionLabel ?? "Open my dashboard"}
               </button>
             )}
           </div>
@@ -187,21 +190,25 @@ export function ProviderPicker({
       {/* Asked, and the answer was no. */}
       {provider.capabilities.needsApiKey && !problem && status && !linked && (
         <div className="key-entry">
-          <strong>Your account has no ElevenLabs key available yet.</strong>
+          {/* The platform's own words for which of the three situations this
+              is. Not written here, because "no key" and "not allowed yet" are
+              different things and only the response knows which. */}
+          <strong>{status.message}</strong>
           <p className="placeholder-note">
             Keys are managed on your BuildnLaunchAI account, not on this
             computer, so one key works everywhere you use the app and revoking
-            it takes effect straight away. Add or allow your ElevenLabs key on
-            the dashboard, then re-check here.
+            it takes effect straight away.
           </p>
           <div className="actions">
-            <button
-              type="button"
-              className="primary-button"
-              onClick={() => void openKeyManagement("elevenlabs", status.manageUrl)}
-            >
-              Manage my ElevenLabs key
-            </button>
+            {status.consentUrl && (
+              <button
+                type="button"
+                className="primary-button"
+                onClick={() => void openKeyManagement("elevenlabs", status.consentUrl)}
+              >
+                {status.actionLabel ?? "Open my dashboard"}
+              </button>
+            )}
             <button
               type="button"
               className="ghost-button"
@@ -228,13 +235,6 @@ export function ProviderPicker({
               </>
             )}
           </span>
-          <button
-            type="button"
-            className="ghost-button small"
-            onClick={() => void openKeyManagement("elevenlabs", status?.manageUrl)}
-          >
-            Manage
-          </button>
         </div>
       )}
 

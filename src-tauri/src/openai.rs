@@ -47,23 +47,32 @@ fn timeout_for(words: Option<u32>) -> Duration {
 pub struct OpenAiError {
     pub code: String,
     pub message: String,
-    /// Where to send the browser to fix this, when somewhere would.
+    /// Where to send the browser to fix this, exactly as the platform
+    /// addressed it.
     ///
-    /// Carried on the error rather than pieced together in the UI, because the
-    /// destination depends on what the platform said about *this* account —
-    /// its consent link where there is one, the dashboard otherwise — and that
-    /// is known here and not there.
+    /// Carried on the error rather than pieced together in the UI, because
+    /// nothing outside the response can know it: the destination follows the
+    /// reason the key was withheld, and one of the three is a page with no
+    /// provider in its address at all.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub manage_url: Option<String>,
+    pub consent_url: Option<String>,
+    /// What to put on the button that opens it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action_label: Option<&'static str>,
 }
 
 impl OpenAiError {
     fn new(code: &str, message: impl Into<String>) -> Self {
-        Self { code: code.into(), message: message.into(), manage_url: None }
+        Self { code: code.into(), message: message.into(), consent_url: None, action_label: None }
     }
 
     fn from_key_problem(p: crate::provider_keys::KeyProblem) -> Self {
-        Self { code: p.code().into(), message: p.message(), manage_url: p.manage_url() }
+        Self {
+            code: p.code().into(),
+            message: p.message(),
+            consent_url: p.consent_url(),
+            action_label: p.action_label(),
+        }
     }
 }
 
@@ -456,16 +465,21 @@ mod tests {
         let err = super::OpenAiError::from_key_problem(
             crate::provider_keys::KeyProblem::NotLinked {
                 provider: crate::provider_keys::Provider::OpenAi,
-                manage_url: "https://buildnlaunchai.com/dashboard/keys?provider=openai".into(),
+                reason: Some(crate::platform::WithheldReason::ConsentRequired),
+                consent_url: Some("https://buildnlaunchai.com/dashboard/keys/desktop".into()),
             },
         );
         assert_eq!(err.code, "KEY_NOT_LINKED");
         assert!(!err.message.is_empty(), "the error must carry a message for the UI");
+        // Carried through byte for byte. This one is the reason the app stopped
+        // composing addresses: it has no provider in it, so nothing built from
+        // a provider slug could ever have arrived here.
         assert_eq!(
-            err.manage_url.as_deref(),
-            Some("https://buildnlaunchai.com/dashboard/keys?provider=openai"),
+            err.consent_url.as_deref(),
+            Some("https://buildnlaunchai.com/dashboard/keys/desktop"),
             "the button on that error has nowhere to go",
         );
+        assert!(err.action_label.is_some(), "the button has no words on it");
     }
 
     #[test]

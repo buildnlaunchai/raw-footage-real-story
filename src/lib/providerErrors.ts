@@ -25,10 +25,14 @@ export class ScriptProviderError extends Error {
 
 const FRIENDLY: Record<string, string> = {
   // The key comes from the signed-in account, so none of these ask anybody to
-  // find or paste one. `KEY_NOT_LINKED` arrives with a `manageUrl` on the error
-  // itself — see `accountKeys.ts` — which is what the button is built from.
-  KEY_NOT_LINKED:
-    "Your account has no OpenAI key available yet. Open your dashboard to add one or allow this app to use it.",
+  // find or paste one.
+  //
+  // `KEY_NOT_LINKED` is deliberately absent from this map. It arrives carrying
+  // a message written against the platform's `reason` — "no key", "not allowed
+  // yet" and "that key was rejected" are three different sentences — plus the
+  // consent link the button is built from. A generic line here would override
+  // all three with the vaguest of them, which is exactly how somebody whose key
+  // only needs permission ends up being told they have no key.
   KEYS_SIGNED_OUT: "Sign in to use OpenAI — its key comes from your account.",
   KEYS_UNREACHABLE:
     "Couldn't reach your account to fetch the OpenAI key. Check your connection and try again.",
