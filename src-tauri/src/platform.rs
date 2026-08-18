@@ -122,6 +122,16 @@ pub struct ProviderKey {
     /// confirmed shape sends `consent_url`.
     #[serde(default, alias = "consent_url")]
     pub consent_url: Option<String>,
+    /// Where to manage a key that already works. The `present: true` half of
+    /// the pair above.
+    ///
+    /// The settled rule is that a slot carries exactly one of these two —
+    /// `manage_url` when the key is usable, `consent_url` when it is not,
+    /// never both and never neither. Which one is therefore decided by
+    /// `present`, and [`ProviderKey::link`] is the single place that decides
+    /// it.
+    #[serde(default, alias = "manage_url")]
+    pub manage_url: Option<String>,
     /// Why it is withheld. See [`WithheldReason`].
     #[serde(default)]
     pub reason: Option<String>,
@@ -136,14 +146,44 @@ impl ProviderKey {
         (!tail.is_empty()).then_some(tail)
     }
 
-    /// The link to offer, or nothing.
+    /// Whitespace is not a link.
     ///
-    /// Whitespace is not a link. A slot carrying `""` would otherwise hand the
-    /// browser nowhere, which is worse than showing no button at all — the
-    /// button is the only thing on that screen a person can act on, so it has
-    /// to be absent rather than inert.
+    /// A slot carrying `""` would otherwise hand the browser nowhere, which is
+    /// worse than showing no button at all — the button is the only thing on
+    /// that screen a person can act on, so it has to be absent rather than
+    /// inert.
+    fn usable(url: &Option<String>) -> Option<String> {
+        url.as_deref().map(str::trim).filter(|u| !u.is_empty()).map(str::to_string)
+    }
+
+    /// The one link this slot carries.
+    ///
+    /// `present` picks the field, because that is the rule the platform
+    /// settled on: a usable key is accompanied by somewhere to manage it, a
+    /// withheld one by somewhere to put it right, and never both.
+    ///
+    /// Strictly one or the other, with no crossing over. The temptation is to
+    /// fall back to whichever field happens to be populated, and in one
+    /// direction that is actively harmful: a withheld slot answered with a
+    /// `manage_url` would send somebody whose key merely needs permission to
+    /// the provider page, which cannot grant it. Better a missing button than
+    /// a button onto a page that cannot help — the same reasoning that removed
+    /// the composed URL.
+    ///
+    /// So a slot that breaks the contract degrades to no button, which is
+    /// cosmetic, rather than to the wrong page, which is not.
+    pub fn link(&self) -> Option<String> {
+        if self.present {
+            Self::usable(&self.manage_url)
+        } else {
+            Self::usable(&self.consent_url)
+        }
+    }
+
+    /// The withheld link specifically, for the error path that only ever
+    /// describes a withheld slot.
     pub fn consent_link(&self) -> Option<String> {
-        self.consent_url.as_deref().map(str::trim).filter(|u| !u.is_empty()).map(str::to_string)
+        Self::usable(&self.consent_url)
     }
 
     pub fn withheld_reason(&self) -> Option<WithheldReason> {
@@ -180,7 +220,14 @@ fn byok() -> KeyMode {
 }
 
 fn absent() -> ProviderKey {
-    ProviderKey { present: false, key: None, mode: None, consent_url: None, reason: None }
+    ProviderKey {
+        present: false,
+        key: None,
+        mode: None,
+        consent_url: None,
+        manage_url: None,
+        reason: None,
+    }
 }
 
 /// A session as the identity provider issues it.
@@ -1482,7 +1529,8 @@ mod live_tests {
     /// Prints the shape rather than asserting a particular account's contents —
     /// whether this tester happens to have an OpenAI key linked is a fact about
     /// them, not about the API. What it *does* assert is the contract: every
-    /// withheld slot carries an absolute `consent_url`.
+    /// slot carries exactly one absolute link, and it is the one its `present`
+    /// state calls for.
     ///
     /// **Never prints key material.** Presence, the last four characters, the
     /// reason and the link — the link is a public URL and the rest is what the
@@ -1522,24 +1570,43 @@ mod live_tests {
                 k.hint(),
                 k.reason,
             );
-            println!("      consent_url: {:?}", k.consent_link());
+            println!("      consent_url: {:?}", k.consent_url);
+            println!("      manage_url:  {:?}", k.manage_url);
 
-            if k.present {
-                assert!(k.key.is_some(), "{name} says present with no key to use");
-                continue;
-            }
+            // The settled rule: exactly one link per slot, never both, never
+            // neither. Checked before anything else, because every button in
+            // the app is built on it.
+            let carried: Vec<&str> = [("consent_url", k.consent_url.is_some()), ("manage_url", k.manage_url.is_some())]
+                .into_iter()
+                .filter_map(|(n, present)| present.then_some(n))
+                .collect();
+            assert_eq!(
+                carried.len(),
+                1,
+                "{name} carried {carried:?}; the rule is exactly one link per slot",
+            );
 
-            // The contract: required on every withheld slot, and absolute.
-            let link = k.consent_link().unwrap_or_else(|| {
-                panic!("{name} is withheld and sent no consent_url — the app has no button to show")
+            // And it must be the one this state calls for, since that is the
+            // only field the app will read.
+            let link = k.link().unwrap_or_else(|| {
+                panic!(
+                    "{name} (present={}) carried {carried:?}, which is not the field for its state — the app has no button to show",
+                    k.present,
+                )
             });
             assert!(
                 link.starts_with("https://"),
-                "{name} sent a relative consent_url ({link}); the app opens it as-is and cannot resolve it",
+                "{name} sent a relative link ({link}); the app opens it as-is and cannot resolve it",
             );
 
-            // And the reason, if sent, must be one the app has been taught —
-            // an unknown word is tolerated but worth seeing in the output.
+            if k.present {
+                assert!(k.key.is_some(), "{name} says present with no key to use");
+                println!("      → Manage key: {link}");
+                continue;
+            }
+
+            // The reason, if sent, must be one the app has been taught — an
+            // unknown word is tolerated but worth seeing in the output.
             match k.withheld_reason() {
                 Some(r) => println!("      understood as: {r:?}"),
                 None => println!("      reason not recognised by this build (falls back to generic wording)"),

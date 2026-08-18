@@ -14,12 +14,16 @@
  *
  * ## The link is the platform's, not ours
  *
- * Every withheld slot arrives with a `consentUrl`, and that is opened verbatim.
- * This file contains no dashboard address and composes none — it cannot, since
- * the destination follows *why* the key is withheld rather than which provider
- * it is, and `consent_required` lands on a page with no provider in its address
- * at all. A composed link would have looked right and opened a page that could
- * not grant the permission being asked for.
+ * In every state, not just the broken ones. A slot carries exactly one link —
+ * somewhere to manage a key that works, somewhere to put right one that does
+ * not — and Rust resolves the two into a single `linkUrl` before it gets here.
+ * This file contains no dashboard address and composes none.
+ *
+ * It could not compose a correct one anyway: for a withheld key the
+ * destination follows *why* it is withheld rather than which provider it is,
+ * and `consent_required` lands on a page with no provider in its address at
+ * all. A composed link would have looked right and opened a page that could not
+ * grant the permission being asked for.
  */
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -61,19 +65,20 @@ export interface ProviderStatus {
    * Where the browser goes, exactly as the platform addressed it.
    *
    * Opened as-is: never joined to a base, never appended to, never composed.
-   * The destination follows `reason` rather than the provider — one of the
-   * three is a page with no provider in its address at all — so nothing outside
-   * the response is in a position to work it out.
+   * Present in both states now — a working key carries somewhere to manage it,
+   * a withheld one somewhere to fix it — so this is the single field every
+   * button on every screen is built from.
    *
-   * Absent when the key works, and absent in the case the contract says cannot
-   * happen. The rule for rendering is just: a button if there is a URL, no
-   * button if there is not. Never a button pointing nowhere.
+   * Absent only where there is genuinely nowhere to send anybody: a key coming
+   * from an environment variable, which the account knows nothing about. The
+   * rule for rendering is just: a button if there is a URL, no button if there
+   * is not. Never a button pointing nowhere.
    */
-  consentUrl?: string;
+  linkUrl?: string;
   reason?: WithheldReason;
   /** What to tell the person. Absent when the key works. */
   message?: string;
-  /** What to put on the button that opens `consentUrl`. */
+  /** What to put on the button that opens `linkUrl`. */
   actionLabel?: string;
   /** The key came from the environment — a CI and development arrangement. */
   fromEnvironment: boolean;
@@ -150,7 +155,7 @@ export async function statusFor(
 }
 
 /**
- * Open the page where this provider's key is managed.
+ * Open the page this provider's slot points at.
  *
  * Takes the URL it is given, or asks for the current one. There is no third
  * option and no address written down in this file: if neither produces a link,
@@ -163,10 +168,10 @@ export async function openKeyManagement(
   provider: ProviderSlug,
   url?: string | null,
 ): Promise<void> {
-  const target = url ?? (await statusFor(provider))?.consentUrl ?? null;
+  const target = url ?? (await statusFor(provider))?.linkUrl ?? null;
   if (!target) {
     throw new AccountKeyError(
-      "NO_CONSENT_URL",
+      "NO_LINK_URL",
       "Your account didn't say where to manage this key. Try again in a moment.",
     );
   }

@@ -155,6 +155,47 @@ if grep -rInE 'api_key|apiKey' src-tauri/src/project.rs 2>/dev/null; then
 fi
 [ "$key_leak" -eq 0 ] && ok "  clean — no key material in projects"
 
+# --- 6. the app never invents a provider-key link ---------------------------
+#
+# Every provider slot the platform sends carries exactly one link — manage_url
+# when the key works, consent_url when it does not — and the app opens what it
+# was given. It composes nothing, and this is the check that it stays that way.
+#
+# The regression this catches is quiet and nasty. A composed link looks correct
+# and opens cleanly; it just lands somewhere that cannot help. `consent_required`
+# is the case that proves it — that page has no provider in its address at all,
+# so anything built from a provider slug sends the person somewhere plausible
+# and useless, with nothing to suggest the app was wrong.
+#
+# Test modules are exempt: they have to name the addresses they assert on. So is
+# LoginGate, whose /account and /pricing links belong to the licence gate and
+# have nothing to do with provider keys.
+say "→ checking no provider-key dashboard link is composed in the app"
+dash_hits="$(
+  grep -rn "buildnlaunchai\.com/dashboard" src src-tauri/src 2>/dev/null \
+    | grep -v "src-tauri/src/provider_keys.rs" \
+    | grep -v "src-tauri/src/openai.rs" \
+    || true
+)"
+# Those two files carry the address only inside `#[cfg(test)]`; confirm that.
+for f in src-tauri/src/provider_keys.rs src-tauri/src/openai.rs; do
+  [ -f "$f" ] || continue
+  test_start="$(grep -n '#\[cfg(test)\]' "$f" | head -1 | cut -d: -f1)"
+  if [ -n "$test_start" ]; then
+    working="$(head -n "$((test_start - 1))" "$f" | grep -n "buildnlaunchai\.com" || true)"
+  else
+    working="$(grep -n "buildnlaunchai\.com" "$f" || true)"
+  fi
+  [ -n "$working" ] && dash_hits="$dash_hits
+$f (outside tests): $working"
+done
+if [ -n "$(printf '%s' "$dash_hits" | tr -d '[:space:]')" ]; then
+  printf '%s\n' "$dash_hits"
+  bad "  a dashboard link is written into the app; it must come from the response"
+else
+  ok "  clean — every provider-key link comes from the platform"
+fi
+
 # --- duplicated resource files ---------------------------------------------
 #
 # This machine has twice produced "name 2.ext" copies of files under sync

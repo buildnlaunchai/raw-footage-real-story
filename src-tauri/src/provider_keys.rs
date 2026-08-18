@@ -24,12 +24,14 @@
 //! is how the test suite and CI exercise the cloud providers at all, on a
 //! runner with no keychain and nobody to sign in as. See [`env_override`].
 //!
-//! ## Where the "fix this" link comes from
+//! ## Where every link comes from
 //!
-//! From the platform, verbatim, or not at all. Every withheld slot carries a
-//! `consent_url` and the app opens exactly that. It does not join it to a base,
-//! append to it, or fall back to one of its own — see the note where the
-//! composed URL used to be for why a guess is worse than nothing here.
+//! From the platform, verbatim, or not at all — in *every* state, not just the
+//! broken ones. A slot carries exactly one link: `manage_url` when the key
+//! works, `consent_url` when it does not. The app opens what it was given and
+//! composes nothing, so there is no state in which a screen here has to know
+//! what the dashboard is called. See the note where the composed URL used to be
+//! for why a guess is worse than nothing.
 //!
 //! ## Nothing is written down
 //!
@@ -55,7 +57,8 @@ use serde::Serialize;
 // like one.
 //
 // So the app renders the platform's link or renders no button. It never
-// invents a destination.
+// invents a destination — and now that a working key carries a `manage_url`
+// too, there is no state left in which it would have anything to invent.
 
 /// The two providers this applies to.
 ///
@@ -359,15 +362,15 @@ pub struct ProviderStatus {
     pub mode: KeyMode,
     /// The last four characters of the key in use, when there is one.
     pub hint: Option<String>,
-    /// The platform's link, verbatim, or nothing.
+    /// The platform's link for this slot, verbatim, whichever field carried it.
     ///
-    /// `None` where the key works — a usable slot carries no consent link,
-    /// because there is nothing to consent to — and `None` in the case the
-    /// confirmed shape says cannot happen, a withheld slot with no link. The UI
-    /// renders a button only when this is `Some`, which is the whole of its
-    /// rule.
+    /// Resolved here rather than in the UI so there is exactly one place in the
+    /// app where a destination is decided, and that place only ever copies. The
+    /// UI's whole rule is "a button if this is `Some`, no button if not" — it
+    /// never needs to know that a working key's link arrives under a different
+    /// name from a withheld one's.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub consent_url: Option<String>,
+    pub link_url: Option<String>,
     /// Which of the three situations this is, when the platform said.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<WithheldReason>,
@@ -375,7 +378,7 @@ pub struct ProviderStatus {
     /// to explain.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
-    /// What to put on the button that opens `consent_url`.
+    /// What to put on the button that opens `link_url`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub action_label: Option<&'static str>,
     /// True when the key is coming from the environment rather than the
@@ -436,23 +439,31 @@ pub async fn provider_key_status(refresh: bool) -> Result<Vec<ProviderStatus>, K
             let held = p.of(&keys);
             let usable = held.present && held.key.as_deref().is_some_and(|k| !k.trim().is_empty());
             let reason = held.withheld_reason();
+            // Only ever what the platform sent, in either state. `link`
+            // decides which of the two fields carries it; nothing here builds
+            // one.
+            let link_url = held.link();
             ProviderStatus {
                 provider: p.slug(),
                 label: p.label(),
                 linked: usable,
                 mode: keys.mode_of(&held),
                 hint: held.hint(),
-                // Only ever what the platform sent, and only where there is
-                // something to fix.
-                consent_url: (!usable).then(|| held.consent_link()).flatten(),
+                action_label: link_url
+                    .is_some()
+                    .then(|| if usable { MANAGE_LABEL } else { action_label(reason) }),
+                link_url,
                 reason: (!usable).then_some(reason).flatten(),
                 message: (!usable).then(|| withheld_message(*p, reason)),
-                action_label: (!usable).then(|| action_label(reason)),
                 from_environment: false,
             }
         })
         .collect())
 }
+
+/// The button on a working key. The only piece of link copy the app owns, and
+/// it is a label rather than a destination.
+const MANAGE_LABEL: &str = "Manage key";
 
 fn from_environment(p: Provider) -> ProviderStatus {
     ProviderStatus {
@@ -461,7 +472,9 @@ fn from_environment(p: Provider) -> ProviderStatus {
         linked: true,
         mode: KeyMode::Byok,
         hint: env_override(p).map(|k| k.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect()),
-        consent_url: None,
+        // A key from the environment belongs to whoever set the variable. The
+        // account holds nothing to manage, so there is nowhere to send anybody.
+        link_url: None,
         reason: None,
         message: None,
         action_label: None,
@@ -485,8 +498,82 @@ mod tests {
             key: None,
             mode: None,
             consent_url: consent.map(str::to_string),
+            manage_url: None,
             reason: Some(reason.to_string()),
         }
+    }
+
+    fn working(manage: Option<&str>) -> ProviderKey {
+        ProviderKey {
+            present: true,
+            key: Some("sk-proj-abcd1234".into()),
+            mode: None,
+            consent_url: None,
+            manage_url: manage.map(str::to_string),
+            reason: None,
+        }
+    }
+
+    /// A slot carries exactly one link, and `present` says which.
+    ///
+    /// The settled rule, and the reason the UI only ever sees a single
+    /// `link_url`: it never has to know that the field's name changes with the
+    /// state.
+    #[test]
+    fn each_slot_offers_the_one_link_its_state_carries() {
+        let manage = "https://buildnlaunchai.com/dashboard/keys?provider=openai";
+        assert_eq!(working(Some(manage)).link().as_deref(), Some(manage));
+
+        let consent = "https://buildnlaunchai.com/dashboard/keys/desktop";
+        assert_eq!(withheld("consent_required", Some(consent)).link().as_deref(), Some(consent));
+    }
+
+    /// A withheld slot must never be answered with a `manage_url`.
+    ///
+    /// The one crossing-over that would be actively wrong rather than merely
+    /// untidy: `consent_required` means the key exists and this app lacks
+    /// permission to read it, and the provider page cannot grant that. A
+    /// missing button is cosmetic; a button onto a page that cannot help is the
+    /// failure that does not look like one.
+    #[test]
+    fn a_withheld_slot_never_borrows_the_manage_link() {
+        let mut k = withheld("consent_required", None);
+        k.manage_url = Some("https://buildnlaunchai.com/dashboard/keys?provider=openai".into());
+        assert_eq!(k.link(), None, "a withheld slot was sent to the manage page");
+    }
+
+    /// And the same in the other direction, for symmetry of reasoning: a
+    /// working slot reads its own field and not the withheld one.
+    #[test]
+    fn a_working_slot_reads_its_own_field() {
+        let mut k = working(None);
+        k.consent_url = Some("https://buildnlaunchai.com/dashboard/keys/desktop".into());
+        assert_eq!(k.link(), None);
+    }
+
+    /// A working key's link survives into what the screen renders, and brings
+    /// a button label with it.
+    #[test]
+    fn a_working_key_is_given_somewhere_to_be_managed() {
+        let manage = "https://buildnlaunchai.com/dashboard/keys?provider=openai";
+        let held = working(Some(manage));
+        let link = held.link();
+        let status = ProviderStatus {
+            provider: Provider::OpenAi.slug(),
+            label: Provider::OpenAi.label(),
+            linked: true,
+            mode: KeyMode::Byok,
+            hint: held.hint(),
+            action_label: link.is_some().then_some(MANAGE_LABEL),
+            link_url: link,
+            reason: None,
+            message: None,
+            from_environment: false,
+        };
+        assert_eq!(status.link_url.as_deref(), Some(manage));
+        assert_eq!(status.action_label, Some("Manage key"));
+        // Nothing to explain about a key that works.
+        assert!(status.message.is_none());
     }
 
     /// The exact response the platform confirmed, parsed field for field.
@@ -499,7 +586,8 @@ mod tests {
     fn the_confirmed_response_shape_parses() {
         let body = r#"{
           "mode": "byok",
-          "openai":     { "present": true,  "key": "sk-abcd1234" },
+          "openai":     { "present": true,  "key": "sk-abcd1234",
+                          "manage_url": "https://buildnlaunchai.com/dashboard/keys?provider=openai" },
           "elevenlabs": { "present": false, "reason": "no_key",
                           "consent_url": "https://buildnlaunchai.com/dashboard/keys?provider=elevenlabs" }
         }"#;
@@ -507,15 +595,29 @@ mod tests {
 
         assert!(keys.openai.present);
         assert_eq!(keys.openai.hint().as_deref(), Some("1234"));
-        // A working slot carries no link, and needs none.
-        assert_eq!(keys.openai.consent_link(), None);
+        // A working slot carries the manage link, and no consent link.
+        assert_eq!(
+            keys.openai.link().as_deref(),
+            Some("https://buildnlaunchai.com/dashboard/keys?provider=openai"),
+        );
+        assert_eq!(keys.openai.consent_link(), None, "a working slot must not carry a consent link");
 
         assert!(!keys.elevenlabs.present);
         assert_eq!(keys.elevenlabs.withheld_reason(), Some(WithheldReason::NoKey));
         assert_eq!(
-            keys.elevenlabs.consent_link().as_deref(),
+            keys.elevenlabs.link().as_deref(),
             Some("https://buildnlaunchai.com/dashboard/keys?provider=elevenlabs"),
         );
+
+        // Never both, never neither: each slot answered with exactly one.
+        for (name, k) in [("openai", &keys.openai), ("elevenlabs", &keys.elevenlabs)] {
+            let carried = [k.consent_url.is_some(), k.manage_url.is_some()];
+            assert_eq!(
+                carried.iter().filter(|c| **c).count(),
+                1,
+                "{name} carried {carried:?} links; the rule is exactly one",
+            );
+        }
 
         // Mode is carried once, at the top, and applies to both slots.
         assert_eq!(keys.mode, KeyMode::Byok);
@@ -703,20 +805,14 @@ mod tests {
     /// The status a screen renders must never be able to carry the key.
     #[test]
     fn a_status_carries_a_hint_and_never_the_key() {
-        let held = ProviderKey {
-            present: true,
-            key: Some("sk-proj-abcd1234".into()),
-            mode: None,
-            consent_url: None,
-            reason: None,
-        };
+        let held = working(None);
         let status = ProviderStatus {
             provider: Provider::OpenAi.slug(),
             label: Provider::OpenAi.label(),
             linked: true,
             mode: KeyMode::Byok,
             hint: held.hint(),
-            consent_url: None,
+            link_url: None,
             reason: None,
             message: None,
             action_label: None,

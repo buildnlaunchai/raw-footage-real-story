@@ -200,11 +200,11 @@ export function ProviderPicker({
             it takes effect straight away.
           </p>
           <div className="actions">
-            {status.consentUrl && (
+            {status.linkUrl && (
               <button
                 type="button"
                 className="primary-button"
-                onClick={() => void openKeyManagement("elevenlabs", status.consentUrl)}
+                onClick={() => void openKeyManagement("elevenlabs", status.linkUrl)}
               >
                 {status.actionLabel ?? "Open my dashboard"}
               </button>
@@ -235,6 +235,17 @@ export function ProviderPicker({
               </>
             )}
           </span>
+          {/* See the twin of this in `ScriptProviderSetup`: the platform's
+              link, or no button at all. */}
+          {status?.linkUrl && (
+            <button
+              type="button"
+              className="ghost-button small"
+              onClick={() => void openKeyManagement("elevenlabs", status.linkUrl)}
+            >
+              {status.actionLabel ?? "Manage key"}
+            </button>
+          )}
         </div>
       )}
 

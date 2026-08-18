@@ -165,11 +165,11 @@ export function ScriptProviderSetup({
             it takes effect straight away.
           </p>
           <div className="actions">
-            {status.consentUrl && (
+            {status.linkUrl && (
               <button
                 type="button"
                 className="primary-button"
-                onClick={() => void openKeyManagement("openai", status.consentUrl)}
+                onClick={() => void openKeyManagement("openai", status.linkUrl)}
               >
                 {status.actionLabel ?? "Open my dashboard"}
               </button>
@@ -194,6 +194,19 @@ export function ScriptProviderSetup({
                 ? "Using OPENAI_API_KEY from this machine’s environment"
                 : `Using the OpenAI key on your account${status?.hint ? ` (…${status.hint})` : ""}`}
             </span>
+            {/* A working key now carries somewhere to manage it. Same rule as
+                every other button here: render the platform's link, or render
+                nothing. An environment key has no account behind it, so there
+                is legitimately nowhere to go and no button appears. */}
+            {status?.linkUrl && (
+              <button
+                type="button"
+                className="ghost-button small"
+                onClick={() => void openKeyManagement("openai", status.linkUrl)}
+              >
+                {status.actionLabel ?? "Manage key"}
+              </button>
+            )}
           </div>
 
           <span className="field-label">Model</span>
