@@ -31,8 +31,14 @@ interface Props {
   onRefresh: () => void;
   refreshing: boolean;
   storage: StorageUsage | null;
-  /** Whose machine this is. There are no accounts; this is the OS user. */
+  /** Whose machine this is — the OS user, not an account. */
   userName: string;
+  /**
+   * The signed-in account, when there is a gate to be signed in behind. Null
+   * with the gate off, where there are no accounts at all and everything is
+   * local to this Mac.
+   */
+  account: string | null;
   onOpenSettings: () => void;
   /** How many things need attention, for the always-visible chip. */
   attention: number;
@@ -62,6 +68,7 @@ export function LibrarySidebar({
   refreshing,
   storage,
   userName,
+  account,
   onOpenSettings,
   attention,
   usable,
@@ -144,7 +151,7 @@ export function LibrarySidebar({
       </div>
 
       <ul className="lib-nav">
-        {projects.length === 0 && (
+        {projects.length === 0 && !collapsed && (
           <li>
             <p className="hint" style={{ margin: "0 0 0 0.8rem" }}>
               None yet.
@@ -163,7 +170,12 @@ export function LibrarySidebar({
               <span style={{ color: `hsl(${tagHue(p.id)} 70% 62%)`, display: "flex" }}>
                 <DocIcon size={17} />
               </span>
-              {p.name}
+              {/* In a `lib-label` like every other row's text, and not a bare
+                  string, because that is the hook the collapsed rail hides
+                  things by. A name with no element of its own cannot be
+                  hidden, so it stayed and wrapped over three lines inside a
+                  3.9rem strip. */}
+              <span className="lib-label">{p.name}</span>
               <span className="lib-count">{p.clipCount}</span>
             </button>
           </li>
@@ -179,11 +191,13 @@ export function LibrarySidebar({
         onClick={onOpenReadiness}
       >
         <span className="ready-chip-dot" />
-        {!usable
-          ? "ffmpeg missing"
-          : attention > 0
-            ? `${attention} need${attention === 1 ? "s" : ""} attention`
-            : "Everything ready"}
+        <span>
+          {!usable
+            ? "ffmpeg missing"
+            : attention > 0
+              ? `${attention} need${attention === 1 ? "s" : ""} attention`
+              : "Everything ready"}
+        </span>
       </button>
 
       <div
@@ -239,14 +253,23 @@ export function LibrarySidebar({
         )}
       </div>
 
-      <button type="button" className="lib-user" onClick={onOpenSettings}>
+      <button
+        type="button"
+        className="lib-user"
+        onClick={onOpenSettings}
+        // The sub-line truncates, and which account you are in is the one
+        // thing somebody opens this to check.
+        title={account ?? undefined}
+      >
         <span className="avatar">
           {userName.slice(0, 2).toUpperCase() || "··"}
         </span>
         <span style={{ minWidth: 0 }}>
           <span className="lib-user-name">{userName || "This machine"}</span>
-          {/* No accounts and no roles: everything here is local to this Mac. */}
-          <span className="lib-user-sub">Local · settings</span>
+          {/* The name is whose Mac this is; the line under it is which account
+              is signed in, where there is one. With the gate off there are no
+              accounts and everything here is local to this machine. */}
+          <span className="lib-user-sub">{account ?? "Local · settings"}</span>
         </span>
       </button>
     </aside>

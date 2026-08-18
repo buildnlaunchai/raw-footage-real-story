@@ -1,5 +1,7 @@
 /**
- * The screen in front of the app when somebody is not, or not yet, allowed in.
+ * The screen in front of the app when somebody is not, or not yet, allowed in,
+ * and the smaller pieces of the same subject that live *inside* it — the two
+ * banners, and the way back out.
  *
  * Every state here is a dead end for the user unless it offers a way out, so
  * each one carries at least one action they can actually take. "Access denied"
@@ -214,6 +216,46 @@ export function ReadOnlyBanner({
       <button type="button" className="ghost-button small" onClick={onRecheck}>
         Check now
       </button>
+    </div>
+  );
+}
+
+/**
+ * Signing out, from inside the app.
+ *
+ * Every gate screen offers a way to sign in as somebody else, because each of
+ * them is a dead end and a dead end needs a door. Past the gate there was no
+ * door at all: the session survives restarts by design, so the only way to
+ * hand this app to a different account was to go and delete a keychain entry.
+ *
+ * It is in Settings rather than under the avatar in the rail. Signing out is
+ * not a thing anybody should do by accident on the way to somewhere else.
+ */
+export function AccountPanel({
+  email,
+  onSignOut,
+  busy,
+}: {
+  email: string | null;
+  onSignOut: () => void;
+  busy: boolean;
+}) {
+  return (
+    <div className="panel">
+      <div className="panel-head">
+        <h2>Your account</h2>
+        <span className="hint">{email ?? "Not signed in"}</span>
+      </div>
+      <p className="hint" style={{ marginTop: 0 }}>
+        Signing out forgets this sign-in on this Mac and returns to the sign-in screen, where you
+        can use a different account. Your collections, footage and rendered videos stay exactly
+        where they are — they live on this machine and are not tied to an account.
+      </p>
+      <div className="actions" style={{ marginTop: "0.9rem" }}>
+        <button type="button" className="ghost-button" onClick={onSignOut} disabled={busy}>
+          Sign out
+        </button>
+      </div>
     </div>
   );
 }

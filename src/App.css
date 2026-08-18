@@ -2043,15 +2043,28 @@ kbd {
   align-items: stretch;
 }
 
+/* Everything with words in it. `.lib-proj-list` used to be in this list and
+   matched nothing — the collections list is a `.lib-nav` like the one above
+   it — which is why collection names went on rendering into a 3.9rem strip
+   and wrapping over three lines. They are `.lib-label`s now, like every other
+   row's text, so this reaches them. */
 .lib-side[data-collapsed] .lib-label,
 .lib-side[data-collapsed] .lib-count,
 .lib-side[data-collapsed] .lib-sep,
 .lib-side[data-collapsed] .lib-side-head,
-.lib-side[data-collapsed] .lib-proj-list,
 .lib-side[data-collapsed] .lib-storage,
 .lib-side[data-collapsed] .ready-chip span:not(.ready-chip-dot),
 .lib-side[data-collapsed] .lib-user > span:not(.avatar) {
   display: none;
+}
+
+/* Nothing in the rail may set its own floor width once the words are gone, or
+   the strip is wider than the icons in it and the layout beside it shifts. */
+.lib-side[data-collapsed] .lib-nav-item,
+.lib-side[data-collapsed] .ready-chip,
+.lib-side[data-collapsed] .lib-user {
+  min-width: 0;
+  overflow: hidden;
 }
 
 .lib-side[data-collapsed] .lib-nav-item,
@@ -2295,6 +2308,12 @@ kbd {
 .lib-user-sub {
   font-size: 0.76rem;
   color: var(--ink-dim);
+  /* Truncated like the name above it. This held "Local · settings" and now
+     holds an email address, which is longer than the rail is wide. */
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ── main column ───────────────────────────────────────────────────────── */

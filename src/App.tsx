@@ -149,7 +149,7 @@ import {
   type Gate,
   type LicenceState,
 } from "./lib/entitlement";
-import { GraceBanner, LoginGate, ReadOnlyBanner } from "./components/LoginGate";
+import { AccountPanel, GraceBanner, LoginGate, ReadOnlyBanner } from "./components/LoginGate";
 import "./App.css";
 
 /**
@@ -197,6 +197,20 @@ function toClipSpec(c: ProjectClip) {
   };
 }
 
+/**
+ * Where a launch starts, and where a session that has ended starts again.
+ *
+ * Named rather than written out twice. The bug this prevents is the two
+ * drifting: a launch opening one screen and signing back in opening another
+ * is the sort of difference nobody notices until somebody asks why.
+ *
+ * Deliberately not `"home"`, despite the sidebar row of that name — that view
+ * is an empty placeholder pending a decision about what belongs on it, and
+ * landing a fresh sign-in on a blank page is worse than landing it where the
+ * footage is.
+ */
+const DEFAULT_VIEW: LibraryView = "all";
+
 function App() {
   // --- shell ---------------------------------------------------------------
   const [stage, setStage] = useState<StageId>("footage");
@@ -205,7 +219,7 @@ function App() {
   /** Sidebar destination, and which tab of the main column is showing. */
   // Home is intentionally empty for now, so the app opens on the library
   // rather than on a blank page.
-  const [view, setView] = useState<LibraryView>("all");
+  const [view, setView] = useState<LibraryView>(DEFAULT_VIEW);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     try {
       return localStorage.getItem("sidebarCollapsed") === "1";
@@ -844,6 +858,11 @@ function App() {
     setGateCached(null);
     setGateLive({ kind: "not-attempted" });
     setGateError(null);
+    // A session that has ended takes its navigation with it. Without this,
+    // signing out from Settings and signing back in lands on Settings — the
+    // last screen of somebody else's session, which is a strange first thing
+    // to be shown by an app you have just signed in to.
+    setView(DEFAULT_VIEW);
   }
 
   /**
@@ -867,6 +886,9 @@ function App() {
         setGateSession(null);
         setGateCached(null);
         setGateLive({ kind: "not-attempted" });
+        // Not chosen, but a session ending all the same — and the next one in
+        // should start where a launch would.
+        setView(DEFAULT_VIEW);
         return;
       }
       const { live, cached } = fromLicence(state);
@@ -882,7 +904,10 @@ function App() {
       // A session the platform has retired is cleared in the backend; ask who
       // is signed in now rather than assuming it survived.
       const who = await invoke<{ email: string } | null>("auth_current").catch(() => null);
-      if (!who) setGateSession(null);
+      if (!who) {
+        setGateSession(null);
+        setView(DEFAULT_VIEW);
+      }
     }
   }
 
@@ -2717,6 +2742,7 @@ function App() {
         refreshing={refreshing}
         storage={storage}
         userName={userName}
+        account={gateSession?.email ?? null}
         onOpenSettings={() => setView("settings")}
         attention={needsAttention}
         usable={canImport}
@@ -2774,8 +2800,20 @@ function App() {
           <>
             <header className="lib-head">
               <h1>Settings</h1>
-              <span className="lib-head-count">how the script is written</span>
+              <span className="lib-head-count">
+                {AUTH_GATE_ENABLED ? "your account, and how the script is written" : "how the script is written"}
+              </span>
             </header>
+            {/* Only where there is an account to sign out of. With the gate
+                off this would be a button offering to end a session that
+                never began. */}
+            {AUTH_GATE_ENABLED && (
+              <AccountPanel
+                email={gateSession?.email ?? null}
+                onSignOut={() => void onGateSignOut()}
+                busy={gateWaiting}
+              />
+            )}
             <SettingsPanel language={language} />
           </>
         ) : view === "home" ? (
