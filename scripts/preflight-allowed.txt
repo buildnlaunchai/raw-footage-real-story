@@ -15,9 +15,21 @@
 # Licence-token fixtures — src-tauri/src/licence.rs. RS256 tokens signed by a
 # 2048-bit key generated for these tests and thrown away; only its public half
 # is in the repository, at src-tauri/keys/testing-only.pub.pem. They assert
-# nothing about any real account and unlock nothing.
+# nothing about any real account and unlock nothing. Every one is about the
+# fictional `u-1` or `u-other`, and the shipped key refuses all of them — which
+# is itself a test.
+#
+# The scan hashes the header and payload only, so the five below are the
+# fixtures added with the `reason` claim; the four above them kept their
+# hashes through the key being regenerated, because their payloads did not
+# change and only their signatures did.
 babd16463139dcc056429a4b99b6e13fc35a3d3ba3e0cccb5a8085d260cfa5db
 f8436b6677d12d38381ca0650d1f3a845efb1ac0c993f480556015970aa8a9b2
 3c40d232169622e929fba21745d48278d918865c7c65bdfecc4f0e7c78e9b7dd
 c7919677b01be680babeada10f8b816daedb1afcfc27fccb6a6b10d7b2de4ab1
 1062b1cd138ff7879ba96140a670f95d9cc99ff13cecb06e2d86d00ff1f45c17
+fa185e02148a65c23b9b0b05b1f7bb1ea2f478708e735d2675442a9608e87e47
+a808282e52d2d82286bb237c052bddd3d5633c04e3644a43392caffeea2b87a5
+2145663b0a516ea96950db37c5e505afc2cb656e85691dbee87706e016e43506
+fac5d7a3d284e214f8dd40ec1ecb4cffbafa8f62d606d5be363815ebd8ff2cc4
+1bf048c6b73ed726ca3b5e8f6a6fe2f4f28f45b364a0c6bb4b80aba8b05f4a47

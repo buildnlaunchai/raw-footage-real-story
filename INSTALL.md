@@ -79,6 +79,44 @@ up for you; this is only a fallback for older Windows 10 machines.
 
 ---
 
+## Signing in
+
+This build asks you to sign in before it opens. You need a **BuildnLaunchAI
+account with an active subscription** — the app opens your browser to sign in,
+and never sees your password.
+
+**You have to be online the first time.** After that the app keeps working
+offline for up to a month, so a trip with no usable wifi is not a problem; it
+starts reminding you to connect about a week before that runs out. Even past
+it, your existing projects still open and still export — only starting new work
+waits for a connection.
+
+### If it asks you to sign in again after an update
+
+That is expected on this beta, and it is the same root cause as the warnings
+above: the app is unsigned, so macOS does not reliably recognise a new version
+as the same application that saved your sign-in. Signing in again is all it
+needs, and it will stop happening once the app is properly signed. Worth
+reporting only if it happens on *every* launch rather than after an update.
+
+### If it will not let you in, read which message it is
+
+The sign-in screen says something different for each reason, because the way
+out is different for each:
+
+| What it says | What it means |
+|---|---|
+| No subscription on this account yet | You have never subscribed. The **See plans** button is the whole fix. |
+| Your membership ended on *(date)* | It lapsed on that date. **Renew membership** picks it back up. |
+| Your account has been suspended | Not something paying again will fix — and paying again on a suspended account takes the money and changes nothing. Email **support@buildnlaunchai.com**. |
+| We couldn't give this account access | A fault at our end, not a billing problem. There is nothing for you to pay. Email **support@buildnlaunchai.com** and we will fix it. |
+
+The last two are the ones worth writing in about. The app shows the right one
+of these offline as well as online, so a message you get on a plane is the same
+message you would have got at your desk.
+
+---
+
 ## First run: what the app needs
 
 The app does most of its work on your own machine, so it needs two outside

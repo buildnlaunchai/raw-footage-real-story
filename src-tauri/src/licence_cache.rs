@@ -77,6 +77,15 @@ pub struct Recalled {
     pub active: bool,
     /// ISO-8601, from the token's signed `iat` where there is one.
     pub checked_at: String,
+    /// Why the platform said no, in its own word, out of the signed claims.
+    ///
+    /// This is what stops a suspended account being told the wrong thing on a
+    /// plane. The reason is in the token, so it is as unforgeable as the
+    /// entitlement beside it, and reading it here means an offline launch
+    /// reaches the same screen a live check would.
+    pub reason: Option<String>,
+    /// When the membership ended, if the platform signed the date in too.
+    pub expires_at: Option<String>,
 }
 
 /// Decide what a stored answer is worth to the account signed in right now.
@@ -97,12 +106,17 @@ pub fn recall(stored: &Cached, user_id: &str, pem: &str) -> Option<Recalled> {
     if !v.matches(user_id) {
         return None;
     }
+    // `entitled` already folds in the reason — see `LicenceClaims::entitled`
+    // — so a token that says "suspended" while claiming `active: true` comes
+    // back as a refusal here without this function having to know why.
     Some(Recalled {
         active: v.entitled(),
         checked_at: v
             .issued_at()
             .map(crate::platform::iso_from_epoch)
             .unwrap_or_else(|| stored.checked_at.clone()),
+        reason: v.claims().reason.clone(),
+        expires_at: v.claims().expires_at.clone(),
     })
 }
 
@@ -133,11 +147,19 @@ mod tests {
     const TEST_PUBLIC: &str = include_str!("../keys/testing-only.pub.pem");
 
     /// `sub: u-1`, `status: active`, `iat` 2026-01-01, expiring in 2100.
-    const VALID: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1LTEiLCJpYXQiOjE3NjcyMjU2MDAsImV4cCI6NDEwMjQ0NDgwMCwiaXNzIjoiYnVpbGRubGF1bmNoYWkiLCJzdGF0dXMiOiJhY3RpdmUiLCJwbGFuIjoicHJvIn0.uNPihDjHOtLHnus2kAtWpQtxuiBYU3mP-2CSXV3TeMLfjlf8coudnHWFkOmK0a1f-EJL7eWldGCm7ZgJc-r9KkabKjJ7KsghkOCaae1ncI5SL2mQ-v4NePK-ziEgEvuofC04BzOn7ACZkycbx9vAoApwJ7tFyMa8tAa2e85DWEF_oPgxGhHw2toxDmQ_NlIjVbsLbSnMuG2jaUizQRrrjwEmFRHj5VGN8Rhe0gTaQN9Kpeg8I1xnbG_qe_R3BkvKTZrfcpxA3h1FvmGt1Hepq16qR3U3Vnlsh5YZySbSel1hr8gn2LHSgAkBHyfxZAteZwOlgLVmImvyE7vEYq9U2Q";
+    const VALID: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1LTEiLCJpYXQiOjE3NjcyMjU2MDAsImV4cCI6NDEwMjQ0NDgwMCwiaXNzIjoiYnVpbGRubGF1bmNoYWkiLCJzdGF0dXMiOiJhY3RpdmUiLCJwbGFuIjoicHJvIn0.Km_EqfNNNw7_G93eTo-EmmrI5oVAl0Jhoj-4IR5AlWzmXt-Rozj7Q0O1cF2DMd21gT6FdEdYoOdRv7PvK49s2NwRNiE5uoRdP5TiQCJkVFo4HQ8f45Onr1GLbT6vfk9cEdOaAdkYbz2Ar0eoz7kJCObJ3CksRG-2jpkudBL_4i9rMMQrCpnyAzsR6Gbku8FRI0q4oW8_rdq1w9UnKbgwCH5jKWzZ9dpSzwRLWqxBayEtFHoOcUlWUNMnaya7Mm6Jlv1S92Z_d_487DDzZVB0WWRWEXXF3L0N4DRz1Jwznd3z4MPrE0nvew6Y2p0EcRfJnPfKXueyE_OEuxLdT9Fbig";
     /// Genuinely signed, `active: true`, and expired since 2020.
-    const EXPIRED: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1LTEiLCJpYXQiOjE1Nzc3NTA0MDAsImV4cCI6MTU3NzgzNjgwMCwiYWN0aXZlIjp0cnVlfQ.fDiNHnyR1GdmfKB1O4Hxnms-7SQqU9KwM2QVJDtQl8Wf8Hlr4VX9kbvwHDlx4DgrPmjQJpRWc_4eYeaw7WlnD29W0OfXymdGGi48GAU_z-8dYdNgzfTDU8LcaQyubXjDbwqKwWYxt9ElcF6wjqLH-N_aJPxSu1ATmGC5kfQLdtyF2zQqfiuV0MZpvNXb0WjzIKdQdXr2gG4rlBqwGERVPeXLSgnWxDooFRf6FsNUfGfZNPfqW_xGzeGYAGJb64KXtPnry8CbfqkTzdvG8Y9zzsTJMPNQzNshfWqLtZaHy81qpLUWA1e6ekHQY65CA9Y6hDk0Rhgo3kxX2FM2ExOpUg";
+    const EXPIRED: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1LTEiLCJpYXQiOjE1Nzc3NTA0MDAsImV4cCI6MTU3NzgzNjgwMCwiYWN0aXZlIjp0cnVlfQ.rEhjTvVtvoyxc-JdvHOmUzBwFWil77IAsvNgx9Z3haZ2Vg2hZHKtMlhOsTsAtbYfmcy7YDokYsUYlihScpV4NEgUVzxIf_qa75KS3fFOpQcu90upPPUSvry6mpqaOTB1I15BFqES6khD4QQhcSvvCOdAwa143tXgVnq57ytKxudLlJ1RjvMXokBt2W3_tRjmYsmFhxBuc_Ur0vu3Z6mbznhHo94YHbIBeJRpk9uj-9wcVTOEmngey4XAJgV4mQL8susNCvKaFXDr_fobm0acs9bAz-6k6jZl0oXaMVjErL7SXy5kkPYXVrFjK_ts4d8pOfbTDN6nVT5l8i0-aJCJ-g";
     /// A real licence, for `u-other`.
-    const OTHER: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1LW90aGVyIiwiaWF0IjoxNzY3MjI1NjAwLCJleHAiOjQxMDI0NDQ4MDAsImFjdGl2ZSI6dHJ1ZX0.hGI8K5NNHDAvDEoLtYZrviKK3tsDvMAyAmUKv7X5sWKPDkIBVQb2S_aNF7idh3Kh62bGxouEo2X4kSVIoGDOSSnEA9GtBkVXl4bU-QIMClnGhua7c39-Q3f4sHz4gi3v37cjYldId9i1HE4tqlfyOknPS-EQbWUXFrZj05rTaFVPDcaHb8fT-4Rk2QvFEFAVVviP4zPKB4Kv4NjAxPDAeHoznWg4hiLavBIHZJi5pIGWIUQ_npXgxvsMLUOwsjOMRZdTSbqNmcfsPWV6KFUb1VmuzPD8HQqa0On9HKLFGwFD00nqSHPIA1YzSwq5mGm4U28XGAODSRhVQgkIOOX__g";
+    const OTHER: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1LW90aGVyIiwiaWF0IjoxNzY3MjI1NjAwLCJleHAiOjQxMDI0NDQ4MDAsImFjdGl2ZSI6dHJ1ZX0.tuts1gorXg9WJx6DEnQ30hGEBa-gvl47sWOxqEpFi_FaST4XRhtNSlXDnGe1-2sF2T402Yz9vlfzrUsDZxyVwP4GBcj-FzqaY2nXuMiN-zzmKg6INavYVzSBu6PjFK3xwENZnGCbVziZvwQNSyv7IsKk0f0ibAZst7J5rbDawBvKCGnPSezFRd8vsYFpkgkJHfHkrqxdG7NHdEjnYQrNkjFhmjUeKYfByO8KjT7I1kQf_zYwEtyayDL3KoM-BFAUc9X-iesTwO2NDcL5Wpuxknb6yfK1oVPE_iXPUiPsjsnEvZEU3mzQu2GXRb5_9rAwgxsKTJfJeowZmI8RIXxFsw";
+
+    /// `reason: suspended`, with `active: true` still beside it in the same
+    /// signed payload. The reason has to win, offline as well as online.
+    const SUSPENDED: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1LTEiLCJpYXQiOjE3NjcyMjU2MDAsImV4cCI6NDEwMjQ0NDgwMCwiYWN0aXZlIjp0cnVlLCJzdGF0dXMiOiJhY3RpdmUiLCJyZWFzb24iOiJzdXNwZW5kZWQifQ.rhgf604dz7TrvxQOwNLyuL0DkSsTywhNWgwplW-RgSPlCIrksgNwfUFHrCEOLcm2DpmVX8_LuKHiy3IMNgqpynhpPWQ-wl902oerlEZ_kIctzF4KssSd2P8MU7SD9_srYanDMX7PY9NUyrJV1ZlCgcLjBNNzTjMkxpeWKqJ-dZJtYZW3VJYRHr0UQluPokLJqLR57Ni2PSj5UglPeWCtBCqG0-5cQdH3HpFA82rL1wH6vwhYPmij9YB22mFoeqpLx96e7pjPEQmFxAGRsIgjqfRukK19Xbzi9czx18D3lQMvOwq57DRxcp-01T7aYBPPXkRcp3FlsgNzVYmdSRN_kg";
+    /// `reason: membership_inactive`, carrying the date it lapsed.
+    const ENDED: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1LTEiLCJpYXQiOjE3NjcyMjU2MDAsImV4cCI6NDEwMjQ0NDgwMCwiYWN0aXZlIjpmYWxzZSwic3RhdHVzIjoiY2FuY2VsZWQiLCJyZWFzb24iOiJtZW1iZXJzaGlwX2luYWN0aXZlIiwiZXhwaXJlc19hdCI6IjIwMjYtMDctMDFUMDA6MDA6MDBaIn0.svbI-2UohdIyBOnGL7e882rBV6Q8y7auPIMpJ3t4Y5H_hXRU9WfOIrm5dSArxYQ6KBU2APQE6q1RwIUEym2XnNHrwwkQpOJQUdFvsI8AdVnoNG93OYf8Uh3FfxZujddp66z0sy0TKzm-NEUb_64egin42EhLnejbmqeenAWirKulbZvvANO3WDAki4REofeZ8QhofsJF_rCqlvlme8BJMdg_ibrv3xJyCzjpS-OfeU2bCBvJTZ9AK1I6oed8JrzXgyKjo41gsnfqplqBMxwHero0DgWd-IsvLzqp7k9puwX6cRZMr34waHMa2XdfrhedmuA7Ne4Ol0DVCZ11pYSu7Q";
+    /// A word this build has never been taught, on an entitled account.
+    const ODD_REASON: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1LTEiLCJpYXQiOjE3NjcyMjU2MDAsImV4cCI6NDEwMjQ0NDgwMCwiYWN0aXZlIjp0cnVlLCJyZWFzb24iOiJncmFjZV9wZXJpb2QifQ.bVRnPwClzgzhPFy6D5I-DDJT7F5UHlVAECMeBc9sbQnwJgszkM7_tlE9mCq_SIgM3-vnpwmEoN-hQWhh35vmjca4XE-o9hEQWOi7spAnx4XuGemW52ovL8dultmmILyx0jO22MISyt8iiS9wecvNvENGm3XAxA_PGl6utXeAa_GEa_M1TEKs4ISbTi9BzKzv15QT80JzGTNSSdYrZQVmQTfbzLEIQ9o1A7KYtaSjyJKP5rHz-O8-BslUTp-vgcoLDAdcY5Ln-d09Rz8yVyg0SwxQYyyMopoWhixRGP4RXbo9InuANQxMwXZmPkI7QMtRQf23nBcuz5z9Lv6a6iDoFw";
 
     fn cached(token: &str) -> Cached {
         Cached { licence_token: token.into(), checked_at: "2026-08-18T09:00:00Z".into() }
@@ -189,6 +211,53 @@ mod tests {
         // A build with no key cannot read a cache, and says nothing rather
         // than guessing.
         assert_eq!(recall(&cached(VALID), "u-1", "not a pem"), None);
+    }
+
+    // ── the gap this used to have ──────────────────────────────────────────
+    //
+    // The cache is the signed token and nothing else, so for as long as the
+    // claims could not say *why* an account was refused, a suspension could
+    // not survive a restart: the app went offline knowing only "not entitled"
+    // and fell back to the generic billing screen — the one message that is
+    // actively wrong for somebody who was barred, because it points them at a
+    // page that will take their money and change nothing. The platform signs
+    // `reason` into the claims now, and these pin that it is read.
+
+    #[test]
+    fn a_suspension_survives_going_offline() {
+        let r = recall(&cached(SUSPENDED), "u-1", TEST_PUBLIC).expect("recalls");
+        assert!(!r.active, "a suspended token granted access offline");
+        assert_eq!(
+            r.reason.as_deref(),
+            Some("suspended"),
+            "offline, a suspension degraded to the generic no-subscription screen"
+        );
+    }
+
+    #[test]
+    fn a_lapsed_membership_comes_back_with_the_date_it_lapsed() {
+        let r = recall(&cached(ENDED), "u-1", TEST_PUBLIC).expect("recalls");
+        assert!(!r.active);
+        assert_eq!(r.reason.as_deref(), Some("membership_inactive"));
+        assert_eq!(r.expires_at.as_deref(), Some("2026-07-01T00:00:00Z"));
+    }
+
+    /// The direction that costs money to get wrong. A cached token carrying a
+    /// word this build has never seen must still let a paying customer in.
+    #[test]
+    fn an_unrecognised_reason_does_not_refuse_a_cached_licence() {
+        let r = recall(&cached(ODD_REASON), "u-1", TEST_PUBLIC).expect("recalls");
+        assert!(r.active, "an unknown reason locked a paying account out offline");
+        assert_eq!(r.reason.as_deref(), Some("grace_period"), "the word is still carried");
+    }
+
+    /// An ordinary yes says nothing about why, and must not invent one.
+    #[test]
+    fn an_entitled_cache_carries_no_reason_at_all() {
+        let r = recall(&cached(VALID), "u-1", TEST_PUBLIC).expect("recalls");
+        assert!(r.active);
+        assert_eq!(r.reason, None);
+        assert_eq!(r.expires_at, None);
     }
 
     #[test]

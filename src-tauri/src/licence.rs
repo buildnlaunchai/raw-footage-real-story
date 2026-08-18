@@ -50,6 +50,62 @@ use serde::{Deserialize, Serialize};
 /// file drop and no code change — see [`verification_available`].
 pub const EMBEDDED_PUBLIC_KEY: &str = include_str!("../keys/hub-jwt-public.pem");
 
+/// Why the platform is saying no.
+///
+/// These four words and no others. The backend confirmed the field and the
+/// vocabulary against production, which is what lets this be an exact,
+/// case-sensitive match instead of the substring search it replaces — that
+/// looked in two fields for the letters "suspend" because nobody yet knew
+/// which field or which spelling would arrive.
+///
+/// The mirror is `Denial` in `src/lib/entitlement.ts`, and the wire format
+/// between them is the platform's own word, unchanged.
+///
+/// ## What an unrecognised word means, and why it is not a refusal
+///
+/// [`parse`](Denial::parse) answers `None` for anything not on this list, and
+/// `None` means "no opinion" rather than "denied". A build that treated every
+/// word it had never seen as a denial would lock out every paying customer the
+/// day the platform added a `reason: "grace_period"` beside an entitled
+/// account. Each of the four below *is* a denial, so a known word blocks; an
+/// unknown one leaves the entitlement to be decided by `active` and `status`,
+/// exactly as it was before any reason existed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Denial {
+    /// Barred. Not fixed by paying, and must never be offered a billing page.
+    Suspended,
+    /// Never subscribed. The one denial an ordinary checkout does fix.
+    NoMembership,
+    /// Subscribed once and it has lapsed. `expires_at` says when.
+    MembershipInactive,
+    /// Entitled as far as billing is concerned, and refused anyway. Ours to
+    /// fix, which is why the screen for it says support and not subscribe.
+    NoAccess,
+}
+
+impl Denial {
+    /// Exact and case-sensitive, because the platform's spelling is now known.
+    pub fn parse(reason: &str) -> Option<Self> {
+        Some(match reason {
+            "suspended" => Self::Suspended,
+            "no_membership" => Self::NoMembership,
+            "membership_inactive" => Self::MembershipInactive,
+            "no_access" => Self::NoAccess,
+            _ => return None,
+        })
+    }
+
+    /// The platform's own word. What crosses into the frontend.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Suspended => "suspended",
+            Self::NoMembership => "no_membership",
+            Self::MembershipInactive => "membership_inactive",
+            Self::NoAccess => "no_access",
+        }
+    }
+}
+
 /// What the licence token asserts.
 ///
 /// Only `sub` and `exp` are required, and they are required because they are
@@ -76,6 +132,24 @@ pub struct LicenceClaims {
     pub status: Option<String>,
     #[serde(default)]
     pub plan: Option<String>,
+    /// Why the platform is saying no — see [`Denial`] for the vocabulary.
+    ///
+    /// **This claim is the whole offline story.** The plain JSON fields beside
+    /// the token are gone the moment the process exits; this is signed, so it
+    /// survives on disk and can still be read on a plane. Without it a
+    /// suspended account reopening the app offline could only be told the
+    /// generic "no subscription", which is the one message that is actively
+    /// wrong for them — it points at a billing page that cannot help.
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// When the membership ended, for [`Denial::MembershipInactive`]. ISO-8601.
+    ///
+    /// Optional in a stronger sense than the rest: the platform mirrors it in
+    /// the JSON response for certain, and whether it also signs it into the
+    /// claims is its own business. So the screen that shows it has to read
+    /// well without a date — see `membershipEnded` in `entitlement.ts`.
+    #[serde(default, alias = "expiresAt")]
+    pub expires_at: Option<String>,
     /// Anything the platform sends that this build has not been taught about.
     /// Kept rather than dropped so `--licence-probe` can show a real response
     /// in full without a rebuild.
@@ -92,12 +166,27 @@ pub struct LicenceClaims {
 const ACTIVE_WORDS: [&str; 2] = ["active", "trialing"];
 
 impl LicenceClaims {
+    /// The reason this token carries, if it is one this build knows.
+    pub fn denial(&self) -> Option<Denial> {
+        self.reason.as_deref().and_then(Denial::parse)
+    }
+
     /// Whether this token says yes.
     ///
-    /// An explicit boolean wins over the word, and a token carrying neither is
-    /// read as **not** entitled: a licence that does not say what it grants
-    /// grants nothing.
+    /// A recognised denial reason beats everything else; then an explicit
+    /// boolean wins over the word; and a token carrying none of the three is
+    /// read as **not** entitled, because a licence that does not say what it
+    /// grants grants nothing.
+    ///
+    /// The reason is folded in *here*, rather than being applied by each
+    /// caller, so that it is not possible to read this token's entitlement
+    /// without it. A backend that suspends an account while leaving
+    /// `active: true` beside it is an ordinary bug, and the restrictive
+    /// reading is the one that is right about the account.
     pub fn entitled(&self) -> bool {
+        if self.denial().is_some() {
+            return false;
+        }
         if let Some(a) = self.active {
             return a;
         }
@@ -302,19 +391,33 @@ mod tests {
     /// The private half was generated for these fixtures, used once, and
     /// thrown away — it is deliberately **not** in the repository, so there is
     /// no key-shaped file here for a scanner to flag or for anyone to wonder
-    /// about. Regenerating these is a `openssl genpkey` and a shell loop; it
-    /// has not been needed, because the expiries below are absolute.
+    /// about. Regenerating these is a `openssl genpkey` and a shell loop,
+    /// which is what was done when the `reason` claim arrived and the fixtures
+    /// below had to say things the old key could no longer be asked to sign.
+    /// The payloads of the four that predate it are byte-identical to what
+    /// they were; only the signatures changed.
     const TEST_PUBLIC: &str = include_str!("../keys/testing-only.pub.pem");
 
     /// `sub: u-1`, `status: active`, `plan: pro`, expiring in 2100 — far
     /// enough out that this test does not acquire a deadline.
-    const VALID: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1LTEiLCJpYXQiOjE3NjcyMjU2MDAsImV4cCI6NDEwMjQ0NDgwMCwiaXNzIjoiYnVpbGRubGF1bmNoYWkiLCJzdGF0dXMiOiJhY3RpdmUiLCJwbGFuIjoicHJvIn0.uNPihDjHOtLHnus2kAtWpQtxuiBYU3mP-2CSXV3TeMLfjlf8coudnHWFkOmK0a1f-EJL7eWldGCm7ZgJc-r9KkabKjJ7KsghkOCaae1ncI5SL2mQ-v4NePK-ziEgEvuofC04BzOn7ACZkycbx9vAoApwJ7tFyMa8tAa2e85DWEF_oPgxGhHw2toxDmQ_NlIjVbsLbSnMuG2jaUizQRrrjwEmFRHj5VGN8Rhe0gTaQN9Kpeg8I1xnbG_qe_R3BkvKTZrfcpxA3h1FvmGt1Hepq16qR3U3Vnlsh5YZySbSel1hr8gn2LHSgAkBHyfxZAteZwOlgLVmImvyE7vEYq9U2Q";
+    const VALID: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1LTEiLCJpYXQiOjE3NjcyMjU2MDAsImV4cCI6NDEwMjQ0NDgwMCwiaXNzIjoiYnVpbGRubGF1bmNoYWkiLCJzdGF0dXMiOiJhY3RpdmUiLCJwbGFuIjoicHJvIn0.Km_EqfNNNw7_G93eTo-EmmrI5oVAl0Jhoj-4IR5AlWzmXt-Rozj7Q0O1cF2DMd21gT6FdEdYoOdRv7PvK49s2NwRNiE5uoRdP5TiQCJkVFo4HQ8f45Onr1GLbT6vfk9cEdOaAdkYbz2Ar0eoz7kJCObJ3CksRG-2jpkudBL_4i9rMMQrCpnyAzsR6Gbku8FRI0q4oW8_rdq1w9UnKbgwCH5jKWzZ9dpSzwRLWqxBayEtFHoOcUlWUNMnaya7Mm6Jlv1S92Z_d_487DDzZVB0WWRWEXXF3L0N4DRz1Jwznd3z4MPrE0nvew6Y2p0EcRfJnPfKXueyE_OEuxLdT9Fbig";
     /// Genuinely signed, `active: true`, and expired since 2020.
-    const EXPIRED: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1LTEiLCJpYXQiOjE1Nzc3NTA0MDAsImV4cCI6MTU3NzgzNjgwMCwiYWN0aXZlIjp0cnVlfQ.fDiNHnyR1GdmfKB1O4Hxnms-7SQqU9KwM2QVJDtQl8Wf8Hlr4VX9kbvwHDlx4DgrPmjQJpRWc_4eYeaw7WlnD29W0OfXymdGGi48GAU_z-8dYdNgzfTDU8LcaQyubXjDbwqKwWYxt9ElcF6wjqLH-N_aJPxSu1ATmGC5kfQLdtyF2zQqfiuV0MZpvNXb0WjzIKdQdXr2gG4rlBqwGERVPeXLSgnWxDooFRf6FsNUfGfZNPfqW_xGzeGYAGJb64KXtPnry8CbfqkTzdvG8Y9zzsTJMPNQzNshfWqLtZaHy81qpLUWA1e6ekHQY65CA9Y6hDk0Rhgo3kxX2FM2ExOpUg";
+    const EXPIRED: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1LTEiLCJpYXQiOjE1Nzc3NTA0MDAsImV4cCI6MTU3NzgzNjgwMCwiYWN0aXZlIjp0cnVlfQ.rEhjTvVtvoyxc-JdvHOmUzBwFWil77IAsvNgx9Z3haZ2Vg2hZHKtMlhOsTsAtbYfmcy7YDokYsUYlihScpV4NEgUVzxIf_qa75KS3fFOpQcu90upPPUSvry6mpqaOTB1I15BFqES6khD4QQhcSvvCOdAwa143tXgVnq57ytKxudLlJ1RjvMXokBt2W3_tRjmYsmFhxBuc_Ur0vu3Z6mbznhHo94YHbIBeJRpk9uj-9wcVTOEmngey4XAJgV4mQL8susNCvKaFXDr_fobm0acs9bAz-6k6jZl0oXaMVjErL7SXy5kkPYXVrFjK_ts4d8pOfbTDN6nVT5l8i0-aJCJ-g";
     /// A real licence, for `u-other`.
-    const OTHER: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1LW90aGVyIiwiaWF0IjoxNzY3MjI1NjAwLCJleHAiOjQxMDI0NDQ4MDAsImFjdGl2ZSI6dHJ1ZX0.hGI8K5NNHDAvDEoLtYZrviKK3tsDvMAyAmUKv7X5sWKPDkIBVQb2S_aNF7idh3Kh62bGxouEo2X4kSVIoGDOSSnEA9GtBkVXl4bU-QIMClnGhua7c39-Q3f4sHz4gi3v37cjYldId9i1HE4tqlfyOknPS-EQbWUXFrZj05rTaFVPDcaHb8fT-4Rk2QvFEFAVVviP4zPKB4Kv4NjAxPDAeHoznWg4hiLavBIHZJi5pIGWIUQ_npXgxvsMLUOwsjOMRZdTSbqNmcfsPWV6KFUb1VmuzPD8HQqa0On9HKLFGwFD00nqSHPIA1YzSwq5mGm4U28XGAODSRhVQgkIOOX__g";
+    const OTHER: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1LW90aGVyIiwiaWF0IjoxNzY3MjI1NjAwLCJleHAiOjQxMDI0NDQ4MDAsImFjdGl2ZSI6dHJ1ZX0.tuts1gorXg9WJx6DEnQ30hGEBa-gvl47sWOxqEpFi_FaST4XRhtNSlXDnGe1-2sF2T402Yz9vlfzrUsDZxyVwP4GBcj-FzqaY2nXuMiN-zzmKg6INavYVzSBu6PjFK3xwENZnGCbVziZvwQNSyv7IsKk0f0ibAZst7J5rbDawBvKCGnPSezFRd8vsYFpkgkJHfHkrqxdG7NHdEjnYQrNkjFhmjUeKYfByO8KjT7I1kQf_zYwEtyayDL3KoM-BFAUc9X-iesTwO2NDcL5Wpuxknb6yfK1oVPE_iXPUiPsjsnEvZEU3mzQu2GXRb5_9rAwgxsKTJfJeowZmI8RIXxFsw";
     /// Carries `seats` and `org`, which this build has never been taught.
-    const EXTRA: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1LTEiLCJpYXQiOjE3NjcyMjU2MDAsImV4cCI6NDEwMjQ0NDgwMCwiYWN0aXZlIjp0cnVlLCJzZWF0cyI6Mywib3JnIjoiYWNtZSJ9.G9wIC6rK8gM0ZftPkIkE8INboFYR5QzjR6sFLRgJmIGfrTxYkBqRLtz1hbrOZ1ZjxMkSWEb8savwUIVjxM1RZHpHKt_XEixSbeBpDEar8BKZ5ma8wjw2-NO56Nc5WpWXRYZfqdxChRCTnbadgGCL1Le9aDj4Zmf0C2oMIQLOXLDisl-NleJH8sEXoRvo0Ocrl9JtGt5wI_ikFPKdEO09v92Xje5uVL-Rfm6hHtsfsZF2GeiaUv_upI31Lo5Nl9Xj9W-k8qZzNjyIpP8Y8fx3MVzgnpwSGaczC-Fy_dn0tNsgGrt5n2UR7aGQE-UlKvJ1xYQzfcU0_Jx7DczxWh-PnA";
+    const EXTRA: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1LTEiLCJpYXQiOjE3NjcyMjU2MDAsImV4cCI6NDEwMjQ0NDgwMCwiYWN0aXZlIjp0cnVlLCJzZWF0cyI6Mywib3JnIjoiYWNtZSJ9.fARGHR9yEvJn9o1ux1AjwdFG7M8ddWBTuBO3Hgtq2LR9_Cb4TRMpA7d9kYuOz7-1dk_Z70zDbHib86wl3Yx0W2zrilFobVhBBL3HDMlPaGQMbsJqYPSVVxV6hQSKiLHbyyEKsCEbd9B9qOuIadCk8mc_LCXNOA4ZOg-RM9DHMFhU1MIc0inOLI8HegbBHy0OgyoOguIOLbjfqTGI_-003CtRdQFRjcYe3iIfkeaUjJmLt6RvFYzSqzwbOWlZsjJ3C7-kITiooNvbbM7TK4e5Cming3pgVq2fXKeENutjbjMPKoSy5y0dDw10xU29wzlHtMt5Is05qPQ1qkvKyxTnvQ";
+    /// `reason: suspended`, and **`active: true` beside it**. The reason has
+    /// to win, or the contradiction becomes a month of offline access.
+    const SUSPENDED: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1LTEiLCJpYXQiOjE3NjcyMjU2MDAsImV4cCI6NDEwMjQ0NDgwMCwiYWN0aXZlIjp0cnVlLCJzdGF0dXMiOiJhY3RpdmUiLCJyZWFzb24iOiJzdXNwZW5kZWQifQ.rhgf604dz7TrvxQOwNLyuL0DkSsTywhNWgwplW-RgSPlCIrksgNwfUFHrCEOLcm2DpmVX8_LuKHiy3IMNgqpynhpPWQ-wl902oerlEZ_kIctzF4KssSd2P8MU7SD9_srYanDMX7PY9NUyrJV1ZlCgcLjBNNzTjMkxpeWKqJ-dZJtYZW3VJYRHr0UQluPokLJqLR57Ni2PSj5UglPeWCtBCqG0-5cQdH3HpFA82rL1wH6vwhYPmij9YB22mFoeqpLx96e7pjPEQmFxAGRsIgjqfRukK19Xbzi9czx18D3lQMvOwq57DRxcp-01T7aYBPPXkRcp3FlsgNzVYmdSRN_kg";
+    /// `reason: membership_inactive`, with the date it lapsed.
+    const ENDED: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1LTEiLCJpYXQiOjE3NjcyMjU2MDAsImV4cCI6NDEwMjQ0NDgwMCwiYWN0aXZlIjpmYWxzZSwic3RhdHVzIjoiY2FuY2VsZWQiLCJyZWFzb24iOiJtZW1iZXJzaGlwX2luYWN0aXZlIiwiZXhwaXJlc19hdCI6IjIwMjYtMDctMDFUMDA6MDA6MDBaIn0.svbI-2UohdIyBOnGL7e882rBV6Q8y7auPIMpJ3t4Y5H_hXRU9WfOIrm5dSArxYQ6KBU2APQE6q1RwIUEym2XnNHrwwkQpOJQUdFvsI8AdVnoNG93OYf8Uh3FfxZujddp66z0sy0TKzm-NEUb_64egin42EhLnejbmqeenAWirKulbZvvANO3WDAki4REofeZ8QhofsJF_rCqlvlme8BJMdg_ibrv3xJyCzjpS-OfeU2bCBvJTZ9AK1I6oed8JrzXgyKjo41gsnfqplqBMxwHero0DgWd-IsvLzqp7k9puwX6cRZMr34waHMa2XdfrhedmuA7Ne4Ol0DVCZ11pYSu7Q";
+    /// `reason: no_membership`. Never subscribed.
+    const UNPAID: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1LTEiLCJpYXQiOjE3NjcyMjU2MDAsImV4cCI6NDEwMjQ0NDgwMCwiYWN0aXZlIjpmYWxzZSwicmVhc29uIjoibm9fbWVtYmVyc2hpcCJ9.CLM5fjvi6-c0Avl_KRbq3Yj6-2FLVuZisxveAL0Fo1-MG56Q0GIcNCh8_5kBsGW4fkT2FewBFaksqF03L4WmkVUDgRkCn4bOdRSZOwdCy80uvqYcTOM1igqb12iCi24X0Wxw7vUvNYUqOCVcNGZ2a1xcA7cNZsLONfeRW27gx2w_7XWesPHCJoLUKg-uONHRUcL-h8B-thnbKKwHCNtc-v_CaEDbCvvvcXm0EjnvKkCkRwl7S7E51PawMfHFSjFwxNe3omwdjVjdRIup1-nCGYHmXhWDSOF2j2fH-Nx-LoinYPmedU_VEhuigs91D8DwZ3Ndf3_gBPoLBa64RCXohg";
+    /// `reason: no_access`. Ours to fix, not theirs to pay for.
+    const NO_ACCESS: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1LTEiLCJpYXQiOjE3NjcyMjU2MDAsImV4cCI6NDEwMjQ0NDgwMCwiYWN0aXZlIjpmYWxzZSwicmVhc29uIjoibm9fYWNjZXNzIn0.opAFAwbTo5oU8smJjdxu9olTPZIHpzRkor_byahGBO9djFExbWLi2SR5zNnCpQB6Wvq5-0rlp9-qfx4D745P8AC7AVV3Q6dSu85qiQXLal3WQrtbWqGjkgdiimHSfF9GSDgG4s0CZUtrh2sE7J2KcDqpsvwA63FqlJln7Zv23WslZnCIQjPXJ_ZvCBfR62AIYqUDeW5wuHHEKgon7BGXRkHU99efFDPibYJ-DhQp2FDyN8wxPg6gel_8Ue_yi493k1wXox9yDU4uIPgJwz7IVBv21gw1cego9tyrx8RD5RAZJcSbimUqJwEhxYRRMNtdfOjqksDksymR7K2gXOcHbQ";
+    /// A reason this build has never been taught, on an entitled account.
+    const ODD_REASON: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1LTEiLCJpYXQiOjE3NjcyMjU2MDAsImV4cCI6NDEwMjQ0NDgwMCwiYWN0aXZlIjp0cnVlLCJyZWFzb24iOiJncmFjZV9wZXJpb2QifQ.bVRnPwClzgzhPFy6D5I-DDJT7F5UHlVAECMeBc9sbQnwJgszkM7_tlE9mCq_SIgM3-vnpwmEoN-hQWhh35vmjca4XE-o9hEQWOi7spAnx4XuGemW52ovL8dultmmILyx0jO22MISyt8iiS9wecvNvENGm3XAxA_PGl6utXeAa_GEa_M1TEKs4ISbTi9BzKzv15QT80JzGTNSSdYrZQVmQTfbzLEIQ9o1A7KYtaSjyJKP5rHz-O8-BslUTp-vgcoLDAdcY5Ln-d09Rz8yVyg0SwxQYyyMopoWhixRGP4RXbo9InuANQxMwXZmPkI7QMtRQf23nBcuz5z9Lv6a6iDoFw";
 
     #[test]
     fn a_token_the_platform_signed_is_accepted_and_read() {
@@ -427,6 +530,97 @@ mod tests {
         // `entitled` is accepted as a spelling of `active`, because the exact
         // field name is the platform's to choose and this costs nothing.
         assert!(c(serde_json::json!({"sub":"u","exp":1,"entitled":true})).entitled());
+    }
+
+    // ── the reason claim ───────────────────────────────────────────────────
+    //
+    // Confirmed against production: `reason` is the field, and the four words
+    // below are the vocabulary, carried in the signed claims as well as in the
+    // JSON beside them. The signed half is the one that matters here, because
+    // it is the half that survives being written to disk and read on a plane.
+
+    #[test]
+    fn the_four_reasons_are_matched_exactly_and_nothing_else_is() {
+        for (word, expected) in [
+            ("suspended", Denial::Suspended),
+            ("no_membership", Denial::NoMembership),
+            ("membership_inactive", Denial::MembershipInactive),
+            ("no_access", Denial::NoAccess),
+        ] {
+            assert_eq!(Denial::parse(word), Some(expected));
+            // And the word survives the round trip, because it is what the
+            // frontend is handed and matches on in turn.
+            assert_eq!(expected.as_str(), word);
+        }
+
+        // Everything the old substring search used to catch. Now that the
+        // spelling is known, matching loosely would only invent denials the
+        // platform never sent.
+        for word in [
+            "Suspended",
+            "SUSPENDED",
+            "account_suspended",
+            "suspend",
+            "no_subscription",
+            "canceled",
+            "past_due",
+            "active",
+            "",
+        ] {
+            assert_eq!(Denial::parse(word), None, "{word:?} was read as a denial");
+        }
+    }
+
+    /// The rule that closes the offline gap: a suspension in the signed claims
+    /// refuses the licence even though the same token says `active: true`.
+    #[test]
+    fn a_reason_in_the_claims_beats_the_entitlement_beside_it() {
+        let v = verify_with(SUSPENDED, TEST_PUBLIC).expect("verifies");
+        assert_eq!(v.claims().active, Some(true), "the fixture must contain the contradiction");
+        assert_eq!(v.claims().status.as_deref(), Some("active"));
+        assert_eq!(v.claims().denial(), Some(Denial::Suspended));
+        assert!(!v.entitled(), "a suspended token granted a month of offline access");
+
+        for (token, reason) in [
+            (UNPAID, Denial::NoMembership),
+            (ENDED, Denial::MembershipInactive),
+            (NO_ACCESS, Denial::NoAccess),
+        ] {
+            let v = verify_with(token, TEST_PUBLIC).expect("verifies");
+            assert_eq!(v.claims().denial(), Some(reason));
+            assert!(!v.entitled());
+        }
+    }
+
+    /// The other direction, and the more expensive one to get wrong: a word
+    /// this build has never seen must not refuse anybody. The day the platform
+    /// puts a `reason` beside an entitled account — a trial note, a dunning
+    /// warning — every paying customer would otherwise be locked out by an
+    /// app that had opinions about vocabulary it was never taught.
+    #[test]
+    fn an_unrecognised_reason_does_not_refuse_an_entitled_account() {
+        let v = verify_with(ODD_REASON, TEST_PUBLIC).expect("verifies");
+        assert_eq!(v.claims().reason.as_deref(), Some("grace_period"));
+        assert_eq!(v.claims().denial(), None, "a word off the list was treated as a denial");
+        assert!(v.entitled(), "an unknown reason locked out a paying account");
+    }
+
+    /// The date the membership lapsed rides along when the platform signs it,
+    /// and its absence is not a failure — the screen reads without it.
+    #[test]
+    fn the_end_date_is_carried_when_it_is_there_and_missed_quietly_when_it_is_not() {
+        let ended = verify_with(ENDED, TEST_PUBLIC).expect("verifies");
+        assert_eq!(ended.claims().expires_at.as_deref(), Some("2026-07-01T00:00:00Z"));
+        // Same denial, no date. Legal, and `entitlement.ts` has copy for it.
+        let unpaid = verify_with(UNPAID, TEST_PUBLIC).expect("verifies");
+        assert_eq!(unpaid.claims().expires_at, None);
+        // camelCase is accepted too, since which spelling a JWT claim takes is
+        // the platform's to choose and being wrong here loses only the date.
+        let c: LicenceClaims = serde_json::from_value(
+            serde_json::json!({"sub":"u","exp":1,"reason":"membership_inactive","expiresAt":"2026-07-01T00:00:00Z"}),
+        )
+        .expect("parses");
+        assert_eq!(c.expires_at.as_deref(), Some("2026-07-01T00:00:00Z"));
     }
 
     /// Claims this build has never heard of survive, so a real response can be

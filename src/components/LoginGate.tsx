@@ -10,7 +10,9 @@
  * The decision itself lives in `lib/entitlement.ts` and is tested there; this
  * only renders it.
  */
-import type { Gate } from "../lib/entitlement";
+import type { ReactElement } from "react";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { endedOn, type Gate } from "../lib/entitlement";
 
 interface Props {
   gate: Gate;
@@ -28,7 +30,36 @@ interface Props {
   error: string | null;
 }
 
+/**
+ * Where somebody goes to look at a subscription that already exists, or to
+ * work out what state an unexplained one is in. The vaguer destination, for
+ * the vaguer screen.
+ */
 const ACCOUNT_URL = "https://buildnlaunchai.com/account";
+
+/**
+ * Where somebody goes to *start* paying — a first subscription or a renewal
+ * after one lapsed. Both are a checkout, which the account page is not.
+ *
+ * Split from [`ACCOUNT_URL`] because the platform now says which of the two
+ * situations a person is in, and sending somebody who has never subscribed to
+ * a page about managing their subscription is a small, avoidable
+ * bewilderment. One constant each; retarget either without touching the copy.
+ */
+const PRICING_URL = "https://buildnlaunchai.com/pricing";
+
+/**
+ * Where the two screens with nothing to sell go, and it is a person rather
+ * than a page.
+ *
+ * A `mailto:` and not a support site, because these are the dead ends with no
+ * self-service way out: neither a suspension nor a fault at our end is
+ * something the user can clear by clicking. The address is also printed in
+ * full below the button — the button hands the URL to the OS, and on a machine
+ * with no mail client configured that does nothing at all, which would leave
+ * the screens that most need to offer a way out offering none.
+ */
+const SUPPORT_EMAIL = "support@buildnlaunchai.com";
 
 export function LoginGate({
   gate,
@@ -53,7 +84,13 @@ export function LoginGate({
     </div>
   );
 
-  function body() {
+  /**
+   * The return type is annotated rather than inferred, and that is the point:
+   * a `Gate` state with no case here would otherwise fall out of the switch as
+   * `undefined` and render an empty panel — a gate that blocks the app and
+   * says nothing. Annotated, it is a compile error instead.
+   */
+  function body(): ReactElement {
     switch (gate.state) {
       // Restoring a saved session. Deliberately quiet — a decisive-looking
       // message here would flash "signed out" at somebody who is signed in.
@@ -63,9 +100,13 @@ export function LoginGate({
       case "signed-out":
         return waiting ? waitingForBrowser() : signIn();
 
-      // Signed in, and the platform says there is nothing to sign in to.
-      // Named rather than anonymous, because the commonest cause is being
-      // signed into the wrong account.
+      // Signed in, blocked, and no reason given — or one this build has not
+      // been taught. The only screen here that does not know what it is
+      // looking at, so it says the one thing that is certainly true and sends
+      // them to the page where any of it can be sorted out.
+      //
+      // Named rather than anonymous, because the commonest cause of a person
+      // seeing any of these screens is being signed into the wrong account.
       case "no-licence":
         return (
           <>
@@ -82,6 +123,121 @@ export function LoginGate({
                 Check again
               </button>
             </div>
+            <button type="button" className="gate-quiet" onClick={onSignOut}>
+              Sign in as someone else
+            </button>
+          </>
+        );
+
+      // Never subscribed. The one denial an ordinary checkout does fix, so
+      // this is the only screen that gets to be a straightforward invitation
+      // to buy something.
+      case "no-membership":
+        return (
+          <>
+            <p className="gate-lede">
+              You're signed in as <strong>{gate.email}</strong>, and there's no subscription on
+              this account yet.
+            </p>
+            <div className="gate-actions">
+              <a className="primary-button" href={PRICING_URL} target="_blank" rel="noreferrer">
+                See plans
+              </a>
+              {/* The button somebody needs thirty seconds after paying. */}
+              <button type="button" className="ghost-button" onClick={onRecheck}>
+                Check again
+              </button>
+            </div>
+            <button type="button" className="gate-quiet" onClick={onSignOut}>
+              Sign in as someone else
+            </button>
+          </>
+        );
+
+      // Subscribed once, and it lapsed. Different from never having had one:
+      // this person has already decided we were worth paying for, and the
+      // date is worth printing because "when did that happen?" is the first
+      // thing anybody asks — usually because they think it should not have.
+      case "membership-ended": {
+        const ended = endedOn(gate.expiresAt);
+        return (
+          <>
+            <p className="gate-lede">
+              {ended ? `Your membership ended on ${ended}.` : "Your membership has ended."}
+            </p>
+            <p className="gate-note">
+              You're signed in as <strong>{gate.email}</strong>.
+            </p>
+            <div className="gate-actions">
+              <a className="primary-button" href={PRICING_URL} target="_blank" rel="noreferrer">
+                Renew membership
+              </a>
+              <button type="button" className="ghost-button" onClick={onRecheck}>
+                Check again
+              </button>
+            </div>
+            <button type="button" className="gate-quiet" onClick={onSignOut}>
+              Sign in as someone else
+            </button>
+          </>
+        );
+      }
+
+      // Our bug, on somebody else's screen.
+      //
+      // `no_access` means the platform found nothing wrong with the billing
+      // and refused anyway, so every word about money is not just useless
+      // here but misleading — it would send somebody to pay for something
+      // they have already paid for. It says so plainly instead: this is ours,
+      // and here is how to make us fix it. "Check again" is offered because
+      // when we do fix it, it will be fixed server-side and they should not
+      // have to restart the app to find out.
+      case "no-access":
+        return (
+          <>
+            <p className="gate-lede">
+              We couldn't give this account access, and it isn't a billing problem — there's
+              nothing to pay and nothing to renew. That makes it a fault at our end.
+            </p>
+            <p className="gate-note">
+              You're signed in as <strong>{gate.email}</strong>.
+            </p>
+            <div className="gate-actions">
+              <button type="button" className="primary-button" onClick={contactSupport}>
+                Contact support
+              </button>
+              <button type="button" className="ghost-button" onClick={onRecheck}>
+                Check again
+              </button>
+            </div>
+            <p className="gate-note">{SUPPORT_EMAIL}</p>
+            <button type="button" className="gate-quiet" onClick={onSignOut}>
+              Sign in as someone else
+            </button>
+          </>
+        );
+
+      // Barred, not unsubscribed. Deliberately without "Manage subscription"
+      // or "Check again": both frame this as a billing problem, and both send
+      // somebody off to do something that cannot possibly fix it. Paying
+      // again on a suspended account takes the money and changes nothing.
+      case "suspended":
+        return (
+          <>
+            <p className="gate-lede">
+              Your account has been suspended. Contact BuildnLaunchAI support to resolve this.
+            </p>
+            <p className="gate-note">
+              You're signed in as <strong>{gate.email}</strong>.
+            </p>
+            <div className="gate-actions">
+              <button type="button" className="primary-button" onClick={contactSupport}>
+                Contact support
+              </button>
+            </div>
+            <p className="gate-note">{SUPPORT_EMAIL}</p>
+            {/* Still offered, because the commonest innocent cause of this
+                screen is being signed into the wrong account. */}
             <button type="button" className="gate-quiet" onClick={onSignOut}>
               Sign in as someone else
             </button>
@@ -124,6 +280,13 @@ export function LoginGate({
       case "read-only":
         return <p className="gate-lede">Signed in.</p>;
     }
+  }
+
+  function contactSupport() {
+    void openUrl(`mailto:${SUPPORT_EMAIL}`).catch(() => {
+      // Nothing to report and nothing to retry: the address is on screen
+      // below, which is why it is on screen below.
+    });
   }
 
   function signIn() {

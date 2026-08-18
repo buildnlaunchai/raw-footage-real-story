@@ -226,6 +226,24 @@ pub struct LicenceResponse {
     pub status: Option<String>,
     #[serde(default)]
     pub plan: Option<String>,
+    /// Why, when the platform says why. See [`crate::licence::Denial`].
+    ///
+    /// The field name and its four values are confirmed against production,
+    /// so the aliases this used to carry — `suspension_reason`,
+    /// `suspensionReason` — are gone with the guesswork that put them there.
+    ///
+    /// Words off that list are still carried to the frontend untouched and
+    /// still decide nothing, which is the same treatment `status` gets and for
+    /// the same reason: a desktop binary that has opinions about words it has
+    /// never seen is a desktop binary that locks people out when the backend
+    /// adds one.
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// When the membership ended. The platform sends it with
+    /// [`Denial::MembershipInactive`](crate::licence::Denial), which is the
+    /// one screen that has a date to show.
+    #[serde(default, alias = "expires_at")]
+    pub expires_at: Option<String>,
     /// The signed assertion. British and American spellings both accepted,
     /// because getting this wrong would silently disable verification rather
     /// than fail loudly, and one word is not worth that risk.
@@ -239,7 +257,25 @@ pub struct LicenceResponse {
 }
 
 impl LicenceResponse {
-    /// What the plain fields say, by the same rule the signed claims use.
+    /// Why the platform is saying no, if it is and if this build knows the
+    /// word. See [`crate::licence::Denial`] for the vocabulary and for why an
+    /// unrecognised word is not a refusal.
+    ///
+    /// All four block. The difference is entirely in what the person is told,
+    /// and that difference is the whole reason this is not a bool: an unpaid
+    /// account is fixed by a checkout, a lapsed one by a renewal, a suspended
+    /// one by talking to a person, and `no_access` by us fixing our own bug.
+    /// Sending any of the last three to a billing page takes their money and
+    /// changes nothing.
+    ///
+    /// Mirrors `denialFor` in `src/lib/entitlement.ts`.
+    pub fn denial(&self) -> Option<crate::licence::Denial> {
+        self.reason.as_deref().and_then(crate::licence::Denial::parse)
+    }
+
+    /// What the plain fields say, by the same rule the signed claims use —
+    /// reason included, so the two halves of one response cannot disagree
+    /// about what a denial means.
     pub fn entitled(&self) -> bool {
         crate::licence::LicenceClaims {
             sub: String::new(),
@@ -249,6 +285,8 @@ impl LicenceResponse {
             active: self.active,
             status: self.status.clone(),
             plan: None,
+            reason: self.reason.clone(),
+            expires_at: None,
             extra: Default::default(),
         }
         .entitled()
@@ -542,6 +580,137 @@ mod tests {
         assert!(!r.entitled());
     }
 
+    // ── what a launch does to the file on disk ─────────────────────────────
+
+    /// A suspension is *kept* now, and that is the change.
+    ///
+    /// The cache is the signed token, so for as long as the claims could not
+    /// say why an account was refused, keeping a suspended account's token
+    /// would have meant keeping one that read "active" — a month of exactly
+    /// the access being withdrawn. It was deleted instead, and the price was
+    /// that the next offline launch said "connect once" to somebody who
+    /// deserved to be told they were suspended. The reason is signed now, the
+    /// token agrees with the answer, and it stays.
+    #[test]
+    fn a_signed_refusal_is_written_down_so_it_can_be_read_offline() {
+        // Suspended: the token says no, the answer is no, they agree.
+        assert_eq!(cache_action(Some(false), false), CacheAction::Store);
+        // And an ordinary yes, which is the case that was never in doubt.
+        assert_eq!(cache_action(Some(true), true), CacheAction::Store);
+    }
+
+    /// The check that survived from the old behaviour, and the reason it did.
+    #[test]
+    fn a_token_that_contradicts_its_own_answer_is_never_written_down() {
+        // The response says suspended; the token beside it still says active.
+        // Writing that down would cache a month of access to an account that
+        // has just been barred.
+        assert_eq!(cache_action(Some(true), false), CacheAction::Forget);
+        // The mirror image, which should be impossible and is handled anyway:
+        // a token that says no beside an answer that says yes is not evidence
+        // of the yes, so there is nothing here worth keeping.
+        assert_eq!(cache_action(Some(false), true), CacheAction::Leave);
+    }
+
+    /// Nothing signed to write: a build with no key, a backend that sent no
+    /// token, or a token about somebody else entirely.
+    #[test]
+    fn an_unverifiable_no_clears_the_cache_and_an_unverifiable_yes_leaves_it() {
+        // A refusal this build could not verify still reached the platform,
+        // so deleting a stale yes cannot lock out anybody who is not already
+        // locked out.
+        assert_eq!(cache_action(None, false), CacheAction::Forget);
+        // But an unverifiable *yes* must not destroy the one record standing
+        // between a paying customer and `offline-first-run`. This is the arm
+        // that keeps a backend dropping a field from locking out everybody
+        // who has been offline since.
+        assert_eq!(cache_action(None, true), CacheAction::Leave);
+    }
+
+    /// The four reasons the platform sends, read out of the field it sends
+    /// them in. Mirrors `denialFor` in `src/lib/entitlement.ts` — the two
+    /// decide the same screen from the same word, and a difference between
+    /// them is a suspended account being shown a billing page.
+    #[test]
+    fn each_reason_is_read_as_itself() {
+        use crate::licence::Denial;
+        for (body, expected) in [
+            (r#"{"active":false,"reason":"suspended"}"#, Denial::Suspended),
+            (r#"{"active":false,"reason":"no_membership"}"#, Denial::NoMembership),
+            (
+                r#"{"active":false,"reason":"membership_inactive","expires_at":"2026-07-01T00:00:00Z"}"#,
+                Denial::MembershipInactive,
+            ),
+            (r#"{"active":false,"reason":"no_access"}"#, Denial::NoAccess),
+        ] {
+            let r: LicenceResponse = serde_json::from_str(body).expect("parses");
+            assert_eq!(r.denial(), Some(expected), "the reason went unread in {body}");
+            assert!(!r.entitled(), "a denial left the account entitled: {body}");
+        }
+
+        // The date rides along for the one screen that has a date to show,
+        // under either spelling — the platform sends `expires_at`, and this
+        // struct is otherwise camelCase, so both are accepted.
+        let r: LicenceResponse =
+            serde_json::from_str(r#"{"reason":"membership_inactive","expires_at":"2026-07-01T00:00:00Z"}"#)
+                .expect("parses");
+        assert_eq!(r.expires_at.as_deref(), Some("2026-07-01T00:00:00Z"));
+        let r: LicenceResponse =
+            serde_json::from_str(r#"{"reason":"membership_inactive","expiresAt":"2026-07-01T00:00:00Z"}"#)
+                .expect("parses");
+        assert_eq!(r.expires_at.as_deref(), Some("2026-07-01T00:00:00Z"));
+    }
+
+    /// A denial outranks an entitlement sitting beside it in the same body.
+    ///
+    /// The two should never disagree. If a backend ever bars an account
+    /// without clearing its subscription flag, the restrictive reading is the
+    /// one that is right about the account.
+    #[test]
+    fn a_denial_beats_an_active_flag_in_the_same_response() {
+        for body in [
+            r#"{"active":true,"status":"active","reason":"suspended"}"#,
+            r#"{"active":true,"reason":"no_access"}"#,
+        ] {
+            let r: LicenceResponse = serde_json::from_str(body).expect("parses");
+            assert!(!r.entitled(), "a denial was overruled by the flag beside it: {body}");
+        }
+    }
+
+    /// And nothing else is a denial.
+    ///
+    /// The loose, case-insensitive search over two fields that used to live
+    /// here was a hedge against not knowing the field or the spelling. Both
+    /// are known now, so every string below has to come back as "no opinion" —
+    /// including the ones the old search caught. An `active: false` with no
+    /// reason is still a refusal; it is just the generic one, which is the
+    /// right screen for a platform that did not say why.
+    #[test]
+    fn nothing_off_the_list_is_read_as_a_denial() {
+        for body in [
+            r#"{"active":false}"#,
+            r#"{"active":false,"status":"canceled"}"#,
+            r#"{"active":false,"status":"past_due"}"#,
+            r#"{"active":false,"status":"suspended"}"#,
+            r#"{"active":false,"reason":"Suspended"}"#,
+            r#"{"active":false,"reason":"account_suspended"}"#,
+            r#"{"active":false,"reason":"no_subscription"}"#,
+            r#"{"active":false,"suspension_reason":"suspended"}"#,
+            r#"{"active":true,"status":"active"}"#,
+            r#"{}"#,
+        ] {
+            let r: LicenceResponse = serde_json::from_str(body).expect("parses");
+            assert_eq!(r.denial(), None, "an ordinary answer was read as a denial: {body}");
+        }
+
+        // The reading of the *entitlement* is untouched by any of that: a
+        // word off the list neither grants nor withdraws anything.
+        let r: LicenceResponse =
+            serde_json::from_str(r#"{"active":true,"reason":"grace_period"}"#).expect("parses");
+        assert_eq!(r.denial(), None);
+        assert!(r.entitled(), "an unknown reason locked out a paying account");
+    }
+
     /// Credits mode does not exist yet; the shape that will carry it does.
     #[test]
     fn the_platform_mode_is_understood_before_it_is_offered() {
@@ -756,6 +925,12 @@ pub fn auth_sign_out(app: tauri::AppHandle) -> Result<(), GateError> {
 pub struct RecalledLicence {
     pub active: bool,
     pub checked_at: String,
+    /// The same word a live check would have sent, out of the signed claims.
+    /// This is what makes a suspension survive going offline.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
 }
 
 /// What this machine last knew, without touching the network.
@@ -774,7 +949,12 @@ pub fn auth_cached_licence(app: tauri::AppHandle) -> Option<RecalledLicence> {
     let dir = app_dir(&app)?;
     let cached = crate::licence_cache::load(&dir)?;
     match crate::licence_cache::recall(&cached, &stored.user_id, crate::licence::EMBEDDED_PUBLIC_KEY) {
-        Some(r) => Some(RecalledLicence { active: r.active, checked_at: r.checked_at }),
+        Some(r) => Some(RecalledLicence {
+            active: r.active,
+            checked_at: r.checked_at,
+            reason: r.reason,
+            expires_at: r.expires_at,
+        }),
         None => {
             crate::licence_cache::forget(&dir);
             None
@@ -805,9 +985,72 @@ pub struct LicenceState {
     pub checked_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    /// The platform's word for why not, exactly as it sent it. Parsed by
+    /// `denialFor` in `entitlement.ts`, which picks the screen from it.
+    ///
+    /// Passed through rather than narrowed to the four known values, so that a
+    /// word this build has never seen is still visible to anyone reading a log
+    /// — it decides nothing on either side of the boundary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// When the membership ended, for the one screen that says so.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan: Option<String>,
     pub verified: bool,
+}
+
+/// What a live answer means for the licence file on disk.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CacheAction {
+    /// Write the signed token down.
+    Store,
+    /// Throw away whatever is there.
+    Forget,
+    /// Leave it exactly as it is.
+    Leave,
+}
+
+/// Decide what this launch does to the cache.
+///
+/// `signed` is what the licence token says about **this** account: `None`
+/// where there was nothing signed, nothing checkable — no key compiled into
+/// this build — or nothing about this account to check. `active` is the answer
+/// the gate is about to be given, which is the token's verdict *and* the
+/// response's reason together.
+///
+/// It is deliberately not symmetrical, and each asymmetry is a bug somebody
+/// would otherwise hit:
+///
+/// **A signed answer is written down whichever way it went.** Caching a "no"
+/// matters as much as caching a "yes": without it, somebody who was refused
+/// could close the lid, go offline, and have the refusal quietly become a
+/// month of grace.
+///
+/// **A signed statement that contradicts the answer beside it is never
+/// written down.** This used to be every suspension — the claims could not
+/// express one, so a suspended account's token still read "active", and
+/// caching it would have handed back a month of exactly the access the
+/// suspension exists to withdraw. The claims carry `reason` now, so the
+/// ordinary case is that the token says "suspended" too, agrees, and is kept,
+/// which is what lets the offline screen be the right one. The check stays for
+/// the case it was really about.
+///
+/// **An unverifiable "no" deletes the cache; an unverifiable "yes" leaves it
+/// alone.** The two directions are not the same risk. This request reached the
+/// platform, so a refused person is blocked at this moment regardless of
+/// what is on disk, and deleting a stale "yes" cannot lock out anybody who is
+/// not already locked out. But destroying the one record standing between a
+/// paying customer and `offline-first-run` — because a backend stopped sending
+/// a field, or because this build has no key yet — is the failure
+/// `entitlement.ts` is organised around avoiding.
+fn cache_action(signed: Option<bool>, active: bool) -> CacheAction {
+    match signed {
+        Some(s) if s == active => CacheAction::Store,
+        _ if !active => CacheAction::Forget,
+        _ => CacheAction::Leave,
+    }
 }
 
 /// Ask the platform whether this account is entitled, right now.
@@ -872,8 +1115,11 @@ pub async fn auth_licence(app: tauri::AppHandle) -> Result<Option<LicenceState>,
     // "active", this returns a refusal to somebody who has paid — check it
     // with `--licence-probe` against an entitled account before the gate is
     // turned on for anyone.
+    // `signed` is what the token on its own says, kept apart from `active`
+    // because the cache below turns on whether the two agree. `None` means
+    // there was nothing signed to ask.
     let user_id = if stored.user_id.is_empty() { tokens.user.id.clone() } else { stored.user_id.clone() };
-    let (active, verified) = match body.licence_token.as_deref().map(crate::licence::verify) {
+    let (active, verified, signed) = match body.licence_token.as_deref().map(crate::licence::verify) {
         // A good licence and nothing to hold it against. `matches` would say
         // false — correctly, since an empty id matches nobody — and falling
         // through to the arm below would refuse a paying customer over a
@@ -881,37 +1127,33 @@ pub async fn auth_licence(app: tauri::AppHandle) -> Result<Option<LicenceState>,
         // is that this build could not check, so the plain fields stand and
         // `verified: false` travels with them: an entitlement that could not
         // be bound to an account is exactly what must never reach the disk.
-        Some(Ok(_)) if user_id.is_empty() => (body.entitled(), false),
-        Some(Ok(v)) if v.matches(&user_id) => (v.entitled(), true),
+        Some(Ok(_)) if user_id.is_empty() => (body.entitled(), false, None),
+        Some(Ok(v)) if v.matches(&user_id) => (v.entitled(), true, Some(v.entitled())),
         // Signed, valid, and about somebody else. Not a licence for this
-        // account, and not something to fall back to the plain fields over.
-        Some(Ok(_)) => (false, true),
-        Some(Err(crate::licence::LicenceError::NoKey)) | None => (body.entitled(), false),
+        // account, not something to fall back to the plain fields over, and
+        // `None` rather than `Some(false)` because it is not a signed
+        // statement about this account at all — which keeps it out of this
+        // account's cache file instead of being written there to be refused
+        // by `recall` on every launch until something deletes it.
+        Some(Ok(_)) => (false, true, None),
+        Some(Err(crate::licence::LicenceError::NoKey)) | None => (body.entitled(), false, None),
         Some(Err(e)) => return Err(GateError { code: "LICENCE".into(), message: e.to_string() }),
     };
 
+    // A denial is a refusal even where something else in the same response
+    // says otherwise. The two should never disagree; if a backend ever bars an
+    // account without clearing its subscription flag, the restrictive reading
+    // is the one that is right about the account, and taking it here keeps the
+    // contradiction out of the offline cache below.
+    let active = active && body.denial().is_none();
+
     let checked_at = answer.served_at.unwrap_or_else(now_iso);
 
-    // What survives this launch, and it is deliberately not symmetrical.
-    //
-    // A *verified* answer is written down whichever way it went. Caching a
-    // "no" matters as much as caching a "yes": without it, somebody who was
-    // refused could close the lid, go offline and have the refusal quietly
-    // become a month of grace.
-    //
-    // An answer that could not be verified is a different thing, and the two
-    // directions are not the same risk. Where it says **no**, the old cache is
-    // thrown away — this request reached the platform, so the person is
-    // blocked at this moment regardless of what is on disk, and deleting a
-    // stale "yes" cannot lock out anybody who is not already locked out.
-    // Where it says **yes**, whatever is cached is left exactly as it is. This
-    // build has nothing signed to write, and destroying the one record
-    // standing between a paying customer and `offline-first-run` — because a
-    // backend stopped sending a field — is the failure `entitlement.ts` is
-    // organised around avoiding.
+    // What survives this launch — see [`cache_action`], which is the whole
+    // decision and is tested on its own.
     if let Some(dir) = app_dir(&app) {
-        match (verified, body.licence_token.as_deref()) {
-            (true, Some(token)) => {
+        match (cache_action(signed, active), body.licence_token.as_deref()) {
+            (CacheAction::Store, Some(token)) => {
                 let record = crate::licence_cache::Cached {
                     licence_token: token.to_string(),
                     checked_at: checked_at.clone(),
@@ -923,7 +1165,10 @@ pub async fn auth_licence(app: tauri::AppHandle) -> Result<Option<LicenceState>,
                     eprintln!("the licence could not be cached for offline use: {e}");
                 }
             }
-            (false, _) if !active => crate::licence_cache::forget(&dir),
+            (CacheAction::Forget, _) => crate::licence_cache::forget(&dir),
+            // `Store` with no token cannot happen — `signed` is only `Some`
+            // when a token was verified — and `Leave` is the deliberate
+            // do-nothing.
             _ => {}
         }
     }
@@ -932,6 +1177,8 @@ pub async fn auth_licence(app: tauri::AppHandle) -> Result<Option<LicenceState>,
         active,
         checked_at,
         status: body.status,
+        reason: body.reason,
+        expires_at: body.expires_at,
         plan: body.plan,
         verified,
     }))
@@ -1200,6 +1447,17 @@ pub fn probe_licence(access_token: &str) -> i32 {
                 println!("--- as this build reads it ---");
                 println!("  active (plain fields): {}", body.entitled());
                 println!("  status: {:?}   plan: {:?}", body.status, body.plan);
+                // The field the screen is chosen from. A `reason` the raw
+                // body plainly carries that comes out as `None` here is a
+                // fifth word the platform has started sending, and
+                // `licence::Denial` is the one place to teach it — until then
+                // it falls to the generic "no subscription" screen.
+                println!(
+                    "  reason: {:?}   → read as: {:?}",
+                    body.reason,
+                    body.denial().map(crate::licence::Denial::as_str)
+                );
+                println!("  expires_at: {:?}", body.expires_at);
                 match body.licence_token.as_deref() {
                     None => println!(
                         "  licence_token: ABSENT — the offline cache would have nothing signed \
@@ -1249,12 +1507,72 @@ mod command_tests {
         let json = serde_json::to_value(RecalledLicence {
             active: true,
             checked_at: "2026-08-18T09:00:00Z".into(),
+            reason: None,
+            expires_at: None,
         })
         .expect("serialises");
 
         assert_eq!(json["active"], serde_json::json!(true));
         assert_eq!(json["checkedAt"], serde_json::json!("2026-08-18T09:00:00Z"));
         assert!(json.get("checked_at").is_none(), "snake_case leaked across the boundary: {json}");
+
+        // And the half that closes the offline gap: a refusal recalled from
+        // disk has to reach the frontend saying *why*, under the same names a
+        // live answer uses, or `gateFor` falls back to the generic screen and
+        // a suspended user on a plane is pointed at a billing page again.
+        let json = serde_json::to_value(RecalledLicence {
+            active: false,
+            checked_at: "2026-08-18T09:00:00Z".into(),
+            reason: Some("membership_inactive".into()),
+            expires_at: Some("2026-07-01T00:00:00Z".into()),
+        })
+        .expect("serialises");
+        assert_eq!(json["reason"], serde_json::json!("membership_inactive"));
+        assert_eq!(json["expiresAt"], serde_json::json!("2026-07-01T00:00:00Z"));
+        assert!(json.get("expires_at").is_none(), "snake_case leaked: {json}");
+    }
+
+    /// `LicenceState` is read by `fromLicence` in `src/lib/entitlement.ts`,
+    /// which picks one of five screens on the strength of these names. A
+    /// rename on this side is not a compile error on that one; it is an
+    /// `undefined`, and an `undefined` reason is a suspended account shown a
+    /// "Manage subscription" button.
+    #[test]
+    fn a_denial_reaches_the_frontend_under_the_names_it_reads() {
+        let json = serde_json::to_value(LicenceState {
+            active: false,
+            checked_at: "2026-08-18T09:00:00Z".into(),
+            status: Some("canceled".into()),
+            reason: Some("membership_inactive".into()),
+            expires_at: Some("2026-07-01T00:00:00Z".into()),
+            plan: None,
+            verified: true,
+        })
+        .expect("serialises");
+
+        assert_eq!(json["reason"], serde_json::json!("membership_inactive"));
+        assert_eq!(json["expiresAt"], serde_json::json!("2026-07-01T00:00:00Z"));
+        assert_eq!(json["checkedAt"], serde_json::json!("2026-08-18T09:00:00Z"));
+        assert!(json.get("plan").is_none(), "an absent plan should not be sent as null: {json}");
+        assert!(json.get("expires_at").is_none(), "snake_case leaked: {json}");
+
+        // The word is passed through exactly as the platform spelled it. The
+        // frontend matches on it character for character, so anything that
+        // normalises it here — a lowercasing, a trim, a rename to something
+        // tidier — silently sends every denial to the generic screen.
+        for word in ["suspended", "no_membership", "membership_inactive", "no_access"] {
+            let json = serde_json::to_value(LicenceState {
+                active: false,
+                checked_at: "2026-08-18T09:00:00Z".into(),
+                status: None,
+                reason: Some(word.into()),
+                expires_at: None,
+                plan: None,
+                verified: true,
+            })
+            .expect("serialises");
+            assert_eq!(json["reason"], serde_json::json!(word));
+        }
     }
 
     /// With nothing in the environment, a downloaded build talks to

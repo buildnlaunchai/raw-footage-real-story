@@ -138,6 +138,30 @@ jobs:
         id: tauri
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+          # The sign-in gate, on. Every build this workflow produces — tagged
+          # release and dispatch check alike — now requires a BuildnLaunchAI
+          # account with an active subscription before the app will open.
+          #
+          # **Quoted, and it stays quoted.** Bare `on` is the one word in YAML
+          # whose meaning depends on which parser reads it: 1.1 makes it the
+          # boolean true, 1.2 leaves it a string, and the parser that decides
+          # this is GitHub's rather than the one on your machine. Anything that
+          # arrives as a boolean reaches the build as "true", and
+          # `AUTH_GATE_ENABLED` accepts nothing but the exact word "on" — by
+          # design, since every ambiguous value must fail towards letting
+          # people in. Unquoted, that is a release that looks gated in this
+          # file and ships wide open.
+          #
+          # Vite picks this up from the environment because `tauri build` runs
+          # `npm run build` as a child process, and Vite copies any `VITE_`
+          # variable it finds in `process.env` into `import.meta.env`.
+          #
+          # To build without the gate — for a tester who cannot sign in, say —
+          # run the workflow with this line commented out rather than set to
+          # something falsy, so the reason is visible in the diff.
+          VITE_AUTH_GATE: "on"
+
           # The Apple variables are commented out rather than set-and-empty.
           #
           # A missing GitHub secret evaluates to "", and Actions has no way to
@@ -168,6 +192,12 @@ jobs:
           releaseBody: |
             Unsigned build. Your OS will warn you before it opens.
             See INSTALL.md for what the warning says and how to get past it.
+
+            This build requires a BuildnLaunchAI account with an active
+            subscription. Because the build is unsigned, macOS may not hand the
+            app back its saved sign-in after an update — if it asks you to log
+            in again after updating, that is why, and signing in again is all
+            it needs.
 
       # ── gates 2 and 3: is the artifact people download actually usable? ──
       #

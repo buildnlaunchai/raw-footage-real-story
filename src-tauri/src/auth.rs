@@ -194,6 +194,26 @@ impl Pending {
     }
 
     fn handle(&self, mut stream: TcpStream) -> Result<String, AuthError> {
+        // Back to blocking, before the timeout below is asked to mean
+        // anything.
+        //
+        // `wait` puts the *listener* in non-blocking mode so it can poll its
+        // own deadline instead of parking forever in `accept`. On macOS and
+        // the BSDs the accepted socket inherits that flag; on Linux it does
+        // not, which is why CI has never seen this. Inherited, it makes the
+        // read below return `EAGAIN` the instant the request bytes have not
+        // arrived yet — microseconds after `accept` — and `SO_RCVTIMEO` is
+        // ignored on a non-blocking socket, so the five seconds are not a
+        // grace period, they are nothing at all.
+        //
+        // On loopback the handshake and the request usually land together,
+        // so the failure is intermittent rather than total: a sign-in that
+        // reports "the login could not be read" perhaps one time in twenty,
+        // more often on a loaded machine or with a browser slower than a
+        // test client.
+        stream
+            .set_nonblocking(false)
+            .map_err(|e| AuthError::Io(e.to_string()))?;
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .map_err(|e| AuthError::Io(e.to_string()))?;
@@ -410,6 +430,28 @@ mod tests {
         std::thread::spawn(move || {
             let mut s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
             let _ = s.write_all(b"GET /callback?state=the-state&code=abc123 HTTP/1.1\r\n\r\n");
+        });
+        assert_eq!(pending.wait(Duration::from_secs(5)).expect("code"), "abc123");
+    }
+
+    /// A browser that connects and only then sends its request is still heard.
+    ///
+    /// This is the shape of the real thing — a connection is established and
+    /// the request follows it — and it is the case that used to fail. The
+    /// listener is non-blocking so `wait` can poll its deadline, and where
+    /// the accepted socket inherits that flag the read gave up `EAGAIN`
+    /// microseconds after `accept` rather than waiting the five seconds it
+    /// looked like it was waiting. The stall here is far longer than the
+    /// window that made it intermittent, so this fails every time rather than
+    /// once in twenty.
+    #[test]
+    fn a_callback_that_arrives_after_a_pause_is_still_read() {
+        let pending = Pending::bind("s").expect("bind");
+        let port = pending.port();
+        std::thread::spawn(move || {
+            let mut s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+            std::thread::sleep(Duration::from_millis(300));
+            let _ = s.write_all(b"GET /callback?state=s&code=abc123 HTTP/1.1\r\n\r\n");
         });
         assert_eq!(pending.wait(Duration::from_secs(5)).expect("code"), "abc123");
     }
