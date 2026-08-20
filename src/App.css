@@ -1556,6 +1556,9 @@ kbd {
 /* ── chips used by the story and assembly options ──────────────────────── */
 
 .style-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
   border: 1px solid var(--line);
   background: var(--card);
   border-radius: 999px;
@@ -3346,9 +3349,48 @@ kbd {
   padding: 1.1rem;
 }
 
+/*
+ * The suggested card is drawn as suggested.
+ *
+ * Two identical cards side by side are a question, not a recommendation, and
+ * the one on the left was being read as "first" rather than "start here".
+ */
+.ready-option[data-recommended="true"] {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+
 .ready-option h3 {
   margin: 0 0 0.5rem;
   font-size: 1.05rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+/* "Recommended" / "Optional" beside a heading or inside a chip. */
+.chip-tag {
+  border-radius: 999px;
+  padding: 0.12rem 0.5rem;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  background: var(--accent);
+  color: #fff;
+}
+
+.chip-tag.is-muted {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--ink-2);
+}
+
+/* On the accent fill of a selected chip, the badge has to stop being accent. */
+.style-chip.is-selected .chip-tag {
+  background: rgba(255, 255, 255, 0.22);
+  color: #fff;
 }
 
 .ready-option p {

@@ -135,10 +135,13 @@ message you would have got at your desk.
 
 ## First run: what the app needs
 
-The app does most of its work on your own machine, so it needs two outside
-tools. **You do not have to install either one to start** — the app checks for
-them on first run and shows a setup screen with the exact command to paste, and
-you can also skip both and use cloud services instead.
+The app does most of its work on your own machine. Exactly one outside tool is
+required — ffmpeg — and the app checks for it on first run and shows a setup
+screen with the exact command to paste.
+
+Script writing needs no download at all: link an OpenAI key to your
+BuildnLaunchAI account and you are done. Ollama is the offline alternative, and
+it is genuinely optional.
 
 ### ffmpeg — needed to build the video
 
@@ -158,16 +161,22 @@ your video comes out grey and washed out.
 The app finds it by itself afterwards. There is a **Re-check** button on the
 setup screen if you install it while the app is open.
 
-### Ollama — writes the script on your machine, for free
+### Writing the script — an OpenAI key, or Ollama
 
-Optional. Install from [ollama.com](https://ollama.com) if you want script
-writing to run locally at no cost. The app will offer to download the model it
-needs.
+**The quickest start is a key.** Link an OpenAI key to your BuildnLaunchAI
+account and there is nothing to install and nothing to download; a script costs
+a few cents, billed by OpenAI to your own account. Keys are managed on your
+account rather than typed into the app, so one key works on every machine you
+sign in on — the setup screen has a button that takes you straight to the page.
 
-If you would rather not, link an OpenAI key to your BuildnLaunchAI account
-instead and skip Ollama entirely. Keys are managed on your account rather than
-typed into the app, so one key works on every machine you sign in on — the app
-has a button that takes you straight to the page.
+**Ollama is the offline alternative, and it is optional.** Install it from
+[ollama.com](https://ollama.com) if you want script writing to run on your own
+machine, free and with no connection at all. The app will offer to download the
+models it needs: about 4.7 GB before the first script and roughly 14 GB for
+both. Its writing in languages other than English is measurably worse than
+OpenAI's — Bengali was tested and was not usable.
+
+You need one of the two, not both.
 
 ### Narration voices
 

@@ -3,12 +3,14 @@
 // each one has to be true on its own.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   attention,
   capabilities,
   ffmpegState,
   installFor,
   ollamaReport,
+  recommendedScriptRoute,
   usable,
 } from "../.test-build/lib/readiness.js";
 
@@ -132,6 +134,77 @@ test("a fully ready machine asks for nothing", () => {
   const caps = capabilities(probe(), REQ);
   assert.equal(attention(caps), 0);
   assert.equal(usable(caps), true);
+});
+
+// --- which route a machine should be on ------------------------------------
+//
+// The recommendation is the cloud one, and these pin down the single case where
+// it is not: a machine that has already paid for the models.
+
+test("a machine with nothing is pointed at the cloud, not at a download", () => {
+  const bare = probe({ ffmpeg: null, ffmpegError: "X", ollamaModels: null, ollamaError: "X" });
+  assert.equal(recommendedScriptRoute(bare, REQ), "openai");
+});
+
+test("a linked key wins even where the local models are all present", () => {
+  assert.equal(recommendedScriptRoute(probe(), { ...REQ, hasOpenAiKey: true }), "openai");
+});
+
+test("working local models and no key stay local", () => {
+  // The download is already on disk. Sending this person to link a key would be
+  // recommending they go and acquire a capability they have.
+  assert.equal(recommendedScriptRoute(probe(), REQ), "local");
+  assert.equal(
+    recommendedScriptRoute(probe({ ollamaModels: ["qwen2.5:7b"] }), REQ),
+    "local",
+    "the fast model alone is a working setup",
+  );
+});
+
+test("Ollama installed but empty is not a working setup", () => {
+  // The trap state again: the server answers, so nothing looks wrong, and there
+  // is still a multi-gigabyte pull between this machine and a script.
+  assert.equal(recommendedScriptRoute(probe({ ollamaModels: [] }), REQ), "openai");
+});
+
+test("the script row describes the route in use, not whichever is listed first", () => {
+  const both = capabilities(probe(), { ...REQ, hasOpenAiKey: true });
+  const script = both.find((c) => c.id === "script");
+  assert.match(script.detail, /OpenAI/);
+  assert.doesNotMatch(script.detail, /Ollama/, "the app is not calling Ollama here");
+});
+
+test("a key silences the half-installed-models caveat", () => {
+  // Nagging about the 9 GB second model is only fair to somebody whose scripts
+  // are actually going to be written by the small one.
+  const partial = probe({ ollamaModels: ["qwen2.5:7b"] });
+  const script = capabilities(partial, { ...REQ, hasOpenAiKey: true }).find((c) => c.id === "script");
+  assert.equal(script.caveat, undefined);
+  assert.equal(attention(capabilities(partial, { ...REQ, hasOpenAiKey: true })), 0);
+});
+
+test("with neither, the sentence leads with the key rather than the download", () => {
+  const caps = capabilities(probe({ ollamaModels: null, ollamaError: "X" }), REQ);
+  const script = caps.find((c) => c.id === "script");
+  assert.equal(script.ready, false);
+  assert.ok(
+    script.detail.indexOf("OpenAI") < script.detail.indexOf("Ollama"),
+    `the cheaper fix is named first: ${script.detail}`,
+  );
+});
+
+test("the picker offers the cloud provider first", () => {
+  // `SCRIPT_PROVIDERS` is rendered with `Object.values`, so key order is what a
+  // new user reads first. It cannot be imported here — that module pulls in
+  // `@tauri-apps` — so the ordering is guarded against the source, which is
+  // where somebody would accidentally undo it.
+  const src = readFileSync(new URL("../src/lib/scriptProviders.ts", import.meta.url), "utf8");
+  const record = src.slice(src.indexOf("SCRIPT_PROVIDERS: Record"));
+  assert.ok(
+    record.indexOf("openai: {") < record.indexOf("local: {"),
+    "cloud-first, deliberately",
+  );
+  assert.match(record.slice(0, record.indexOf("local: {")), /recommended: true/);
 });
 
 // --- install instructions -------------------------------------------------

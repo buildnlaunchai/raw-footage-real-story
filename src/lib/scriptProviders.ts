@@ -1,10 +1,10 @@
 /**
  * Where scripts get written.
  *
- * Local Ollama (free) and OpenAI (paid), following the same capability-flag
- * shape as the voice providers. The composer already takes an injected
- * `GenerateFn` carrying a `tier` hint, so a whole new provider slots in without
- * `scriptComposerCore.ts` changing at all.
+ * OpenAI (paid, recommended) and local Ollama (free, offline), following the
+ * same capability-flag shape as the voice providers. The composer already
+ * takes an injected `GenerateFn` carrying a `tier` hint, so a whole new
+ * provider slots in without `scriptComposerCore.ts` changing at all.
  */
 import { invoke } from "@tauri-apps/api/core";
 import { OLLAMA_HOST, OLLAMA_MODEL, OLLAMA_MODEL_QUALITY } from "../config/ollama";
@@ -80,29 +80,32 @@ export interface ScriptProvider {
   id: ScriptProviderId;
   label: string;
   blurb: string;
+  /**
+   * The one we tell a new user to start with.
+   *
+   * Exactly one provider carries this. It is a product recommendation and so
+   * it is fixed, unlike `recommendedScriptRoute` in `readiness.ts`, which
+   * answers the different question of what *this* machine should be set to
+   * right now — a machine with working local models and no key is better off
+   * on Ollama whatever the badge says.
+   */
+  recommended?: boolean;
   capabilities: ScriptProviderCapabilities;
 }
 
+/**
+ * Listed cloud-first, and the order is load-bearing: this record is what the
+ * picker iterates, so whichever key comes first is the chip a new user reads
+ * first. Local ran first until the download it implies — about fourteen
+ * gigabytes before a single word gets written — turned out to be the thing
+ * standing between a fresh install and a first script.
+ */
 export const SCRIPT_PROVIDERS: Record<ScriptProviderId, ScriptProvider> = {
-  local: {
-    id: "local",
-    label: "Local (Ollama)",
-    blurb: "Runs on this machine. Free, offline.",
-    capabilities: {
-      isCloud: false,
-      needsApiKey: false,
-      billing: "free-local",
-      structuredOutput: "constrained",
-      refusalsDetectable: false,
-      supportsSampling: true,
-      // Measured: qwen2.5's Bengali was not usable.
-      nonEnglishQuality: "poor",
-    },
-  },
   openai: {
     id: "openai",
     label: "OpenAI (cloud)",
-    blurb: "Your OpenAI account. Billed per token.",
+    blurb: "Recommended. Nothing to download; billed per token to your own OpenAI account.",
+    recommended: true,
     capabilities: {
       isCloud: true,
       needsApiKey: true,
@@ -113,6 +116,21 @@ export const SCRIPT_PROVIDERS: Record<ScriptProviderId, ScriptProvider> = {
       // Measured on Hajj/Umrah descriptions against the qwen2.5 baseline:
       // none of the failures that made the local model unusable recurred.
       nonEnglishQuality: "strong",
+    },
+  },
+  local: {
+    id: "local",
+    label: "Local (Ollama)",
+    blurb: "Runs fully offline and costs nothing, after a one-time download of about 14 GB.",
+    capabilities: {
+      isCloud: false,
+      needsApiKey: false,
+      billing: "free-local",
+      structuredOutput: "constrained",
+      refusalsDetectable: false,
+      supportsSampling: true,
+      // Measured: qwen2.5's Bengali was not usable.
+      nonEnglishQuality: "poor",
     },
   },
 };

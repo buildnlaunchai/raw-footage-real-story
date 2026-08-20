@@ -87,6 +87,8 @@ export function ScriptProviderSetup({
     <div className="provider-picker">
       <span className="field-label">Script writer</span>
       <div className="style-row">
+        {/* Listed in `SCRIPT_PROVIDERS` order, which is cloud-first on purpose
+            — see the note on that record. */}
         {Object.values(SCRIPT_PROVIDERS).map((p) => (
           <button
             key={p.id}
@@ -96,9 +98,16 @@ export function ScriptProviderSetup({
             title={p.blurb}
           >
             {p.label}
+            {p.recommended && <span className="chip-tag">Recommended</span>}
           </button>
         ))}
       </div>
+
+      <p className="placeholder-note" style={{ marginTop: "-0.2rem" }}>
+        {providerId === "openai"
+          ? "Nothing to download. Billed per token to your own OpenAI account."
+          : "Runs entirely on this machine, free and offline, once its models are downloaded — about 14 GB in total."}
+      </p>
 
       {/* Only says what has actually been measured. The local model's Bengali
           was tested and failed; OpenAI's is not yet known, and claiming it is

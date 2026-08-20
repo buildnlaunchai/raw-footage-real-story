@@ -131,6 +131,31 @@ export interface Capability {
   caveat?: string;
 }
 
+/**
+ * Which of the two script routes the app should be on.
+ *
+ * `"openai"` is the recommended one and the answer in every case except the
+ * one where it would be wrong: a machine that has already paid the download
+ * cost for local models and has no key on the account. Recommending the cloud
+ * to somebody with fourteen gigabytes of working models on disk would be
+ * telling them to go and link a key to reach a capability they already have.
+ *
+ * With neither, the answer is still `"openai"`. That is the point of the
+ * default — the shortest path from a fresh install to a first script is a key
+ * the account may already hold, not a download measured in gigabytes, and the
+ * screen that offers a choice should be sitting on that one when it opens.
+ */
+export type ScriptRoute = "openai" | "local";
+
+function localScriptReady(ol: OllamaReport): boolean {
+  return ol.state === "ready" || ol.state === "partial";
+}
+
+export function recommendedScriptRoute(p: Probe, req: Requirements): ScriptRoute {
+  if (req.hasOpenAiKey) return "openai";
+  return localScriptReady(ollamaReport(p, req)) ? "local" : "openai";
+}
+
 export function capabilities(p: Probe, req: Requirements): Capability[] {
   const ff = ffmpegState(p);
   const ol = ollamaReport(p, req);
@@ -150,21 +175,26 @@ export function capabilities(p: Probe, req: Requirements): Capability[] {
         : undefined,
   };
 
-  const scriptLocal = ol.state === "ready" || ol.state === "partial";
+  const route = recommendedScriptRoute(p, req);
   const script: Capability = {
     id: "script",
     label: "Write the narration",
-    ready: scriptLocal || req.hasOpenAiKey,
+    ready: req.hasOpenAiKey || localScriptReady(ol),
     blocking: false,
-    detail: scriptLocal
-      ? `Ollama, using ${ol.present.join(" and ")}`
-      : req.hasOpenAiKey
-        ? "OpenAI, using the key on your account"
-        : ol.state === "unreachable"
-          ? "Ollama is not running, and your account has no OpenAI key."
-          : "Ollama is running but has no models, and your account has no OpenAI key.",
+    // Says which route is actually in use, which is the one `route` picked —
+    // not whichever happens to be listed first. A machine with both a key and
+    // a local model is using the key, and saying "Ollama" there would describe
+    // a provider the app is not calling.
+    detail:
+      route === "openai"
+        ? req.hasOpenAiKey
+          ? "OpenAI, using the key on your account"
+          : ol.state === "unreachable"
+            ? "Your account has no OpenAI key, and Ollama is not running here."
+            : "Your account has no OpenAI key, and Ollama is running but has no models."
+        : `Ollama, using ${ol.present.join(" and ")}`,
     caveat:
-      ol.state === "partial" && !req.hasOpenAiKey
+      route === "local" && ol.state === "partial"
         ? `Only ${ol.present[0]} is installed. Scripts will be written by the smaller model, which reads less well than ${ol.missing[0]}.`
         : undefined,
   };

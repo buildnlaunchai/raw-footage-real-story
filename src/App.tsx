@@ -15,6 +15,7 @@ import { ReadinessPanel } from "./components/ReadinessPanel";
 import {
   attention as attentionCount,
   capabilities as capabilitiesOf,
+  recommendedScriptRoute,
   usable as isUsable,
   type Probe,
 } from "./lib/readiness";
@@ -363,7 +364,18 @@ function App() {
   const [style, setStyle] = useState<ScriptStyle>("cinematic");
   const [language, setLanguage] = useState(DEFAULT_LANGUAGE);
   const [critique, setCritique] = useState(true);
-  const [scriptProvider, setScriptProvider] = useState<ScriptProviderId>("local");
+  /**
+   * Who writes the script, starting from the recommendation.
+   *
+   * OpenAI rather than Ollama, and the initial value matters because the first
+   * probe has not returned yet when this is read: a fresh install would
+   * otherwise sit on a provider whose models are fourteen gigabytes away while
+   * the screen decided what the machine had. The probe corrects this exactly
+   * once, below, and only ever towards a local setup that is already working.
+   */
+  const [scriptProvider, setScriptProvider] = useState<ScriptProviderId>("openai");
+  /** So the correction cannot happen twice and overwrite a deliberate choice. */
+  const routed = useRef(false);
   const [qualityTier, setQualityTier] = useState<QualityTier>("balanced");
   const [scriptUsage, setScriptUsage] = useState<{
     inputTokens: number;
@@ -2017,6 +2029,30 @@ function App() {
     : [];
   const needsAttention = probe ? attentionCount(caps) : 0;
   const canImport = probe ? isUsable(caps) : true;
+
+  /**
+   * Settle the script provider against what the first probe found.
+   *
+   * The default is the cloud one, so this only ever moves in one direction:
+   * onto Ollama, for a machine that has the models and no key on the account.
+   * Recommending the cloud is about the download a new user would otherwise
+   * face, and somebody who has already paid it is not that user.
+   *
+   * Once, guarded by a ref, because a later re-check must not undo a choice
+   * the user made from the picker in between.
+   */
+  useEffect(() => {
+    if (!probe || routed.current) return;
+    routed.current = true;
+    setScriptProvider(
+      recommendedScriptRoute(probe, {
+        fastModel: OLLAMA_MODEL,
+        qualityModel: OLLAMA_MODEL_QUALITY,
+        hasOpenAiKey,
+        hasElevenLabsKey,
+      }),
+    );
+  }, [probe, hasOpenAiKey, hasElevenLabsKey]);
 
   // Opened once, on the first probe that finds something missing. Not on every
   // probe: a re-check that still shows a caveat should not throw the user back

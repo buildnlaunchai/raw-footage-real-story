@@ -16,6 +16,7 @@ import {
   capabilities,
   installFor,
   ollamaReport,
+  recommendedScriptRoute,
   usable,
   type Capability,
   type Probe,
@@ -166,8 +167,29 @@ export function ReadinessPanel({
   const caps = capabilities(probe, requirements);
   const ollama = ollamaReport(probe, requirements);
   const allWell = caps.every((c) => c.ready && !c.caveat);
+  /**
+   * Which route this screen is steering towards.
+   *
+   * Only ever `"local"` for a machine that already has the models, so on a
+   * fresh install this is `"openai"` and everything below arranges itself
+   * around that: one primary button, pointing at the key.
+   */
+  const route = recommendedScriptRoute(probe, requirements);
 
-  function commandBlock(what: "ffmpeg" | "ollama", job: string) {
+  /**
+   * `emphasis` is the whole point of the parameter.
+   *
+   * There used to be one style here and it was primary, so a fresh machine
+   * showed two primary buttons side by side — link a key, and install Ollama —
+   * which is not a recommendation, it is a coin toss. ffmpeg keeps the emphasis
+   * because it is genuinely required; the Ollama install gives it up whenever
+   * the cloud route is the one being suggested.
+   */
+  function commandBlock(
+    what: "ffmpeg" | "ollama",
+    job: string,
+    emphasis: "primary" | "secondary" = "primary",
+  ) {
     const step = installFor(what, platform, probe!.installers);
     return (
       <div className="setup-cmd">
@@ -176,7 +198,7 @@ export function ReadinessPanel({
           {step.program && step.args && (
             <button
               type="button"
-              className="primary-button small"
+              className={`${emphasis === "primary" ? "primary-button" : "ghost-button"} small`}
               disabled={running !== null}
               onClick={() => runInstall(job, step.program!, step.args!)}
             >
@@ -240,7 +262,7 @@ export function ReadinessPanel({
             import, and what assembles the finished cut. There is no cloud
             substitute for it in this app.
           </p>
-          {commandBlock("ffmpeg", "ffmpeg")}
+          {commandBlock("ffmpeg", "ffmpeg", "primary")}
         </div>
       )}
 
@@ -249,21 +271,27 @@ export function ReadinessPanel({
         <div className="panel">
           <div className="panel-head">
             <h2>Choose how scripts get written</h2>
+            <span className="hint">either one is enough</span>
           </div>
           <p className="hint" style={{ marginTop: 0 }}>
-            Two ways, and either is enough.
+            The first one needs no download and is where we would start you. The
+            second is here for anyone who wants the app to work with no internet
+            at all.
           </p>
 
           <div className="ready-choice">
-            <div className="ready-option">
-              <h3>Use OpenAI</h3>
+            <div className="ready-option" data-recommended="true">
+              <h3>
+                Use your account&rsquo;s OpenAI key
+                <span className="chip-tag">Recommended</span>
+              </h3>
               <p>
-                Nothing to install and nothing to download. Costs a few cents per
-                script, billed to your own account. This is the quicker start,
-                and the only one that does not need several gigabytes first.
+                Nothing to install and nothing to download &mdash; you can write
+                a script within a minute of signing in. A script costs a few
+                cents, billed by OpenAI to your own account.
               </p>
               <p>
-                The key comes from your BuildnLaunchAI account rather than being
+                The key lives on your BuildnLaunchAI account rather than being
                 typed in here, so it works on every machine you sign in on.
               </p>
               <div className="actions">
@@ -272,7 +300,7 @@ export function ReadinessPanel({
                   className="primary-button"
                   onClick={() => void openKeyPage()}
                 >
-                  Manage my OpenAI key
+                  Use my account&rsquo;s OpenAI key
                 </button>
                 <button type="button" className="ghost-button" onClick={onOpenProviders}>
                   Script settings
@@ -286,13 +314,18 @@ export function ReadinessPanel({
             </div>
 
             <div className="ready-option">
-              <h3>Run a model on this machine</h3>
+              <h3>
+                Run a model on this machine
+                <span className="chip-tag is-muted">Optional</span>
+              </h3>
               <p>
-                Free and private, but the models are large — the first is about
-                4.7&nbsp;GB. Install Ollama, then pull a model below.
+                Free, private, and works with no connection at all. The cost is
+                the download: about 4.7&nbsp;GB before the first script and
+                roughly 14&nbsp;GB for both models, and its writing outside
+                English is measurably worse than OpenAI&rsquo;s.
               </p>
               {probe.ollamaModels === null
-                ? commandBlock("ollama", "ollama")
+                ? commandBlock("ollama", "ollama", route === "local" ? "primary" : "secondary")
                 : <p className="hint">Ollama is running. Pull a model below.</p>}
             </div>
           </div>
@@ -306,6 +339,16 @@ export function ReadinessPanel({
             <h2>Models</h2>
             <span className="hint">downloaded once, kept on this machine</span>
           </div>
+          {/* A key already answers this row, so the download is a preference
+              rather than a task. Saying so is the difference between a setup
+              screen and a list of nags. */}
+          {requirements.hasOpenAiKey && (
+            <p className="hint" style={{ marginTop: 0 }}>
+              Optional &mdash; the OpenAI key on your account already covers
+              script writing. These are only worth downloading if you want the
+              app to write scripts offline.
+            </p>
+          )}
           <ul className="ready-list">
             {ollama.present.map((m) => (
               <li key={m} className="ready-row">
