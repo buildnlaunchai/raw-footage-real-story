@@ -140,6 +140,8 @@ import {
   type RenderProgress,
 } from "./lib/assembly";
 import { AUTH_GATE_ENABLED } from "./lib/authGate";
+import { updateBlockFor } from "./lib/updateGate";
+import type { DesktopConfig, UpdateBlock } from "./lib/updateGate";
 import {
   allowsNewProjects,
   fromLicence,
@@ -330,12 +332,25 @@ function App() {
   });
   const [gateWaiting, setGateWaiting] = useState(false);
   const [gateError, setGateError] = useState<string | null>(null);
+  /**
+   * Whether this build is refused outright. `null` is "may run", and it is
+   * also what this holds while the answer is still outstanding — see the
+   * effect below, and `updateGate.ts` for why the unknown case is permissive.
+   */
+  const [updateBlock, setUpdateBlock] = useState<UpdateBlock | null>(null);
 
-  const gate: Gate = AUTH_GATE_ENABLED
-    ? gateFor({ session: gateSession, cached: gateCached, live: gateLive, now: new Date() })
-    // Not merely "allowed" — the flag being off means there is no gate at all,
-    // and the app must render exactly as it did before this existed.
-    : { state: "allowed" };
+  const gate: Gate = updateBlock
+    ? // Ahead of everything below, the flag included: whether somebody has to
+      // sign in is a different question from whether this binary is still
+      // allowed to run, and an ungated development build can be obsolete too.
+      // This is also the screen most likely to fix a broken sign-in, which is
+      // why it comes first rather than after the account is understood.
+      { state: "update-required", ...updateBlock }
+    : AUTH_GATE_ENABLED
+      ? gateFor({ session: gateSession, cached: gateCached, live: gateLive, now: new Date() })
+      // Not merely "allowed" — the flag being off means there is no gate at
+      // all, and the app must render exactly as it did before this existed.
+      : { state: "allowed" };
   const [savedAt, setSavedAt] = useState<string | null>(null);
 
   // --- story (B) -----------------------------------------------------------
@@ -643,6 +658,39 @@ function App() {
    * into, and a launch should not be touching the keychain or the network for
    * a screen nobody will see.
    */
+  /**
+   * Ask whether this build may still run.
+   *
+   * Deliberately outside the `AUTH_GATE_ENABLED` guard on the effect below.
+   * That flag decides whether people have to sign in; it does not decide
+   * whether an obsolete binary keeps working, and a development build with the
+   * gate dark is still a build that can be too old.
+   *
+   * Runs beside the session restore rather than in front of it, and nothing
+   * waits on it. The command cannot fail, and while the answer is outstanding
+   * `updateBlock` stays null — which means no constraint. Holding the launch
+   * on a network call, in order to decide whether to permit the launch, is the
+   * exact shape of outage this feature is written to avoid.
+   *
+   * The cost is that a refusal can land a moment after the window opens rather
+   * than before it. That is the right side to be wrong on: the alternative
+   * makes every offline launch wait on a timeout.
+   */
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const state = await invoke<{ installed: string; config: DesktopConfig | null }>(
+        "desktop_version_state",
+      ).catch(() => null);
+      if (cancelled || !state) return;
+      setUpdateBlock(updateBlockFor({ installed: state.installed, config: state.config }));
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // Once, on launch.
+  }, []);
+
   useEffect(() => {
     if (!AUTH_GATE_ENABLED) return;
     let cancelled = false;

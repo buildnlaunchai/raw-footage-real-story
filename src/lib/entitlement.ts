@@ -36,6 +36,8 @@
  */
 
 /** How long a cached licence keeps working with no way to re-check it. */
+import type { UpdateBlock } from "./updateGate";
+
 export const GRACE_DAYS = 30;
 
 /** When to start saying so. A week's notice is enough to find a connection. */
@@ -219,6 +221,22 @@ export interface GateInput {
 }
 
 export type Gate =
+  /**
+   * The build itself is refused: below the floor, or withdrawn by name.
+   *
+   * Not an entitlement state at all, and it lives in this union anyway because
+   * this is the union that decides whether the application renders. Keeping it
+   * here means the existing rule — the gate renders *instead of* the app, so
+   * nothing behind it mounts or starts work — covers it for free.
+   *
+   * It outranks every other state, including `suspended` and `read-only`. The
+   * ranking is the whole point: this is the one screen that can fix the
+   * others, because the update somebody is missing may be the thing that
+   * repairs their sign-in. Precedence is decided in `App.tsx`, in one line,
+   * rather than in [`gateFor`] — which stays about entitlement and nothing
+   * else. See `updateGate.ts` for what is being decided and why it fails open.
+   */
+  | ({ state: "update-required" } & UpdateBlock)
   /** Restoring a session; show nothing decisive yet. */
   | { state: "checking" }
   /** Nobody signed in. The entry screen. */

@@ -17,6 +17,7 @@
 //! | refresh → session   | `{base}/auth/v1/token?grant_type=refresh_token` |
 //! | is this account in? | `{base}/functions/v1/desktop-licence`  |
 //! | what keys do we hold? | `{base}/functions/v1/desktop-keys`   |
+//! | which builds may run? | `{base}/functions/v1/desktop-config` |
 //!
 //! ## Nothing in this file is a secret
 //!
@@ -470,6 +471,83 @@ pub struct LicenceAnswer {
     pub served_at: Option<String>,
 }
 
+/// What the platform says about which desktop builds may still run.
+///
+/// Read without a session, unlike everything else in this file, and that is
+/// the point rather than an oversight: the answer has to be available *before*
+/// the sign-in gate. An outdated build and a sign-in that will not work are
+/// the same incident often enough — this feature exists because of one — that
+/// the update screen must be reachable by somebody who cannot log in.
+///
+/// Every field optional, for the reason written out on [`LicenceResponse`]:
+/// this is a binary already on somebody's machine, and a response shape it
+/// cannot parse must never be able to stop it opening. Both spellings are
+/// accepted so the backend can send whichever it already sends elsewhere.
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopConfig {
+    /// The oldest version still allowed to run. Absent means no floor.
+    #[serde(default, alias = "minimum_version")]
+    pub minimum_version: Option<String>,
+    /// Specific builds withdrawn irrespective of the floor. Separate from it
+    /// because "too old" and "this exact build is bad" are different claims,
+    /// and a floor cannot say the second without also condemning everything
+    /// underneath it.
+    #[serde(default, alias = "killed_versions")]
+    pub killed_versions: Option<Vec<String>>,
+    #[serde(default, alias = "latest_version")]
+    pub latest_version: Option<String>,
+    #[serde(default, alias = "download_url")]
+    pub download_url: Option<String>,
+    #[serde(default, alias = "notes_url")]
+    pub notes_url: Option<String>,
+}
+
+/// Ask the platform which builds may run.
+pub async fn desktop_config_of(base: &str, anon_key: &str) -> Result<DesktopConfig, PlatformError> {
+    read(get_public(base, "desktop-config", anon_key).await?).await
+}
+
+/// Which build is asking, sent on every authenticated call.
+///
+/// Costs nothing today and is the only hook that makes an old build
+/// identifiable later. Versions up to and including 0.2.0 send no version at
+/// all — they predate this line — so once every supported build sends one,
+/// *absence* becomes the signature of a release too old to have the update
+/// gate compiled into it. That is the only lever those installs will ever
+/// answer to, because they have no update check of their own to reach.
+///
+/// Bare semver, no `v`: exactly what `Cargo.toml` and `package.json` carry.
+///
+/// Sent on the authenticated calls only. `desktop-config` does not need it —
+/// no build old enough to matter calls that endpoint at all — and the GoTrue
+/// token endpoints are not ours to add headers to.
+const APP_VERSION_HEADER: &str = "X-App-Version";
+
+/// A GET with no session behind it.
+///
+/// The anon key alone, because this endpoint answers the same for everybody
+/// and is asked before anybody has signed in.
+///
+/// Its own client, with a shorter timeout than [`client`]: this call sits in
+/// front of the launch, and thirty seconds of a hung network before the app
+/// will say anything is indistinguishable from a hung app. Ten is long enough
+/// for a slow connection to answer, and short enough that giving up — which
+/// here means *carrying on*, since the update check fails open — happens while
+/// somebody is still watching the window open.
+async fn get_public(base: &str, function: &str, anon_key: &str) -> Result<reqwest::Response, PlatformError> {
+    let url = format!("{}/functions/v1/{function}", base.trim_end_matches('/'));
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| PlatformError::Unreachable(e.to_string()))?
+        .get(url)
+        .header("apikey", anon_key)
+        .send()
+        .await
+        .map_err(|e| PlatformError::Unreachable(e.to_string()))
+}
+
 async fn get(
     base: &str,
     function: &str,
@@ -484,6 +562,7 @@ async fn get(
         // sends it and a gateway that starts requiring it should not be a
         // surprise outage.
         .header("apikey", anon_key)
+        .header(APP_VERSION_HEADER, env!("CARGO_PKG_VERSION"))
         .bearer_auth(access_token)
         .send()
         .await
@@ -622,6 +701,75 @@ mod tests {
 
     /// Unreachable is not refused. This distinction decides whether somebody
     /// keeps working on a plane or is shown a login wall.
+    #[tokio::test]
+    async fn every_authenticated_call_says_which_build_is_asking() {
+        // The hook the retroactive lever needs. If this ever stops being sent,
+        // the backend loses its only way to tell an old desktop from a current
+        // one — and it would lose it silently.
+        let expected = format!("x-app-version: {}", env!("CARGO_PKG_VERSION"));
+
+        let (base, seen) = stub("200 OK", r#"{"active":true}"#);
+        licence(&base, "anon", "at-1").await.expect("licence");
+        let req = seen.recv().unwrap().to_lowercase();
+        assert!(req.contains(&expected), "the licence call did not say which build it is: {req}");
+
+        let (base, seen) = stub("200 OK", r#"{"openai":{"present":false},"elevenlabs":{"present":false}}"#);
+        provider_keys(&base, "anon", "at-1").await.expect("keys");
+        let req = seen.recv().unwrap().to_lowercase();
+        assert!(req.contains(&expected), "the keys call did not say which build it is: {req}");
+    }
+
+    #[tokio::test]
+    async fn which_builds_may_run_is_asked_without_a_session() {
+        let (base, seen) = stub(
+            "200 OK",
+            r#"{"minimum_version":"0.3.0","killed_versions":["0.4.1"],
+                "latest_version":"0.5.0","download_url":"https://example.com/d",
+                "notes_url":"https://example.com/n"}"#,
+        );
+        let c = desktop_config_of(&base, "anon").await.expect("config");
+
+        assert_eq!(c.minimum_version.as_deref(), Some("0.3.0"));
+        assert_eq!(c.killed_versions, Some(vec!["0.4.1".to_string()]));
+        assert_eq!(c.latest_version.as_deref(), Some("0.5.0"));
+        assert_eq!(c.download_url.as_deref(), Some("https://example.com/d"));
+
+        let req = seen.recv().unwrap();
+        assert!(req.contains("GET /functions/v1/desktop-config"), "wrong endpoint: {req}");
+        // The whole reason this endpoint is separate from `desktop-licence`:
+        // it has to answer somebody who cannot sign in, because the update
+        // they are missing may be the thing that fixes signing in.
+        assert!(!req.contains("Bearer"), "the update check must not need a session: {req}");
+        assert!(req.contains("apikey"), "the anon key is still sent: {req}");
+    }
+
+    #[tokio::test]
+    async fn a_config_that_says_nothing_constrains_nothing() {
+        let (base, _seen) = stub("200 OK", "{}");
+        let c = desktop_config_of(&base, "anon").await.expect("config");
+        assert_eq!(c, DesktopConfig::default());
+    }
+
+    #[tokio::test]
+    async fn a_field_this_build_has_never_seen_does_not_cost_it_the_answer() {
+        // camelCase on the wire, and something the backend grew later. Neither
+        // may take the response down: this binary is already on a machine.
+        let (base, _seen) = stub(
+            "200 OK",
+            r#"{"minimumVersion":"0.3.0","somethingAddedLater":{"a":1}}"#,
+        );
+        let c = desktop_config_of(&base, "anon").await.expect("config");
+        assert_eq!(c.minimum_version.as_deref(), Some("0.3.0"));
+        assert_eq!(c.killed_versions, None);
+    }
+
+    #[tokio::test]
+    async fn a_refusal_from_the_config_endpoint_is_an_error_and_not_a_floor() {
+        // The caller turns this into `config: None`, which means no constraint.
+        let (base, _seen) = stub("500 Internal Server Error", r#"{"message":"boom"}"#);
+        assert!(desktop_config_of(&base, "anon").await.is_err());
+    }
+
     #[tokio::test]
     async fn an_unreachable_platform_is_not_a_refusal() {
         // Nothing is listening on this port.
@@ -1084,6 +1232,36 @@ pub async fn auth_sign_in(app: tauri::AppHandle) -> Result<SignedIn, GateError> 
 
     let _ = app;
     Ok(SignedIn { email: tokens.user.email, user_id: tokens.user.id })
+}
+
+/// What this build is, and what the platform says about builds like it.
+///
+/// **Never fails.** Every way of not getting an answer — no platform
+/// configured, no network, a response this build cannot read — arrives as
+/// `config: None`, which `updateGate.ts` treats as no constraint at all.
+///
+/// A version gate that could fail closed would turn one bad deploy, or one
+/// typo in one JSON field, into every installed copy of the application
+/// refusing to open, with the fix on the far side of the wall it had just
+/// built. There is no remote way back from that: the mechanism that would
+/// deliver the repair is the mechanism that stopped working.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopVersionState {
+    /// Out of the binary itself rather than anything shipped beside it, so it
+    /// cannot disagree with the code it is describing.
+    pub installed: String,
+    pub config: Option<DesktopConfig>,
+}
+
+#[tauri::command]
+pub async fn desktop_version_state() -> DesktopVersionState {
+    let installed = env!("CARGO_PKG_VERSION").to_string();
+    let config = match config() {
+        Some(cfg) => desktop_config_of(&cfg.base, &cfg.anon_key).await.ok(),
+        None => None,
+    };
+    DesktopVersionState { installed, config }
 }
 
 /// Where this app keeps its own files. `None` on a platform that will not say,

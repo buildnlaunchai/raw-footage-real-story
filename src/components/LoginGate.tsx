@@ -92,6 +92,63 @@ export function LoginGate({
    */
   function body(): ReactElement {
     switch (gate.state) {
+      // The build itself is refused, and this screen outranks every other one
+      // in this switch — the blocked-account screens included, because the
+      // update somebody is missing may be exactly what repairs their account.
+      //
+      // No dismiss, no "later", and no way to sign out: this can appear before
+      // anybody has signed in, and there would be nothing to sign out of.
+      case "update-required": {
+        const withdrawn = gate.reason === "withdrawn";
+        return (
+          <>
+            <p className="gate-lede">
+              {withdrawn
+                ? "This build has been withdrawn. There's a problem with this particular version, so it can't keep running."
+                : "This version is too old to keep running. Updating is the way on."}
+            </p>
+            <p className="gate-note">
+              You have <strong>{gate.installed}</strong>
+              {gate.required ? (
+                <>
+                  {" — the current version is "}
+                  <strong>{gate.required}</strong>
+                </>
+              ) : null}
+              .
+            </p>
+            <div className="gate-actions">
+              {/* The address comes from the platform and only from the
+                  platform, the same rule provider keys follow: a guessed
+                  download link is a button that looks right and lands
+                  somewhere that cannot help. No link, no button. */}
+              {gate.downloadUrl ? (
+                <a
+                  className="primary-button"
+                  href={gate.downloadUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Download the update
+                </a>
+              ) : null}
+              {gate.notesUrl ? (
+                <a className="ghost-button" href={gate.notesUrl} target="_blank" rel="noreferrer">
+                  What changed
+                </a>
+              ) : null}
+            </div>
+            {gate.downloadUrl ? null : (
+              // Refused with nowhere to send them. Rare, and it must still say
+              // something a person can act on rather than leaving a dead panel.
+              <p className="gate-note">
+                Email <strong>support@buildnlaunchai.com</strong> for the current version.
+              </p>
+            )}
+          </>
+        );
+      }
+
       // Restoring a saved session. Deliberately quiet — a decisive-looking
       // message here would flash "signed out" at somebody who is signed in.
       case "checking":

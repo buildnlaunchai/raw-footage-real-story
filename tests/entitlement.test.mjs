@@ -405,3 +405,35 @@ test("the gate ships off unless something says otherwise, exactly", () => {
   }
   assert.equal(enabled("on"), true);
 });
+
+// A refused build blocks the application as hard as a refused account does.
+//
+// Pinned because `letsAppRender` is an allow-list, and the failure mode of an
+// allow-list is somebody adding a state to it while tidying. If
+// "update-required" ever appears in that list, the update gate stops gating
+// and nothing else in the suite notices.
+test("an update-required build renders no application and starts no work", () => {
+  const gate = {
+    state: "update-required",
+    reason: "too-old",
+    installed: "0.2.0",
+    required: "0.3.0",
+    downloadUrl: "https://example.com/download",
+    notesUrl: null,
+  };
+  assert.equal(letsAppRender(gate), false);
+  assert.equal(allowsNewProjects(gate), false);
+});
+
+test("a withdrawn build is refused on the same terms as an outdated one", () => {
+  const gate = {
+    state: "update-required",
+    reason: "withdrawn",
+    installed: "0.4.1",
+    required: null,
+    downloadUrl: null,
+    notesUrl: null,
+  };
+  assert.equal(letsAppRender(gate), false);
+  assert.equal(allowsNewProjects(gate), false);
+});

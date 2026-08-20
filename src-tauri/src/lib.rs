@@ -73,6 +73,7 @@ pub fn run() {
             platform::auth_current,
             platform::auth_licence,
             platform::auth_cached_licence,
+            platform::desktop_version_state,
             ollama::ollama_generate,
             ollama::ollama_health,
             tts::tts_list_voices,
