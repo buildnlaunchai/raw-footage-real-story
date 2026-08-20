@@ -6,15 +6,25 @@ v0.3.0.
 
 **Status: backlog, blocked on legal review.** Nothing here has been built and
 nothing should be, until counsel has answered the questions in
-[Questions for counsel](#questions-for-counsel).
+[Memo for counsel](#memo-for-counsel).
 
 Updated 21 August 2026 with [§7](#7-route-c-examined-os-native-encoders), a
 detailed examination of Route C — calling the operating system's own H.264
 encoder instead of redistributing any codec. **Route C is the recommended
-direction**, and it removes two of the three legal questions rather than all
-three. It also surfaces a fourth question nobody had asked: bundling ffmpeg
-means shipping an HEVC *decoder*, which has its own patent pool and is
-unavoidable for this app's input footage.
+direction**, and Route C on macOS has now been built and measured
+([§7.7](#77-the-build-as-built)). It is a build-and-measure exercise: the
+binary is not going into an installer, and the branch is not merged or tagged,
+until counsel has answered.
+
+**Two questions are open, and they are not equally understood.** Route C
+removes two of the original three legal questions and leaves the AVC
+field-of-use one, which the product already faces today. It also surfaces a
+question nobody had asked, and which applies to every route: bundling ffmpeg
+means shipping an **HEVC decoder**, which has its own patent pools and is
+unavoidable for this app's input footage. That one is newly-created exposure,
+not pre-existing, which is why it is treated as the more serious of the two.
+Both are set out in full in the [memo for counsel](#memo-for-counsel), which is
+written to be read on its own.
 
 ---
 
@@ -41,6 +51,22 @@ creates the exposure.
 OpenH264 is interesting because Cisco pays the pool on behalf of redistributors
 of its compiled binary. That offer has conditions, and the first one rules out
 bundling.
+
+### And the encoder is only half of it
+
+**Bundling ffmpeg also means shipping an HEVC *decoder*, and that is the
+exposure this project would be newly creating rather than inheriting.**
+
+Every route in this document — A, B and C alike — has to decode HEVC, because
+that is what phones record: 107 of the 145 clips in the development library.
+Access Advance licenses HEVC decoders "installed in devices or software at the
+time of First Sale" and says a licence is most likely needed by anyone selling
+products with HEVC decoding functionality.
+
+The AVC question is one the product already lives with, since the app already
+encodes H.264 through the user's own ffmpeg. **The HEVC question is not.** Both
+are in the [memo for counsel](#memo-for-counsel); if only one of them gets
+attention, it should be this one. See [§7.4](#74-the-problem-route-c-does-not-solve-hevc-decode).
 
 ---
 
@@ -304,7 +330,7 @@ plausibly keeps Cisco's coverage intact, and it is a very different download
 from today's: a couple of megabytes, automatic, with a progress bar — not "open
 a terminal and paste a brew command". Costs: a download step still technically
 exists, the conditions about enable/disable and attribution must be honoured,
-and the linkage question in [Questions for counsel](#questions-for-counsel)
+and the linkage question in [Memo for counsel](#memo-for-counsel)
 needs answering.
 
 ### Route C — no third-party H.264 encoder at all
@@ -466,7 +492,7 @@ precise about what Route C does and does not remove.
   it settles it permanently.
 - **Cisco's condition 1.** Moot — nothing of Cisco's is redistributed, so there
   is no binary-licence condition to satisfy or breach.
-- **[Counsel question 2](#questions-for-counsel)**, the dlopen-versus-link
+- **[the Cisco linkage question](#questions-we-are-no-longer-asking)**, the dlopen-versus-link
   question. Moot for the same reason.
 
 **Not removed:** the AVC field-of-use clause — counsel question 1 — survives
@@ -634,52 +660,304 @@ licensing one, and it should be made deliberately rather than by drift.
 
 ---
 
-## Questions for counsel
+## 7.7 The build, as built
 
-**Under Route C, questions 2 and 3 fall away and question 4 is added.** The
-live set is **1 and 4**. All are quoted from primary sources above.
+Added 21 August 2026, on branch `ffmpeg-minimal-macos`. **Built and measured,
+not shipped** — nothing here goes into an installer, and the branch is not
+merged or tagged, until the [memo for counsel](#memo-for-counsel) is answered.
 
-**1. The field-of-use clause, as it applies to a paid product with monetising
-users.** The AVC Patent Portfolio Licence grants rights "FOR THE PERSONAL USE
-OF A CONSUMER OR OTHER USES IN WHICH IT DOES NOT RECEIVE REMUNERATION". It is
-not clear whether "it" is the software distributor or the end user, and it
-matters twice over here: this is a paid subscription product, and its users
-make videos some of them will monetise. The working reading is that the clause
-constrains the *use of the encoded video* rather than whether the software was
-sold — which is why paid products ship H.264 routinely — but that reading is
-not confident enough to rely on.
+Reproduce with `./scripts/build-ffmpeg-macos.sh`.
 
-**2. Whether an app-initiated download of Cisco's module satisfies condition 1,
-given that ffmpeg links rather than dlopens it.** Cisco's model assumes the
-binary module is loaded dynamically at runtime. ffmpeg's `libopenh264` wrapper
-links against it at build time; an ffmpeg developer notes this explicitly in
-the [2023 thread dropping the runtime version
-checks](https://ffmpeg.org/pipermail/ffmpeg-devel/2023-December/318013.html),
-describing dlopen as "what one has to do to take advantage of Cisco's patent
-offer". A downloaded Cisco dylib can be dropped into place to satisfy the
-dynamic link, but whether that arrangement satisfies Cisco's terms as written
-is a legal question, not an engineering one.
+### What it is
 
-**3. ~~Whether relying on OS-provided encoders carries the patent coverage
-people assume it does.~~** *Answered in [§7.3](#73-does-this-eliminate-the-need-for-legal-review-no--it-halves-it),
-and the answer is no.* Both Apple and Microsoft pass the consumer field-of-use
-restriction through in their own licence terms rather than absorbing it —
-Apple states outright that "commercial use of H.264/AVC requires additional
-licensing", and Microsoft that "no license is granted or shall be implied for
-any other use". This does not make Route C unworkable; it collapses this
-question into question 1, which is where it belongs.
+ffmpeg 8.1.2, `aarch64-apple-darwin`, configured `--disable-everything
+--disable-gpl --disable-nonfree --disable-version3`, with VideoToolbox and a
+statically-linked WTFPL libzimg. Shared libraries with an `@rpath` install
+name, so it relocates into a bundle and satisfies LGPL relinking by file layout
+rather than by paperwork (§3).
 
-**4. Whether bundling an HEVC decoder requires a licence from the HEVC pools.**
-New, raised by [§7.4](#74-the-problem-route-c-does-not-solve-hevc-decode), and
-it applies to *every* route rather than only to Route C. Our input footage is
-HEVC and any bundled ffmpeg must decode it. Access Advance licenses "HEVC
-Decoders and/or HEVC Encoders installed in devices or software at the time of
-First Sale" and states that a licence is most likely needed by anyone selling
-"products that have HEVC/H.265 […] decoding capability/functionality". Unlike
-question 1, this is exposure the product does not have today and would be
-newly creating. Ask alongside: whether decoding exclusively through the OS's
-own hardware decoder, with ffmpeg's native HEVC decoder compiled out, changes
-the answer.
+| | |
+|---|---|
+| **Total size** | **7.3 MB** (0.6 MB binaries + 6.7 MB libraries) |
+| H.264 encoder | `h264_videotoolbox` — the only one present |
+| GPL components | none. No libx264, libx265 or OpenH264 in the binary |
+| External linkage | system frameworks only. zimg is inside; nothing from Homebrew |
+
+That is **under §5's 10–16 MB estimate**, and against the 124 MB of resources
+the installer already carries it is a ~6% increase.
+
+### That it works
+
+- **The app's own Rust suite: 233 of 234 pass** driving the minimal binary via
+  `FFMPEG_PATH`. The one failure is
+  `explicit_choice_is_never_overridden_by_a_more_capable_build`, which asserts
+  that an explicitly-configured path is honoured — and `FFMPEG_PATH` is by
+  design the thing that outranks an explicit setting, so setting it to run the
+  suite is what breaks that test. It passes on its own. Not a build defect.
+- **No regression for anyone on a normal ffmpeg: 234 of 234** against Homebrew
+  `ffmpeg-full`, unchanged.
+- **HDR tone-mapping verified end to end** on real HLG footage from the
+  library, through the app's own filter chain:
+
+| | luma | saturation |
+|---|---|---|
+| ffmpeg-full + libx264 (today) | 110.1 | 0.056 |
+| **minimal build + VideoToolbox** | **110.0** | **0.056** |
+| minimal build, tone-map removed | 111.3 | 0.046 |
+
+  The first two are the same picture. The third is there to show the filter is
+  doing something — 0.046 against 0.056 is the washed-out HDR this project has
+  spent effort avoiding. Output is High profile `yuv420p` in both cases, and at
+  `-q:v 65` the VideoToolbox file was *smaller* (5.6 MB against 6.2 MB).
+
+### What the build taught us that the paper analysis did not
+
+Four things, all of which cost real time and none of which were visible from
+reading:
+
+1. **ffmpeg cannot build under a path containing spaces**, and this checkout
+   lives under `BuildnLaunchAI - Apps/Raw Footage Real Story`, which has three.
+   configure fails with clang complaining about a file called `Apps/Raw`. The
+   script now builds outside the repo and rejects a spaced path up front.
+2. **Statically linking zimg needs `-lc++` in the `.pc` file's `Libs`**, not
+   `Libs.private` where Homebrew puts it — ffmpeg link-tests with `Libs` alone.
+   The failure message is `zimg >= 2.7.0 not found using pkg-config`, which
+   points at detection when the problem is the C++ runtime.
+3. **The derived component list was wrong in three places.** §6 said to verify
+   it mechanically; this is what that warning was worth. Missing were
+   `wrapped_avframe` (the codec the lavfi device wraps frames in — named in no
+   command line anywhere), `acrossfade` and `asplit` (invisible to a grep for
+   `filtername=`), and the **matroska muxer** (enabled as a demuxer only). Each
+   surfaced as a different unhelpful error: "no decoder found", "Filter not
+   found", "Error initializing the muxer".
+4. **The app's test suite could not validate a non-GPL build at all**, because
+   it generates its own fixtures with `-c:v libx264`. Twenty-two tests failed
+   for a reason unrelated to what they test. That would have blocked Route C at
+   CI regardless of how the legal question resolved.
+
+### App changes on this branch — and what they are not
+
+Small and deliberately conservative, made so the build could be exercised:
+
+- `ffmpeg::h264_encoder()` and `has_encoder()` ask the binary what it has.
+- `make_placeholder` and the test fixtures use whatever encoder exists.
+- `h264_args()` picks the render encoder: **libx264 keeps precisely the
+  settings it has today** (`-preset veryfast -crf 20`), so anyone on a Homebrew
+  ffmpeg sees no change at all; VideoToolbox is used only when there is no
+  x264, at `-q:v 65 -profile:v high -coder cabac`.
+
+**This is not Route C implemented.** There is no Windows encoder path, no
+probe-and-fallback chain, and `-q:v 65` is calibrated on three clips (§7.2) and
+should not be shipped on that evidence. It is the smallest change that makes
+the app run against a build with no GPL encoder in it.
+
+---
+
+## 7.8 What `--disable-everything` costs the user
+
+**This is the risk the licence and size analysis both missed**, and it is not
+small.
+
+| | video decoders | audio decoders | demuxers |
+|---|---|---|---|
+| Homebrew `ffmpeg-full` (what users install today) | 276 | 241 | 364 |
+| **This minimal build** | **8** | **7** | **12** |
+
+Today the app inherits all 276 for free, because the user installs a
+general-purpose ffmpeg. A bundled minimal build decodes exactly what we
+anticipated, and **refuses everything else**.
+
+Formats a real user of a footage app might plausibly hand it, all of which work
+today and none of which this build accepts:
+
+- **VP8 / VP9** — WebM, screen recordings, anything downloaded
+- **AV1** — increasingly what phones and platforms produce
+- **MPEG-4 part 2 (DivX/Xvid)** — old camcorder AVI. The test suite has a case
+  for exactly this, which now skips
+- **GoPro CineForm, DNxHD** — worth noticing for an app about raw footage
+- **VC-1 / WMV3, DV, Theora, Sorenson** — older libraries
+- Audio: **AC-3, DTS, FLAC, Opus, Vorbis, ALAC, WMA** — a clip whose video
+  decodes but whose audio does not still loses its sound
+
+**And it is in direct tension with §4.** The security argument for a minimal
+build is that the MagicYUV decoder we never compiled in cannot expose us to
+CVE-2026-8461. That argument and the coverage problem are *the same dial*:
+every decoder added to widen format support widens the CVE surface we would
+then be responsible for patching.
+
+**A middle path exists.** Enabling ffmpeg's full in-tree decoder set — all
+LGPL, no external libraries, no GPL — restores most of that coverage for a few
+megabytes. It does not reintroduce any copyright problem. It does add more
+patent-pooled decoders (VC-1 and MPEG-4 part 2 have pools of their own), which
+feeds straight back into question 2 of the memo.
+
+**Unmeasured, and it matters:** how often real users actually have footage
+outside H.264/HEVC. Every one of the 145 clips in the development library is
+one or the other, which is evidence — but it is one person's phone, and an app
+that silently refuses a file a competitor opens is a support problem before it
+is a licensing one.
+
+The point is that the decoder list should be **chosen deliberately**, weighing
+coverage against CVE surface and patent exposure, rather than inherited from
+whatever made the tests pass.
+
+---
+
+## Memo for counsel
+
+**This section is self-contained.** Everything needed to answer the two
+questions is in it; the rest of the document is engineering background and does
+not need to be read first.
+
+**On the quotations below.** They were gathered from vendor licence pages and
+patent-pool sites during research and are reproduced verbatim as found.
+Two of the primary documents could not be retrieved directly during that work
+(Apple's SLA PDF failed to fetch; ffmpeg.org publishes no checksum file for the
+release we build). **Counsel should pull the current primary documents rather
+than rely on these excerpts** — the wording is version-dated and both vendors
+revise it.
+
+---
+
+### The product, and what would change
+
+Raw Footage, Real Story is a **paid-subscription desktop application** for
+macOS and Windows. It turns a user's own phone footage into a narrated short
+film. The footage never leaves the user's machine; the finished film is written
+to their disk as an H.264/AAC MP4.
+
+**What we distribute today:** no video codec of any kind. The app requires the
+user to install ffmpeg themselves (`brew install ffmpeg-full` /
+`winget install Gyan.FFmpeg`) and shells out to that binary. Every H.264
+encode and HEVC decode happens in software the user obtained independently.
+
+**What is proposed:** bundle our own ffmpeg build inside the installer, to
+remove that setup step. The build would contain:
+
+| | |
+|---|---|
+| ffmpeg itself | LGPL 2.1, no GPL components |
+| libzimg | WTFPL, for HDR tone-mapping |
+| **No H.264 encoder implementation** | encoding calls `h264_videotoolbox` on macOS / Media Foundation on Windows — the encoder already in the operating system |
+| **An HEVC decoder** | ffmpeg's own, in-tree, LGPL. Unavoidable: modern iPhones record HEVC, and 107 of the 145 clips in our development library are HEVC |
+
+The two questions below are the only ones blocking that change. We will not
+ship anything until they are answered.
+
+---
+
+### Question 1 — Does the AVC field-of-use restriction reach us?
+
+Both operating-system vendors ship H.264 encoders and both **pass a consumer
+field-of-use restriction through to whoever uses them**, rather than absorbing
+it. We had assumed the opposite, which is why this question exists.
+
+**Apple, macOS Software Licence Agreement:**
+
+> To the extent that the Apple Software contains AVC encoding and/or decoding
+> functionality, commercial use of H.264/AVC requires additional licensing […]
+> LICENSED HEREIN ONLY FOR THE PERSONAL AND NON-COMMERCIAL USE OF A CONSUMER TO
+> (i) ENCODE VIDEO IN COMPLIANCE WITH THE AVC STANDARD ("AVC VIDEO") AND/OR
+> (ii) DECODE AVC VIDEO THAT WAS ENCODED BY A CONSUMER ENGAGED IN A PERSONAL
+> AND NON-COMMERCIAL ACTIVITY.
+
+**Microsoft, Windows licence terms:**
+
+> THIS PRODUCT IS LICENSED UNDER THE AVC, THE VC-1, AND THE MPEG-4 PART 2
+> VISUAL PATENT PORTFOLIO LICENSES FOR THE PERSONAL AND NON-COMMERCIAL USE OF A
+> CONSUMER TO (i) ENCODE VIDEO IN COMPLIANCE WITH THE ABOVE STANDARDS […]
+> **NO LICENSE IS GRANTED OR SHALL BE IMPLIED FOR ANY OTHER USE.**
+
+The same restriction appears in the AVC Patent Portfolio Licence itself, in the
+form quoted in Cisco's OpenH264 binary licence:
+
+> FOR THE PERSONAL USE OF A CONSUMER OR OTHER USES IN WHICH IT DOES NOT RECEIVE
+> REMUNERATION.
+
+**What we need to know:**
+
+1. Does "personal and non-commercial use of a consumer" describe **the use of
+   the encoded video**, or **the character of the software that performs the
+   encoding**? We sell a subscription; our users encode their own footage, and
+   some of them will monetise the result on YouTube or similar.
+2. If it describes the video's use, does the fact that some users monetise
+   their output create an obligation for **them**, for **us**, or for neither?
+3. Does our position differ from the status quo? Today the app already produces
+   H.264 through the user's own ffmpeg. Our reading is that bundling changes
+   *who supplies the encoder* but not *what the user does with the output* —
+   and under the proposal the encoder is Apple's or Microsoft's either way.
+
+**Our working reading, which we are not relying on:** that the clause
+constrains the use of the video rather than the sale of the software, which is
+why paid video tools — Final Cut Pro, DaVinci Resolve, Camtasia, ScreenFlow —
+ship H.264 export through these same OS APIs as a matter of course. That is an
+observation about industry practice and we are treating it as worth exactly
+nothing until you tell us otherwise.
+
+---
+
+### Question 2 — Does bundling an HEVC *decoder* require a pool licence?
+
+**This is the question we consider more serious**, because unlike question 1 it
+is not something the product already lives with. Today we ship no decoder. The
+proposal would create this exposure where none exists.
+
+Our input footage is HEVC — that is what modern iPhones record, and it is 107
+of 145 clips in our development library. Any bundled ffmpeg must be able to
+decode it.
+
+**Access Advance, administrator of the HEVC Advance pool, on what it licenses:**
+
+> HEVC Advance is primarily focused on licensing HEVC Decoders and/or HEVC
+> Encoders installed in devices **or software** at the time of First Sale,
+> seeking to be paid one royalty per device/software copy on First Sale.
+
+> You most likely need a license if you sell any products that have HEVC/H.265
+> and/or VVC/H.266 encoding and/or **decoding** capability/functionality.
+
+**What we need to know:**
+
+1. Taken at face value, does shipping ffmpeg's HEVC decoder inside a paid
+   product require a licence from Access Advance, from Via LA's HEVC programme,
+   or from both? HEVC is licensed by multiple pools plus unpooled holders,
+   which is the part we are least equipped to assess.
+2. **Does it change the answer if we never ship a decoder implementation?** We
+   can build ffmpeg with its native HEVC decoder compiled out and decode
+   exclusively through the operating system's own hardware decoder
+   (VideoToolbox on macOS, D3D11VA on Windows) — the same structural move
+   question 1 describes for the encoder. This costs us engineering effort and a
+   fallback path, so we would like to know whether it actually helps before
+   building it.
+3. Is there a threshold — unit volume, revenue — below which no licence is
+   required, and if so what reporting does staying under it involve?
+
+---
+
+### Questions we are no longer asking
+
+Recorded so it is clear they were considered and dropped, not overlooked:
+
+- **Cisco's OpenH264 redistribution conditions.** An earlier proposal used
+  Cisco's OpenH264 binary, whose royalty coverage requires that the binary be
+  "separately downloaded to an end user's device, and not integrated into or
+  combined with third party software prior to being downloaded". Bundling fails
+  that condition. That route is shelved, so the question is moot.
+- **Whether ffmpeg linking rather than `dlopen`-ing OpenH264 satisfies Cisco's
+  terms.** Moot for the same reason.
+- **Whether the OS vendors license AVC on our behalf.** Asked and effectively
+  answered by the quotations in question 1: they do not, they pass the
+  restriction through. It has collapsed into question 1.
+
+---
+
+### What we will do with the answer
+
+Nothing ships until both are answered. If either answer is "you need a
+licence", that is actionable — we would rather buy one, change the design, or
+abandon the bundling plan than proceed on an assumption. The specific decision
+waiting on you is whether to put a built-and-tested macOS binary into an
+installer; the binary exists, and it is not going anywhere until this is
+resolved.
 
 ---
 
@@ -691,9 +969,11 @@ In order:
    [§7.2](#72-quality--measured-against-the-apps-own-settings). Within half a
    VMAF point of x264 at the settings the app ships. Still outstanding for
    OpenH264 and for everything on Windows.*
-2. **Build the minimal macOS ffmpeg** (§6 plus `--enable-videotoolbox`). No
-   open copyright question, encoder already measured, and it converts the size
-   estimate and the component list into facts.
+2. ~~**Build the minimal macOS ffmpeg.**~~ *Done — see
+   [§7.7](#77-the-build-as-built). 7.3 MB, 233/234 of the app's own tests, HDR
+   tone-mapping identical to today's output. It also surfaced
+   [§7.8](#78-what---disable-everything-costs-the-user), the format-coverage
+   problem, which is now an open design question in its own right.*
 3. **Send counsel questions 1 and 4.** Question 4 — the HEVC decoder — is the
    new one and applies whichever route wins.
 4. **Measure the Windows encoder chain on real hardware** before deciding

@@ -11,6 +11,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::process::Stdio;
 
 use crate::timeline::{Fit, TimelineItem};
 
@@ -707,16 +708,86 @@ pub fn make_placeholder(
     fps: u32,
 ) -> Result<(), FfmpegError> {
     let secs = duration_ms as f64 / 1000.0;
+    let enc = h264_encoder(ffmpeg)
+        .ok_or_else(|| FfmpegError::new("NO_H264_ENCODER", "this ffmpeg has no H.264 encoder"))?;
     run(
         Command::new(ffmpeg).args([
             "-y", "-v", "error",
             "-f", "lavfi",
             "-i", &format!("color=c={color}:s={width}x{height}:r={fps}:d={secs}"),
-            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-t", &secs.to_string(),
+            "-c:v", enc, "-pix_fmt", "yuv420p", "-t", &secs.to_string(),
         ]).arg(out),
         "generate placeholder",
     )?;
     Ok(())
+}
+
+/// The video-encoding arguments for a final render, for whichever H.264
+/// encoder this build has.
+///
+/// x264 keeps exactly the settings it always had, so a user on a Homebrew
+/// ffmpeg sees no change whatsoever. VideoToolbox is the branch that exists for
+/// `scripts/build-ffmpeg-macos.sh`, whose whole point is to contain no GPL
+/// encoder.
+///
+/// `-crf` does not survive the crossing: it is an x264 concept and VideoToolbox
+/// has no equivalent spelling. `-q:v 65` is the measured stand-in — see
+/// docs/ffmpeg-bundling-research.md §7.2, where it reached or beat x264's VMAF
+/// on all three test clips. It is calibrated on three clips and should be
+/// re-checked against more footage before anybody ships it.
+///
+/// `-preset` is deliberately absent from the VideoToolbox branch: it has no
+/// such option and rejects it rather than ignoring it.
+fn h264_args(ffmpeg: &str) -> Vec<String> {
+    let owned = |v: &[&str]| v.iter().map(|s| s.to_string()).collect();
+    match h264_encoder(ffmpeg) {
+        Some("h264_videotoolbox") => owned(&[
+            "-c:v", "h264_videotoolbox",
+            "-q:v", "65",
+            "-profile:v", "high",
+            "-coder", "cabac",
+        ]),
+        Some(other) if other != "libx264" => owned(&["-c:v", other, "-b:v", "12M"]),
+        // libx264, or nothing found — in which case ffmpeg will say so far more
+        // clearly than a guess made here would.
+        _ => owned(&["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"]),
+    }
+}
+
+/// An H.264 encoder this build actually has, preferring the one the app ships
+/// with today.
+///
+/// `libx264` stopped being a given the moment there was a build without it.
+/// `scripts/build-ffmpeg-macos.sh` produces one deliberately — no GPL encoder
+/// at all, H.264 via VideoToolbox — and every test that generates its own
+/// fixtures failed against it, twenty-two of them, for a reason that had
+/// nothing to do with what they were testing.
+///
+/// Asked of the binary rather than assumed. The order is the order of
+/// preference: x264 where it exists, because that is what the app still
+/// encodes with and fixtures should look like real input; then the platform
+/// encoder; then OpenH264 if some future build carries it.
+pub fn h264_encoder(ffmpeg: &str) -> Option<&'static str> {
+    let out = Command::new(ffmpeg)
+        .args(["-hide_banner", "-encoders"])
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    ["libx264", "h264_videotoolbox", "libopenh264"]
+        .into_iter()
+        .find(|e| text.contains(e))
+}
+
+/// Whether this build can encode `codec` at all. For fixtures that deliberately
+/// exercise a legacy format the app might be handed.
+pub fn has_encoder(ffmpeg: &str, codec: &str) -> bool {
+    Command::new(ffmpeg)
+        .args(["-hide_banner", "-encoders"])
+        .stderr(Stdio::null())
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains(codec))
+        .unwrap_or(false)
 }
 
 #[derive(Debug, Clone)]
@@ -1369,9 +1440,9 @@ pub fn render_rough_cut(
     cmd.args(["-filter_complex_threads", "2"])
         .arg(filter_script_flag(caps))
         .arg(&script);
+    cmd.args(["-map", &vout, "-map", &aout]);
+    cmd.args(h264_args(ffmpeg));
     cmd.args([
-        "-map", &vout, "-map", &aout,
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
         // yuv420p is not optional: without it QuickTime and browsers refuse
         // otherwise-valid H.264 files.
         "-pix_fmt", "yuv420p",
@@ -1568,7 +1639,8 @@ pub fn render_intro(
         .arg(filter_script_flag(caps))
         .arg(&script);
     cmd.args(["-map", "[outv]", "-map", "[outa]"]);
-    cmd.args(["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p"]);
+    cmd.args(h264_args(ffmpeg));
+    cmd.args(["-pix_fmt", "yuv420p"]);
     cmd.args(["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"]);
     cmd.arg(out);
 

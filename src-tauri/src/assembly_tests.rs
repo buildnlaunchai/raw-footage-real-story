@@ -253,19 +253,26 @@ fn handles_awkward_sources_and_normalises_them() {
         expect_warning: Option<&'static str>,
     }
 
-    let cases = vec![
+    // Whatever this build can encode with. The suite hardcoded libx264 and so
+    // could not validate a build without one — which is exactly what
+    // `scripts/build-ffmpeg-macos.sh` produces. `-preset ultrafast` went with
+    // it: VideoToolbox has no such option and rejects it outright, and it only
+    // ever affected how fast the fixture was made, never what is asserted.
+    let enc = ffmpeg::h264_encoder(&fx.ffmpeg).expect("some H.264 encoder");
+
+    let mut cases = vec![
         Case {
             name: "4K 60fps",
             file: "4k60.mp4",
             args: vec!["-f", "lavfi", "-i", "color=0x2244AA:s=3840x2160:r=60:d=2",
-                       "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-t", "2"],
+                       "-c:v", enc, "-pix_fmt", "yuv420p", "-t", "2"],
             expect_warning: Some("large"),
         },
         Case {
             name: "silent 720p",
             file: "noaudio.mp4",
             args: vec!["-f", "lavfi", "-i", "color=0x44AA22:s=1280x720:r=30:d=2",
-                       "-c:v", "libx264", "-pix_fmt", "yuv420p", "-t", "2"],
+                       "-c:v", enc, "-pix_fmt", "yuv420p", "-t", "2"],
             expect_warning: Some("No audio"),
         },
         Case {
@@ -273,38 +280,48 @@ fn handles_awkward_sources_and_normalises_them() {
             file: "withaudio.mp4",
             args: vec!["-f", "lavfi", "-i", "color=0xAA4422:s=1280x720:r=30:d=2",
                        "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
-                       "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-t", "2"],
-            expect_warning: None,
-        },
-        Case {
-            name: "AVI / mpeg4 / 4:3",
-            file: "old.avi",
-            args: vec!["-f", "lavfi", "-i", "color=0xAA22AA:s=640x480:r=25:d=2",
-                       "-c:v", "mpeg4", "-vtag", "DIVX", "-t", "2"],
+                       "-c:v", enc, "-pix_fmt", "yuv420p", "-c:a", "aac", "-t", "2"],
             expect_warning: None,
         },
         Case {
             name: "Matroska",
             file: "clip.mkv",
             args: vec!["-f", "lavfi", "-i", "color=0x22AAAA:s=1920x1080:r=30:d=2",
-                       "-c:v", "libx264", "-pix_fmt", "yuv420p", "-t", "2"],
+                       "-c:v", enc, "-pix_fmt", "yuv420p", "-t", "2"],
             expect_warning: None,
         },
         Case {
             name: "native portrait",
             file: "portrait.mp4",
             args: vec!["-f", "lavfi", "-i", "color=0xAAAA22:s=1080x1920:r=30:d=2",
-                       "-c:v", "libx264", "-pix_fmt", "yuv420p", "-t", "2"],
+                       "-c:v", enc, "-pix_fmt", "yuv420p", "-t", "2"],
             expect_warning: None,
         },
         Case {
             name: "120fps",
             file: "highfps.mp4",
             args: vec!["-f", "lavfi", "-i", "color=0xFF00FF:s=1280x720:r=120:d=2",
-                       "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-t", "2"],
+                       "-c:v", enc, "-pix_fmt", "yuv420p", "-t", "2"],
             expect_warning: Some("fps"),
         },
     ];
+
+    // Legacy DIVX AVI, only when this build can still make one. A minimal
+    // build has no mpeg4 encoder — and, more to the point, no mpeg4 *decoder*
+    // either, so a user importing footage like this would be refused. That is
+    // a real consequence of `--disable-everything`, recorded in
+    // docs/ffmpeg-bundling-research.md §7.8 rather than papered over here.
+    if ffmpeg::has_encoder(&fx.ffmpeg, "mpeg4") {
+        cases.push(Case {
+            name: "AVI / mpeg4 / 4:3",
+            file: "old.avi",
+            args: vec!["-f", "lavfi", "-i", "color=0xAA22AA:s=640x480:r=25:d=2",
+                       "-c:v", "mpeg4", "-vtag", "DIVX", "-t", "2"],
+            expect_warning: None,
+        });
+    } else {
+        println!("  (no mpeg4 encoder in this build; skipping the legacy AVI case)");
+    }
 
     println!("\n  validation:");
     let mut sources = Vec::new();
@@ -389,7 +406,17 @@ fn handles_awkward_sources_and_normalises_them() {
 
     // The 4:3 and portrait sources must be padded, never cropped: a letterboxed
     // frame has black at the edge where a cropped one would still show content.
-    for (idx, label) in [(3usize, "4:3 AVI"), (5, "portrait")] {
+    // Looked up by name, not by hardcoded position. The legacy AVI case is
+    // conditional now — a build with no mpeg4 encoder skips it — and fixed
+    // indices silently pointed at the Matroska clip instead, asserting
+    // pillarboxing on a source that is already 16:9 and failing for a reason
+    // that had nothing to do with the code under test.
+    let by_name = |name: &str| cases.iter().position(|c| c.name == name);
+    let targets: Vec<(usize, &str)> = [("AVI / mpeg4 / 4:3", "4:3 AVI"), ("native portrait", "portrait")]
+        .into_iter()
+        .filter_map(|(case, label)| by_name(case).map(|i| (i, label)))
+        .collect();
+    for (idx, label) in targets {
         let mid = items[idx].timeline_start_ms + items[idx].timeline_duration_ms / 2;
         let edge = ffmpeg::frame_rgb_region(&fx.ffmpeg, &out, mid, 0, 0, 60, 1080).expect("edge");
         let centre = ffmpeg::frame_rgb_region(&fx.ffmpeg, &out, mid, 900, 440, 120, 200)
@@ -1148,8 +1175,13 @@ fn capture_time_is_read_and_is_the_order_things_happened() {
         .enumerate()
     {
         let path = fx.dir.join(format!("shot{i}.mp4"));
+        // The encoder is named rather than left to the muxer's default. The
+        // default for mp4 is libx264, so omitting it worked only on builds that
+        // have one — "Encoder not found" on any build that does not.
+        let enc = ffmpeg::h264_encoder(&fx.ffmpeg).expect("some H.264 encoder");
         let status = std::process::Command::new(&fx.ffmpeg)
             .args(["-y", "-v", "error", "-f", "lavfi", "-i", "color=c=red:s=64x64:d=1", "-r", "30"])
+            .args(["-c:v", enc])
             .args(["-metadata", &format!("creation_time={stamp}")])
             .arg(&path)
             .status()
@@ -1192,11 +1224,12 @@ fn iso_timestamps_parse_to_the_right_instant() {
 fn clip_with_tone(fx: &Fixture, name: &str, colour: &str, ms: u64) -> PathBuf {
     let path = fx.dir.join(format!("{name}.mp4"));
     let secs = ms as f64 / 1000.0;
+    let enc = ffmpeg::h264_encoder(&fx.ffmpeg).expect("some H.264 encoder");
     let status = std::process::Command::new(&fx.ffmpeg)
         .args(["-y", "-v", "error"])
         .args(["-f", "lavfi", "-i", &format!("color=c={colour}:s=320x180:d={secs}:r=30")])
         .args(["-f", "lavfi", "-i", &format!("sine=frequency=440:duration={secs}")])
-        .args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest"])
+        .args(["-c:v", enc, "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest"])
         .arg(&path)
         .status()
         .expect("make clip with tone");
