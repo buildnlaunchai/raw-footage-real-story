@@ -11,6 +11,11 @@ dist
 dist-ssr
 *.local
 
+# The release workflow's gate check builds two control bundles here and
+# deletes them again. It only survives a run that failed early, which is
+# exactly when somebody is running the check by hand to find out why.
+.gate-check/
+
 # Logs
 logs
 *.log

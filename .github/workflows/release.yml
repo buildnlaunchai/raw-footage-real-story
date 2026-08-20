@@ -334,6 +334,104 @@ jobs:
 
           "$exe" --selftest
 
+      # ─────────────────────────────────────────────────────────────────────
+      # The gate, proven from the artifact instead of from this file.
+      #
+      # `VITE_AUTH_GATE: "on"` above is a claim. Every way it can quietly stop
+      # being true fails *open*: bare `on` read as YAML 1.1 arrives as "true",
+      # a typo arrives as itself, a stray `.env` shadows the environment — and
+      # `AUTH_GATE_ENABLED` accepts none of them, so the build goes green, the
+      # installers verify, the release drafts, and the app opens for whoever
+      # runs it. Nothing else in this workflow looks at the frontend bundle.
+      #
+      # Differential rather than a pinned hash, which would go stale on the
+      # next commit that touches the frontend. Vite names each chunk after a
+      # hash of its contents and Tauri embeds the frontend keyed by that name,
+      # so building this same tree twice more — once gated, once not — turns
+      # the question into two comparisons:
+      #
+      #   gated ≠ ungated    the flag still changes the output at all
+      #   shipped = gated    the binary carries the gated build
+      #
+      # The first is what keeps the second honest: take the gate out and a
+      # check that only asked "is this not the ungated bundle?" passes forever.
+      #
+      # Enforced on tags, reported on dispatch. Building without the gate for a
+      # tester who cannot sign in is a documented thing to do; releasing that
+      # way is not.
+      - name: Verify the gate — the shipped bundle is the gated build
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # What ships: the bundled binary where there is one, since that is
+          # what the dmg wraps, and the plain release binary otherwise. On
+          # macOS the two differ only by the ad-hoc signature — the embedded
+          # assets are the same bytes either way.
+          bin=$(find src-tauri/target -type f -path "*/bundle/*" \
+                  \( -name raw-footage-real-story -o -name raw-footage-real-story.exe \) | head -1)
+          # `release` pinned rather than assumed: rust-cache can restore a
+          # target/debug binary from an earlier run, and find would happily
+          # hand back that one instead.
+          [ -n "$bin" ] || bin=$(find src-tauri/target -type f -path "*/release/*" \
+                  \( -name raw-footage-real-story -o -name raw-footage-real-story.exe \) \
+                  -not -path "*/deps/*" -not -path "*/build/*" -not -path "*/incremental/*" | head -1)
+          [ -n "$bin" ] || { echo "::error::No application binary under src-tauri/target."; exit 1; }
+          echo "binary: $bin"
+
+          # The two controls. Same tree, same node_modules, one variable
+          # between them. Written beside dist/ rather than over it, because
+          # dist/ is what tauri-action has already embedded.
+          VITE_AUTH_GATE=on npx vite build --outDir .gate-check/on  --emptyOutDir >/dev/null
+          VITE_AUTH_GATE= npx vite build --outDir .gate-check/off --emptyOutDir >/dev/null
+
+          n=$(find .gate-check/on/assets -name 'index-*.js' | wc -l | tr -d ' ')
+          if [ "$n" != 1 ]; then
+            echo "::error::Expected one entry chunk, found $n — the frontend code-splits now, and this check has to compare a manifest rather than a single name."
+            exit 1
+          fi
+
+          gated=$(basename "$(find .gate-check/on/assets  -name 'index-*.js' | head -1)")
+          plain=$(basename "$(find .gate-check/off/assets -name 'index-*.js' | head -1)")
+          echo "gated build:   $gated"
+          echo "ungated build: $plain"
+
+          # A printable-runs dump of the binary, taken once.
+          #
+          # Cut into runs rather than matched in place, because BSD grep, GNU
+          # grep and whatever is on a contributor's PATH disagree about -a on
+          # a 40 MB file with almost no newlines in it. This is all `strings`
+          # does, via the one tool both runners are certain to have.
+          #
+          # Written to a file rather than piped, which is how the first draft
+          # of this check was wrong: `grep -q` closes the pipe on its first
+          # hit, tr dies of SIGPIPE, and `set -o pipefail` turns a successful
+          # match into a failed one — reporting a correctly gated build as
+          # unverifiable, which is a red release for no reason.
+          mkdir -p .gate-check
+          LC_ALL=C tr -c '[:print:]' '\n' < "$bin" > .gate-check/strings.txt
+          embeds() { grep -qF "$1" .gate-check/strings.txt; }
+
+          problem=""
+          if [ "$gated" = "$plain" ]; then
+            problem="VITE_AUTH_GATE no longer changes the bundle at all. Either AUTH_GATE_ENABLED stopped reading it or the gate is gone — until that is fixed this check proves nothing."
+          elif embeds "/assets/$plain"; then
+            problem="This build embeds the UNGATED bundle ($plain). VITE_AUTH_GATE did not reach vite as the exact string \"on\", and the app it produces opens without asking anybody to sign in."
+          elif ! embeds "/assets/$gated"; then
+            problem="The binary embeds neither control bundle, so what it does carry is unknown. Either the build does not reproduce here or Tauri's asset embedding changed shape — either way this check needs rewriting before it can be believed."
+          else
+            echo "OK — the shipped bundle is the gated build ($gated)."
+          fi
+
+          rm -rf .gate-check
+
+          if [ -n "$problem" ]; then
+            case "${GITHUB_REF:-}" in
+              refs/tags/*) echo "::error::$problem"; exit 1 ;;
+              *) echo "::warning::$problem (dispatch build, so reported rather than enforced)" ;;
+            esac
+          fi
+
       - uses: actions/upload-artifact@v4
         with:
           name: installers-${{ matrix.label }}
