@@ -13,7 +13,7 @@ normally.
 
 ## macOS
 
-**Which file:** `Raw Footage, Real Story_0.2.0_aarch64.dmg`
+**Which file:** `Raw Footage, Real Story_0.3.0_aarch64.dmg`
 
 **Apple Silicon only** — an M1, M2, M3 or M4 Mac, running macOS 11 or later.
 
@@ -57,7 +57,7 @@ Anyway" for it. Delete the app and download the `.dmg` again.
 
 ## Windows
 
-**Which file:** `Raw Footage, Real Story_0.2.0_x64-setup.exe` (about 87 MB)
+**Which file:** `Raw Footage, Real Story_0.3.0_x64-setup.exe` (about 87 MB)
 
 64-bit Windows 10 or 11. It installs for your user only, so it does **not** ask
 for an administrator password.

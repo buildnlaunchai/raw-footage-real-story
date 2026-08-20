@@ -231,6 +231,12 @@ jobs:
             required: scripts can be written locally through Ollama, and
             English narration uses the voices built into the app.
 
+            **This version checks that it is current when it starts.** A
+            build that has been retired — too old, or withdrawn because
+            something is wrong with it — says so and sends you here instead of
+            carrying on. It errs towards letting you work: no answer from us,
+            or an answer it cannot read, and it opens exactly as usual.
+
             Unsigned build. Your OS will warn you before it opens. See
             INSTALL.md for what the warning says and how to get past it —
             and because it is unsigned, macOS may not hand the app back its
