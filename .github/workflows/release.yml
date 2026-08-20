@@ -364,16 +364,30 @@ jobs:
         run: |
           set -euo pipefail
 
-          # What ships: the bundled binary where there is one, since that is
-          # what the dmg wraps, and the plain release binary otherwise. On
-          # macOS the two differ only by the ad-hoc signature — the embedded
-          # assets are the same bytes either way.
-          bin=$(find src-tauri/target -type f -path "*/bundle/*" \
-                  \( -name raw-footage-real-story -o -name raw-footage-real-story.exe \) | head -1)
+          # What gets checked: the release binary, before bundling.
+          #
+          # Not the copy inside the .app, because by the time this step runs
+          # there is no .app. Tauri's dmg bundler removes it once the dmg is
+          # packed — the build log says so outright:
+          #
+          #   Cleaning .../bundle/macos/Raw Footage, Real Story.app
+          #
+          # Windows has no such copy either: `bundle/` there holds the NSIS and
+          # MSI installers, never a file by this name. The first version of
+          # this check looked under `bundle/` first and fell through to here on
+          # both platforms, every time, without ever saying so.
+          #
+          # Equivalent regardless, which is why that branch was never missed.
+          # This is the exact file Tauri copies into the .app and then
+          # codesigns, and signing rewrites the signature, not the embedded
+          # assets. Confirmed by hand against the published v0.2.0 dmg: the
+          # .app binary inside it carries the same bundle name this check reads
+          # off the pre-bundle binary here.
+          #
           # `release` pinned rather than assumed: rust-cache can restore a
           # target/debug binary from an earlier run, and find would happily
           # hand back that one instead.
-          [ -n "$bin" ] || bin=$(find src-tauri/target -type f -path "*/release/*" \
+          bin=$(find src-tauri/target -type f -path "*/release/*" \
                   \( -name raw-footage-real-story -o -name raw-footage-real-story.exe \) \
                   -not -path "*/deps/*" -not -path "*/build/*" -not -path "*/incremental/*" | head -1)
           [ -n "$bin" ] || { echo "::error::No application binary under src-tauri/target."; exit 1; }
