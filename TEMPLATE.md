@@ -323,3 +323,52 @@ No change to the app's **code**. There is deployment work, and the order matters
 The hub's iframe branch mints a token scoped to that one app and passes it. Access still flows
 through the hub's access engine — the app never grants its own access in embedded mode, and
 never stores what the token told it.
+
+---
+
+## Credit mode — when the hub pays, the app must not spend the member's key
+
+The hub is adding prepaid credit alongside BYOK. It changes one thing every connected
+app has to care about, and it changes it silently unless someone reads this.
+
+Access used to be a yes or a no. It is now a yes or a no **plus a mode**:
+
+| Mode | When | Whose key pays for the AI call |
+|---|---|---|
+| `byok` | Active member, an explicit per-user grant, or a `public_preview` tool | The member's own provider key |
+| `credit` | Membership has lapsed, but they hold platform credit | **The hub's. The member's key must not be released.** |
+| `none` | No access | — |
+
+**`can_access_tool()` cannot tell you which one.** It returns a boolean, and it returns
+`true` for `byok` and `credit` alike. Anything that decides whether to hand a member's
+decrypted provider key to a client must read the hub's `tool_access()` function instead,
+which returns the mode. The boolean is still correct for "may they open this at all".
+
+### The failure this section exists to prevent
+
+In `credit` mode the hub pays the provider. If a client is still handed the member's own
+key and spends it, the member pays their provider **and** is billed credit for a call the
+hub never made. Money moves in both directions at once, and nothing in the database can
+detect it afterwards: a wrong release is byte-for-byte identical to a right one.
+
+So the ordering is not negotiable, and it is a sequencing rule rather than a code review
+note because the window it protects opens on a date, not on a commit:
+
+> **Every key-release path must read the mode BEFORE the first credit top-up can be
+> bought.** In the hub that means `supabase/functions/_shared/client-gate.ts` (which feeds
+> `desktop-keys` and `upworkpilot-keys`), `lib/runner.ts`, and `lib/key-release.ts`.
+
+Until a top-up can be bought, the `credit` branch is unreachable — every member's balance
+is zero — so the schema can land first and change nothing. That grace ends the moment a
+product exists to sell.
+
+### What a client app has to do
+
+- Treat a `credit`-mode licence as **"you may run, and you get no key"**. Do not fall back
+  to a locally stored key, and do not prompt the member for one.
+- A `<client>-keys` response in credit mode withholds every provider slot. That is a
+  normal, expected state — not an error, and not a reason to show the member a wall.
+- The `mode` field on those responses already exists and reads `"byok"` today. It was
+  declared ahead of time for exactly this change. **Read it. Never infer the mode from
+  whether a key came back**, because "no key" and "no key yet" are different answers with
+  different fixes.
