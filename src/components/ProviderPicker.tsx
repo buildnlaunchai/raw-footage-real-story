@@ -112,7 +112,13 @@ export function ProviderPicker({
   }, [providerId, linked, scriptLines.length]);
 
   const chars = characterCount(scriptLines);
-  const remaining = usage ? usage.characterLimit - usage.characterCount : null;
+  // Characters only. On credit the member's balance is in CREDITS, and
+  // subtracting one unit from the other to compare against a script length is
+  // how a UI ends up saying "not enough" to somebody with plenty.
+  const remaining =
+    usage?.kind === "provider" ? usage.characterLimit - usage.characterCount : null;
+  const spendableCredits =
+    usage?.kind === "credit" ? usage.balance - usage.held : null;
 
   return (
     <div className="provider-picker">
@@ -227,11 +233,17 @@ export function ProviderPicker({
             {status?.fromEnvironment
               ? "Using ELEVENLABS_API_KEY from this machine’s environment"
               : `Using the ElevenLabs key on your account${status?.hint ? ` (…${status.hint})` : ""}`}
-            {usage && (
+            {usage?.kind === "provider" && (
               <>
                 {" · "}
                 {remaining?.toLocaleString()} of {usage.characterLimit.toLocaleString()}{" "}
                 characters left ({usage.tier}){resetLabel(usage.resetsAtUnix)}
+              </>
+            )}
+            {usage?.kind === "credit" && (
+              <>
+                {" · "}
+                {spendableCredits?.toLocaleString()} credits left
               </>
             )}
           </span>
@@ -347,6 +359,15 @@ export function ProviderPicker({
                   {" "}
                   · you have {remaining.toLocaleString()} left
                   {remaining < chars && " — not enough for this script"}
+                </>
+              )}
+              {/* No "not enough" on credit: what a script costs in credits
+                  depends on the model's rate, which this screen does not know.
+                  Showing the balance is honest; guessing at it is not. */}
+              {spendableCredits !== null && (
+                <>
+                  {" "}
+                  · you have {spendableCredits.toLocaleString()} credits
                 </>
               )}
               .

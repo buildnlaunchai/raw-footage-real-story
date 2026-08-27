@@ -120,35 +120,28 @@ fn classify(status: u16, body: &str) -> ElevenLabsError {
     }
 }
 
-/// The key to call ElevenLabs with, from the account it belongs to.
+/// A GET to wherever ElevenLabs currently is for this member.
 ///
-/// The keychain is no longer consulted; see [`crate::provider_keys`] for why
-/// there is only one source now.
-///
-/// ─── THIS DOES NOT WORK IN CREDIT MODE, AND THAT IS A KNOWN HOLE ────────────
-///
-/// A member on credits has no ElevenLabs key — that is the whole point of the
-/// mode — so every caller of this function fails for them. Synthesis is fine:
-/// it goes through `target_for` and the hub's gateway instead. The three that
-/// are left are `elevenlabs_voices`, `elevenlabs_usage` and `fetch_catalogue`,
-/// and they are left because the gateway carries exactly one ElevenLabs route,
-/// `/v1/text-to-speech/{voice}` — the one that spends money and therefore the
-/// one that needed metering.
-///
-/// The consequence is not cosmetic: without `elevenlabs_voices` a credit member
-/// has no voice list, and no voice list means no narration. So credit mode is
-/// not shippable for this app until either the gateway gains read-only
-/// passthrough routes for `/v2/voices` and `/v1/models`, or the app stops
-/// needing to ask.
-///
-/// `elevenlabs_usage` is a different case and should NOT be routed: it reports
-/// the quota on the key that made the call, which in credit mode is OURS. A
-/// member must never be shown our account's balance. It should be hidden in
-/// credit mode, where their credit balance is the number that means anything.
-async fn key() -> Result<String, ElevenLabsError> {
-    crate::provider_keys::key_for(crate::provider_keys::Provider::ElevenLabs)
+/// Credit mode sends it to the hub's gateway, which forwards it on OUR key —
+/// these two paths are read-only, so the gateway opens no hold for them and
+/// they cost nobody anything. Byok sends it straight to ElevenLabs.
+async fn get_json(path: &str) -> Result<serde_json::Value, ElevenLabsError> {
+    let target = crate::provider_keys::target_for(crate::provider_keys::Provider::ElevenLabs, API)
         .await
-        .map_err(ElevenLabsError::from_key_problem)
+        .map_err(ElevenLabsError::from_key_problem)?;
+
+    let mut req = client()?.get(format!("{}{path}", target.base));
+    for (name, value) in &target.headers {
+        req = req.header(name.as_str(), value.as_str());
+    }
+
+    let resp = req.send().await.map_err(transport_error)?;
+    let status = resp.status().as_u16();
+    let body = resp.text().await.unwrap_or_default();
+    if !(200..300).contains(&status) {
+        return Err(classify(status, &body));
+    }
+    serde_json::from_str(&body).map_err(|e| ElevenLabsError::new("BAD_RESPONSE", e.to_string()))
 }
 
 fn client() -> Result<reqwest::Client, ElevenLabsError> {
@@ -190,26 +183,29 @@ pub struct Usage {
     pub resets_at_unix: Option<i64>,
 }
 
+/// What is left, in whichever unit is actually the member's.
+///
+/// Two variants because there are genuinely two answers, not one answer with a
+/// missing field. On their own key it is ElevenLabs characters, which they buy
+/// from ElevenLabs. On credit it is platform credit, which they buy from us —
+/// and the ElevenLabs figure for that call belongs to our account and must
+/// never be shown. A tagged union makes the UI say which it is holding rather
+/// than guess from whether a number is zero.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum UsageReport {
+    /// The member's own ElevenLabs quota. Byok only.
+    Provider(Usage),
+    /// The member's platform credit. `balance - held` is what is spendable.
+    Credit { balance: i64, held: i64 },
+}
+
 /// The user's own voices.
 ///
 /// Note this is `/v2/voices`; the v1 path still exists but is the older shape.
 #[tauri::command]
 pub async fn elevenlabs_voices() -> Result<Vec<CloudVoice>, ElevenLabsError> {
-    let resp = client()?
-        .get(format!("{API}/v2/voices"))
-        .header("xi-api-key", key().await?)
-        .send()
-        .await
-        .map_err(transport_error)?;
-
-    let status = resp.status().as_u16();
-    let body = resp.text().await.unwrap_or_default();
-    if !(200..300).contains(&status) {
-        return Err(classify(status, &body));
-    }
-
-    let json: serde_json::Value = serde_json::from_str(&body)
-        .map_err(|e| ElevenLabsError::new("BAD_RESPONSE", e.to_string()))?;
+    let json = get_json("/v2/voices").await?;
     let empty = vec![];
     Ok(json["voices"]
         .as_array()
@@ -231,28 +227,41 @@ pub async fn elevenlabs_voices() -> Result<Vec<CloudVoice>, ElevenLabsError> {
 /// Deliberately quota rather than price: hardcoding a per-character rate would
 /// go stale silently and end up lying to someone about their own money.
 #[tauri::command]
-pub async fn elevenlabs_usage() -> Result<Usage, ElevenLabsError> {
-    let resp = client()?
-        .get(format!("{API}/v1/user/subscription"))
-        .header("xi-api-key", key().await?)
-        .send()
+pub async fn elevenlabs_usage() -> Result<UsageReport, ElevenLabsError> {
+    // ─── The one call that is NOT forwarded in credit mode ──────────────────
+    //
+    // `/v1/user/subscription` reports the quota of whichever key made the call.
+    // On credit that key is OURS, so forwarding it would show a member the
+    // platform's own balance — a leak, and a useless one: the number that means
+    // anything to them is their credit, not our character allowance. So the
+    // question changes with the mode rather than the answer being laundered.
+    let target = crate::provider_keys::target_for(crate::provider_keys::Provider::ElevenLabs, API)
         .await
-        .map_err(transport_error)?;
+        .map_err(ElevenLabsError::from_key_problem)?;
 
-    let status = resp.status().as_u16();
-    let body = resp.text().await.unwrap_or_default();
-    if !(200..300).contains(&status) {
-        return Err(classify(status, &body));
+    if target.mode == crate::platform::KeyMode::Credit {
+        let cfg = crate::platform::config()
+            .ok_or_else(|| ElevenLabsError::new("NOT_CONFIGURED", "No platform configured."))?;
+        let access = crate::platform::fresh_access()
+            .await
+            .map_err(|e| ElevenLabsError::new("PLATFORM", e.to_string()))?;
+        let bal = crate::platform::credit_balance(&cfg.base, &cfg.anon_key, &access)
+            .await
+            .map_err(|e| ElevenLabsError::new("PLATFORM", e.to_string()))?;
+
+        return Ok(UsageReport::Credit {
+            balance: bal.balance,
+            held: bal.held,
+        });
     }
 
-    let json: serde_json::Value = serde_json::from_str(&body)
-        .map_err(|e| ElevenLabsError::new("BAD_RESPONSE", e.to_string()))?;
-    Ok(Usage {
+    let json = get_json("/v1/user/subscription").await?;
+    Ok(UsageReport::Provider(Usage {
         character_count: json["character_count"].as_u64().unwrap_or(0),
         character_limit: json["character_limit"].as_u64().unwrap_or(0),
         tier: json["tier"].as_str().unwrap_or("unknown").to_string(),
         resets_at_unix: json["next_character_count_reset_unix"].as_i64(),
-    })
+    }))
 }
 
 // `elevenlabs_test_key` was here, and went for the same reason as its OpenAI
@@ -302,9 +311,14 @@ pub async fn synthesize_bytes(
     // bought. In byok it goes straight to ElevenLabs on their key. Both are a
     // base and a set of headers, so nothing below branches on which.
     //
-    // The other three ElevenLabs calls in this file — voices, models, usage —
-    // are NOT routed, and cannot be until the gateway carries a route for them.
-    // See the note above `key()`.
+    // Every ElevenLabs call in this file goes through a target now, including
+    // the two read-only ones — the gateway forwards /v2/voices and /v1/models
+    // on our key without opening a hold, because a member on credit has no key
+    // of their own and without a voice list there is no narration.
+    //
+    // The exception is `/v1/user/subscription`, which is not forwarded and must
+    // not be: it reports the quota of whichever key called it, which on credit
+    // is OURS. elevenlabs_usage asks a different question in that mode instead.
     let target = crate::provider_keys::target_for(
         crate::provider_keys::Provider::ElevenLabs,
         API,
@@ -663,13 +677,7 @@ async fn catalogue() -> Vec<(String, Vec<String>)> {
 }
 
 async fn fetch_catalogue() -> Option<Vec<(String, Vec<String>)>> {
-    let resp = client().ok()?
-        .get(format!("{API}/v1/models"))
-        .header("xi-api-key", key().await.ok()?)
-        .send()
-        .await
-        .ok()?;
-    let models: serde_json::Value = resp.json().await.ok()?;
+    let models = get_json("/v1/models").await.ok()?;
     Some(
         models
             .as_array()?

@@ -319,6 +319,10 @@ pub async fn load(force: bool) -> Result<ProviderKeys, KeyProblem> {
 
 /// WHERE a provider call goes, and WHAT to send with it.
 ///
+/// The ONLY way either client gets a credential — it replaced `key_for`, which
+/// could only answer with a key and therefore could not describe a member who
+/// has none because the platform is paying for them.
+///
 /// The one place that answers "who is paying", so neither openai.rs nor
 /// elevenlabs.rs contains a branch on the mode — they build one request from
 /// this and never learn there are two kinds.
@@ -404,33 +408,6 @@ pub async fn target_for(provider: Provider, direct_base: &str) -> Result<CallTar
     // a licence to spend the platform's.
     match held.key.as_deref().map(str::trim) {
         Some(k) if held.present && !k.is_empty() => Ok(direct(k.to_string())),
-        _ => Err(KeyProblem::NotLinked {
-            provider,
-            reason: held.withheld_reason(),
-            consent_url: held.consent_link(),
-        }),
-    }
-}
-
-/// The key to call a provider with.
-///
-/// The only way either client gets one. Both used to read the keychain
-/// directly, which is what made "remove local keys" a change to the UI *and* a
-/// change to where the credential actually came from.
-pub async fn key_for(provider: Provider) -> Result<String, KeyProblem> {
-    if let Some(v) = env_override(provider) {
-        return Ok(v);
-    }
-
-    let keys = load(false).await?;
-    let held = provider.of(&keys);
-
-    // `present: false` and a present-but-empty key are the same thing to a
-    // caller about to put it in a header, and both mean "not linked" rather
-    // than "rejected". Telling those apart is what stops the app reporting a
-    // bad key to somebody who never had one.
-    match held.key.as_deref().map(str::trim) {
-        Some(k) if held.present && !k.is_empty() => Ok(k.to_string()),
         _ => Err(KeyProblem::NotLinked {
             provider,
             reason: held.withheld_reason(),

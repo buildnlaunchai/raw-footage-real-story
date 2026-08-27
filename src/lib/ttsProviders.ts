@@ -261,12 +261,24 @@ interface RawCloudVoice {
   description: string | null;
 }
 
-export interface CloudUsage {
-  characterCount: number;
-  characterLimit: number;
-  tier: string;
-  resetsAtUnix: number | null;
-}
+/**
+ * What is left, in whichever unit is actually the member's.
+ *
+ * Two shapes because there are genuinely two answers. On their own key it is
+ * ElevenLabs characters; on platform credit it is credits — and the ElevenLabs
+ * figure for that call belongs to the PLATFORM's account and is never shown.
+ * Tagged, so this branches on `kind` rather than guessing from whether a number
+ * happens to be zero.
+ */
+export type CloudUsage =
+  | {
+      kind: "provider";
+      characterCount: number;
+      characterLimit: number;
+      tier: string;
+      resetsAtUnix: number | null;
+    }
+  | { kind: "credit"; balance: number; held: number };
 
 export const elevenLabsProvider: TtsProvider = {
   id: "elevenlabs",
