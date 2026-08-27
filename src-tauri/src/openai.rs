@@ -200,10 +200,38 @@ pub struct OpenAiResult {
     pub usage: TokenUsage,
 }
 
+/// Where OpenAI is, when the MEMBER is paying. Lives here, with the client that
+/// speaks to it, rather than in provider_keys — see the note on `target_for`.
+const OPENAI_DIRECT: &str = "https://api.openai.com";
+
+/// How long between polls. A script takes tens of seconds at least; asking more
+/// often than this buys nothing and costs a request each time.
+const POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Per-request timeout. NOT the wait for the work — that is `timeout_for`, the
+/// budget for the whole poll loop. Every individual request here is short: the
+/// create returns an id immediately and a poll returns a status.
+const HTTP_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// What the UI is told while it waits.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerateProgress {
+    /// OpenAI's own word: `queued` or `in_progress`.
+    pub status: String,
+    pub elapsed_secs: u64,
+    /// Whose key is paying, so the UI can say "your credits" when it is ours.
+    pub mode: String,
+}
+
 /// One generation through the Responses API.
+///
+/// `app` is injected by Tauri and is invisible from JavaScript, so this command's
+/// signature on the JS side is unchanged.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn openai_generate(
+    app: tauri::AppHandle,
     model: String,
     prompt: String,
     system: Option<String>,
@@ -213,22 +241,58 @@ pub async fn openai_generate(
     // Roughly how many words are being asked for, so the wait can match.
     words: Option<u32>,
 ) -> Result<OpenAiResult, OpenAiError> {
-    generate_with_key(key().await?, model, prompt, system, format, temperature, seed, words).await
+    generate(Some(app), model, prompt, system, format, temperature, seed, words).await
 }
 
-/// The request itself, with the credential handed in rather than looked up.
-///
-/// Because this takes `String` and not `Option<String>`, a missing key cannot
-/// reach the network: the only caller is `openai_generate`, which resolves the
-/// credential with `key()?` first. The guard is enforced by the signature.
-///
-/// Splitting the lookup out is what makes the missing-key guard testable. The
-/// previous shape resolved the key internally, so the only way to test "no key"
-/// was to arrange for the machine to have none — and once a real key existed,
-/// that test made a live billed call and failed *because it succeeded*.
+/// The command's body, with the AppHandle optional so it can be driven from a
+/// test that has no Tauri runtime.
 #[allow(clippy::too_many_arguments)]
-async fn generate_with_key(
-    api_key: String,
+async fn generate(
+    app: Option<tauri::AppHandle>,
+    model: String,
+    prompt: String,
+    system: Option<String>,
+    format: Option<serde_json::Value>,
+    temperature: Option<f32>,
+    seed: Option<i64>,
+    words: Option<u32>,
+) -> Result<OpenAiResult, OpenAiError> {
+    let target = crate::provider_keys::target_for(
+        crate::provider_keys::Provider::OpenAi,
+        OPENAI_DIRECT,
+    )
+    .await
+        .map_err(OpenAiError::from_key_problem)?;
+    generate_with_target(app, target, model, prompt, system, format, temperature, seed, words).await
+}
+
+/// The request itself, with the destination handed in rather than looked up.
+///
+/// Because this takes a resolved `CallTarget` and not an option, a call with no
+/// credential cannot reach the network: the only callers resolve one first. The
+/// guard is enforced by the signature, exactly as it was when this took a bare
+/// key — splitting the lookup out is what makes the missing-credential case
+/// testable without arranging for the machine to have no key.
+///
+/// ─── BACKGROUND MODE, ON BOTH PATHS ─────────────────────────────────────────
+///
+/// This used to be one blocking POST with a timeout of up to fifteen minutes.
+/// It cannot stay that way, because in credit mode the hub's gateway FORCES
+/// `background: true` — a synchronous Responses call would hold an Edge Function
+/// open for the length of the generation and die at the platform's wall clock.
+///
+/// So the request is made in background mode on BOTH paths, not just through the
+/// gateway. One code path is the reason: the alternative is a blocking call for
+/// BYOK and a polled one for credit, two shapes for one feature, and the shape
+/// that gets exercised less is the one that breaks. It costs a BYOK user nothing
+/// — OpenAI supports background mode on a direct call too — and it buys them the
+/// same thing it buys everyone else: the fifteen-minute ceiling stops being a
+/// limit on how long the MODEL may think and becomes a limit on how long WE are
+/// willing to wait, which is a much cheaper thing to run out of.
+#[allow(clippy::too_many_arguments)]
+async fn generate_with_target(
+    app: Option<tauri::AppHandle>,
+    target: crate::provider_keys::CallTarget,
     model: String,
     prompt: String,
     system: Option<String>,
@@ -238,7 +302,7 @@ async fn generate_with_key(
     words: Option<u32>,
 ) -> Result<OpenAiResult, OpenAiError> {
     let client = reqwest::Client::builder()
-        .timeout(timeout_for(words))
+        .timeout(HTTP_TIMEOUT)
         .build()
         .map_err(|e| OpenAiError::new("CLIENT_INIT", e.to_string()))?;
 
@@ -248,7 +312,7 @@ async fn generate_with_key(
     }
     input.push(serde_json::json!({ "role": "user", "content": prompt }));
 
-    let mut body = serde_json::json!({ "model": model, "input": input });
+    let mut body = serde_json::json!({ "model": model, "input": input, "background": true });
 
     if let Some(schema) = format {
         body["text"] = serde_json::json!({
@@ -280,26 +344,127 @@ async fn generate_with_key(
         body["seed"] = serde_json::json!(s);
     }
 
-    let resp = client
-        .post(API)
-        .bearer_auth(&api_key)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| {
-            if e.is_timeout() {
-                OpenAiError::new(
-                    "TIMEOUT",
-                    "OpenAI took too long to respond. A long script in a language \
-                     that needs many tokens can outrun the wait — try a shorter \
-                     one, or the faster model tier.",
-                )
-            } else if e.is_connect() {
-                OpenAiError::new("NETWORK", "Couldn't reach OpenAI. Check your connection.")
-            } else {
-                OpenAiError::new("REQUEST_FAILED", e.to_string())
-            }
-        })?;
+    let created = send(&client, &target, reqwest::Method::POST, "/v1/responses", Some(&body)).await?;
+
+    let id = created
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            OpenAiError::new("BAD_RESPONSE", "OpenAI accepted the request without returning an id.")
+        })?
+        .to_string();
+
+    // Already finished — small prompts sometimes come back complete on the
+    // create. Nothing to poll for.
+    if is_terminal(&created) {
+        return finish(created);
+    }
+
+    let budget = timeout_for(words);
+    let started = std::time::Instant::now();
+    let mode = format!("{:?}", target.mode).to_lowercase();
+
+    loop {
+        if started.elapsed() >= budget {
+            return Err(OpenAiError::new(
+                "TIMEOUT",
+                "OpenAI is still working on this after a long wait. A long script in a \
+                 language that needs many tokens can outrun it — try a shorter one, or \
+                 the faster model tier.",
+            ));
+        }
+
+        tokio::time::sleep(POLL_INTERVAL).await;
+
+        let path = format!("/v1/responses/{id}");
+        let polled = send(&client, &target, reqwest::Method::GET, &path, None).await?;
+
+        let status = polled.get("status").and_then(|v| v.as_str()).unwrap_or("");
+        if is_terminal(&polled) {
+            return finish(polled);
+        }
+
+        // Best-effort, and never allowed to fail the run: a UI that missed one
+        // tick shows a slightly stale word, which is not worth an error.
+        if let Some(app) = app.as_ref() {
+            use tauri::Emitter;
+            let _ = app.emit(
+                "openai:progress",
+                GenerateProgress {
+                    status: status.to_string(),
+                    elapsed_secs: started.elapsed().as_secs(),
+                    mode: mode.clone(),
+                },
+            );
+        }
+    }
+}
+
+/// True once OpenAI has stopped working on this, whatever the outcome.
+fn is_terminal(v: &serde_json::Value) -> bool {
+    !matches!(
+        v.get("status").and_then(|s| s.as_str()).unwrap_or(""),
+        "queued" | "in_progress"
+    )
+}
+
+/// A terminal response, turned into a result or a reason.
+fn finish(v: serde_json::Value) -> Result<OpenAiResult, OpenAiError> {
+    match v.get("status").and_then(|s| s.as_str()).unwrap_or("") {
+        "completed" => extract_output(&v),
+        "incomplete" => {
+            let why = v
+                .get("incomplete_details")
+                .and_then(|d| d.get("reason"))
+                .and_then(|r| r.as_str())
+                .unwrap_or("unknown");
+            Err(OpenAiError::new(
+                "INCOMPLETE",
+                format!("OpenAI stopped before finishing ({why}). Try a shorter script."),
+            ))
+        }
+        other => {
+            // `failed` and `cancelled` both carry an error object worth showing.
+            let msg = v
+                .get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(|m| m.as_str())
+                .unwrap_or("OpenAI could not complete this request.");
+            let code = other.to_uppercase();
+            Err(OpenAiError::new(&code, msg.to_string()))
+        }
+    }
+}
+
+/// One request to wherever this call is going, with its headers attached.
+///
+/// The single place a header is set, so "which credential goes with which
+/// destination" is decided once — in provider_keys::target_for — and never
+/// reassembled at a call site.
+async fn send(
+    client: &reqwest::Client,
+    target: &crate::provider_keys::CallTarget,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<&serde_json::Value>,
+) -> Result<serde_json::Value, OpenAiError> {
+    let mut req = client.request(method, format!("{}{}", target.base, path));
+    for (name, value) in &target.headers {
+        req = req.header(name.as_str(), value.as_str());
+    }
+    if let Some(b) = body {
+        req = req.json(b);
+    }
+
+    let resp = req.send().await.map_err(|e| {
+        if e.is_timeout() {
+            OpenAiError::new("TIMEOUT", "The request took too long. Try again.")
+        } else if e.is_connect() {
+            OpenAiError::new("NETWORK", "Couldn't reach OpenAI. Check your connection.")
+        } else {
+            OpenAiError::new("REQUEST_FAILED", e.to_string())
+        }
+    })?;
 
     let status = resp.status().as_u16();
     let text = resp.text().await.unwrap_or_default();
@@ -307,10 +472,7 @@ async fn generate_with_key(
         return Err(classify(status, &text));
     }
 
-    let json: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|e| OpenAiError::new("BAD_RESPONSE", e.to_string()))?;
-
-    extract_output(&json)
+    serde_json::from_str(&text).map_err(|e| OpenAiError::new("BAD_RESPONSE", e.to_string()))
 }
 
 /// Pull the text out of a Responses payload, treating a refusal as its own
@@ -387,7 +549,8 @@ pub async fn openai_probe_sampling(model: String) -> Result<serde_json::Value, O
     let mut rejected: Option<String> = None;
 
     for _ in 0..2 {
-        match openai_generate(
+        match generate(
+            None,
             model.clone(),
             prompt.to_string(),
             None,
@@ -418,6 +581,56 @@ pub async fn openai_probe_sampling(model: String) -> Result<serde_json::Value, O
 }
 
 #[cfg(test)]
+mod poll_tests {
+    use super::*;
+
+    fn status(s: &str) -> serde_json::Value {
+        serde_json::json!({ "id": "resp_1", "status": s })
+    }
+
+    #[test]
+    fn the_loop_keeps_waiting_only_while_openai_is_still_working() {
+        for s in ["queued", "in_progress"] {
+            assert!(!is_terminal(&status(s)), "{s} must keep the poll going");
+        }
+        for s in ["completed", "failed", "cancelled", "incomplete"] {
+            assert!(is_terminal(&status(s)), "{s} must end the poll");
+        }
+        // A payload with no status at all ends it too. Spinning forever on a
+        // shape we do not understand is the worse of the two failures.
+        assert!(is_terminal(&serde_json::json!({ "id": "resp_1" })));
+    }
+
+    #[test]
+    fn an_incomplete_response_says_why_rather_than_looking_like_a_crash() {
+        let v = serde_json::json!({
+            "status": "incomplete",
+            "incomplete_details": { "reason": "max_output_tokens" }
+        });
+        let e = finish(v).expect_err("incomplete is not a success");
+        assert_eq!(e.code, "INCOMPLETE");
+        assert!(e.message.contains("max_output_tokens"), "{}", e.message);
+    }
+
+    #[test]
+    fn a_failure_carries_openais_own_sentence() {
+        let v = serde_json::json!({
+            "status": "failed",
+            "error": { "message": "The model produced invalid content." }
+        });
+        let e = finish(v).expect_err("failed is not a success");
+        assert_eq!(e.code, "FAILED");
+        assert_eq!(e.message, "The model produced invalid content.");
+    }
+
+    #[test]
+    fn a_terminal_response_with_no_error_object_still_says_something() {
+        let e = finish(status("cancelled")).expect_err("cancelled is not a success");
+        assert_eq!(e.code, "CANCELLED");
+        assert!(!e.message.is_empty());
+    }
+}
+
 mod tests {
     use super::*;
 
@@ -605,7 +818,8 @@ mod param_probe {
             ("seed only", None, Some(42i64)),
             ("both", Some(0.7), Some(42)),
         ] {
-            let r = openai_generate(
+            let r = generate(
+                None,
                 model.clone(),
                 "Reply with the single word: ok".into(),
                 None,

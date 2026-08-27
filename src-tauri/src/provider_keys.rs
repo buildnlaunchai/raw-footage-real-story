@@ -317,6 +317,101 @@ pub async fn load(force: bool) -> Result<ProviderKeys, KeyProblem> {
     Ok(keys)
 }
 
+/// WHERE a provider call goes, and WHAT to send with it.
+///
+/// The one place that answers "who is paying", so neither openai.rs nor
+/// elevenlabs.rs contains a branch on the mode — they build one request from
+/// this and never learn there are two kinds.
+///
+///   byok    the member's own key, straight to the provider
+///   credit  the member's SESSION, to the hub's gateway, which spends OUR key
+///           against credit they bought
+///
+/// Getting this backwards is the expensive one: a key spent while the account
+/// is on credits bills the member twice, once by their provider and once in
+/// credits, for a single call — and nothing afterwards can tell, because a
+/// wrong release is byte-for-byte identical to a right one.
+#[derive(Debug, Clone)]
+pub struct CallTarget {
+    /// Absolute, with no trailing slash. The caller appends the provider's own
+    /// path — `/v1/responses`, `/v1/text-to-speech/{voice}` — and the same
+    /// string works for both destinations because the gateway mirrors the
+    /// provider's route shape underneath its own prefix.
+    pub base: String,
+    /// Header name/value pairs, already formed. A list rather than named fields
+    /// because the two providers do not agree on the header: OpenAI takes a
+    /// bearer, ElevenLabs takes `xi-api-key`, and in credit mode both take the
+    /// session bearer plus the project's `apikey`.
+    pub headers: Vec<(String, String)>,
+    pub mode: KeyMode,
+}
+
+/// `direct_base` is passed IN rather than held here, and not for tidiness: a
+/// guard test in this file forbids a literal `https://` anywhere in it, because
+/// the platform's addresses must come from the platform and never be composed
+/// locally. A provider's own API base is a different kind of thing — it belongs
+/// to OpenAI and ElevenLabs, not to us — so it stays in each provider's own
+/// client, which is where it has always lived, and this function decides only
+/// the thing it is actually about: who pays.
+pub async fn target_for(provider: Provider, direct_base: &str) -> Result<CallTarget, KeyProblem> {
+    let direct = |key: String| CallTarget {
+        base: direct_base.to_string(),
+        headers: match provider {
+            Provider::OpenAi => vec![("authorization".into(), format!("Bearer {key}"))],
+            Provider::ElevenLabs => vec![("xi-api-key".into(), key)],
+        },
+        mode: KeyMode::Byok,
+    };
+
+    // The developer escape hatch, unchanged and still first: a key in the
+    // environment means this machine is testing against a provider directly and
+    // has said so out loud.
+    if let Some(v) = env_override(provider) {
+        return Ok(direct(v));
+    }
+
+    let keys = load(false).await?;
+    let held = provider.of(&keys);
+
+    if keys.mode_of(&held) == KeyMode::Credit {
+        let cfg = platform::config().ok_or(KeyProblem::NotConfigured)?;
+        // Proactively refreshed and serialised — see platform::fresh_access. A
+        // narration run spends this token once per line for as long as the
+        // script takes, which is what makes an hour-long expiry a real event
+        // rather than a theoretical one.
+        let access = platform::fresh_access()
+            .await
+            .map_err(|e| if e.is_unauthorised() { KeyProblem::SignedOut } else { e.into() })?;
+
+        return Ok(CallTarget {
+            base: format!(
+                "{}/functions/v1/ai-gateway/{}",
+                cfg.base.trim_end_matches('/'),
+                provider.slug()
+            ),
+            headers: vec![
+                // `apikey` identifies the project, the bearer identifies the
+                // member — the same pair every other hub call uses.
+                ("apikey".into(), cfg.anon_key.clone()),
+                ("authorization".into(), format!("Bearer {access}")),
+            ],
+            mode: KeyMode::Credit,
+        });
+    }
+
+    // Byok, or a mode this build has not been taught. Falling back to the
+    // member's own key is the safe direction: an unknown mode must never become
+    // a licence to spend the platform's.
+    match held.key.as_deref().map(str::trim) {
+        Some(k) if held.present && !k.is_empty() => Ok(direct(k.to_string())),
+        _ => Err(KeyProblem::NotLinked {
+            provider,
+            reason: held.withheld_reason(),
+            consent_url: held.consent_link(),
+        }),
+    }
+}
+
 /// The key to call a provider with.
 ///
 /// The only way either client gets one. Both used to read the keychain

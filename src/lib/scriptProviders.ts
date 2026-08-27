@@ -7,6 +7,7 @@
  * provider slots in without `scriptComposerCore.ts` changing at all.
  */
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { OLLAMA_HOST, OLLAMA_MODEL, OLLAMA_MODEL_QUALITY } from "../config/ollama";
 import { generate as ollamaGenerate } from "./ollama";
 import { asScriptProviderError } from "./providerErrors";
@@ -69,11 +70,33 @@ export interface GenerateArgs {
   /**
    * Roughly how many words are being asked for.
    *
-   * Only used to decide how long to wait. A cloud request returns nothing
-   * until it returns everything, so the wait is a ceiling on the whole
-   * generation, and a long script needs a longer one than a title does.
+   * Only used to decide how long to wait — now as the budget for the whole
+   * poll loop rather than as one request's timeout. A long script needs a
+   * longer one than a title does.
    */
   words?: number;
+  /**
+   * Called while a cloud generation is still running.
+   *
+   * There is nothing to report for a local model, which streams nothing and
+   * blocks. For OpenAI the request is made in background mode and polled, so
+   * there is now a real status to show — and, when the platform is paying,
+   * which is worth saying out loud rather than leaving a member to wonder
+   * whose bill this is.
+   *
+   * NOT a percentage, and there will not be one: the Responses API reports a
+   * state, not progress. "Still writing" is the honest thing to show.
+   */
+  onProgress?: (p: GenerateProgress) => void;
+}
+
+/** What the backend emits while a cloud generation is in flight. */
+export interface GenerateProgress {
+  /** OpenAI's own word: `queued` or `in_progress`. */
+  status: string;
+  elapsedSecs: number;
+  /** `byok` when it is the member's key, `credit` when the platform is paying. */
+  mode: string;
 }
 
 export interface ScriptProvider {
@@ -188,8 +211,14 @@ export function makeGenerateFn(
     };
   }
 
-  return async ({ tier: t, numCtx: _numCtx, words, ...args }) => {
+  return async ({ tier: t, numCtx: _numCtx, words, onProgress, ...args }) => {
     const model = t === "quality" ? OPENAI_MODELS[tier] : OPENAI_MODELS.fast;
+    // Subscribed before the call and dropped in `finally`, the same shape the
+    // voice providers use. Without a listener the backend's emit goes nowhere,
+    // which is a working app that looks frozen for two minutes.
+    const unlisten = onProgress
+      ? await listen<GenerateProgress>("openai:progress", (e) => onProgress(e.payload))
+      : undefined;
     try {
       const result = await invoke<{ text: string; usage: TokenUsage }>("openai_generate", {
         model,
@@ -208,6 +237,8 @@ export function makeGenerateFn(
       // Converted here rather than at the top level so every caller — including
       // the composer's own internal catches — sees a real Error.
       throw asScriptProviderError(err);
+    } finally {
+      unlisten?.();
     }
   };
 }
