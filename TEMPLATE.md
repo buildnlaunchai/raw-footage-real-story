@@ -4,6 +4,32 @@
 > Build & Launch AI ecosystem follows it. It exists so distribution is free: an app
 > built this way is already a clean, deployable, embeddable package with zero extra work.
 
+## Keeping the copies identical — a rule, because it has already failed
+
+**This file lives in every app repo, and every copy must be byte-identical. Change one,
+sync them all in the same sitting.** It is a document whose entire value is that the
+warning reaches the repo about to make the mistake.
+
+That is not a tidiness rule. On 2026-08-28 one app's copy was **93 lines behind** and was
+missing the whole credit-mode section — and it was that very app that had just shipped the
+credit-mode bug the missing section warns about. The advice existed. It was written down.
+It simply was not in the repo where somebody would read it.
+
+**A repo that gitignores `TEMPLATE.md` is a bug, not a preference.** An ignored copy cannot
+be synced, does not survive a fresh clone, and silently opts that app out of every lesson
+every other app has already paid for. If you find one, delete the ignore line and commit
+the file.
+
+Two cheap checks, worth running whenever this file is edited:
+
+```sh
+# every copy identical?
+md5 -q */TEMPLATE.md ../*/TEMPLATE.md | sort -u | wc -l      # must print 1
+
+# any repo ignoring it?
+git check-ignore -v TEMPLATE.md                              # must print nothing
+```
+
 ---
 
 ## The three laws
@@ -323,3 +349,96 @@ No change to the app's **code**. There is deployment work, and the order matters
 The hub's iframe branch mints a token scoped to that one app and passes it. Access still flows
 through the hub's access engine — the app never grants its own access in embedded mode, and
 never stores what the token told it.
+
+---
+
+## Credit mode — when the hub pays, the app must not spend the member's key
+
+The hub is adding prepaid credit alongside BYOK. It changes one thing every connected
+app has to care about, and it changes it silently unless someone reads this.
+
+Access used to be a yes or a no. It is now a yes or a no **plus a mode**:
+
+| Mode | When | Whose key pays for the AI call |
+|---|---|---|
+| `byok` | Active member, an explicit per-user grant, or a `public_preview` tool | The member's own provider key |
+| `credit` | Membership has lapsed, but they hold platform credit | **The hub's. The member's key must not be released.** |
+| `none` | No access | — |
+
+**`can_access_tool()` cannot tell you which one.** It returns a boolean, and it returns
+`true` for `byok` and `credit` alike. Anything that decides whether to hand a member's
+decrypted provider key to a client must read the hub's `tool_access()` function instead,
+which returns the mode. The boolean is still correct for "may they open this at all".
+
+### The failure this section exists to prevent
+
+In `credit` mode the hub pays the provider. If a client is still handed the member's own
+key and spends it, the member pays their provider **and** is billed credit for a call the
+hub never made. Money moves in both directions at once, and nothing in the database can
+detect it afterwards: a wrong release is byte-for-byte identical to a right one.
+
+So the ordering is not negotiable, and it is a sequencing rule rather than a code review
+note because the window it protects opens on a date, not on a commit:
+
+> **Every key-release path must read the mode BEFORE the first credit top-up can be
+> bought.** In the hub that means `supabase/functions/_shared/client-gate.ts` (which feeds
+> `desktop-keys` and `upworkpilot-keys`), `lib/runner.ts`, and `lib/key-release.ts`.
+
+Until a top-up can be bought, the `credit` branch is unreachable — every member's balance
+is zero — so the schema can land first and change nothing. That grace ends the moment a
+product exists to sell.
+
+### What a client app has to do
+
+- Treat a `credit`-mode licence as **"you may run, and you get no key"**. Do not fall back
+  to a locally stored key, and do not prompt the member for one.
+- A `<client>-keys` response in credit mode withholds every provider slot. That is a
+  normal, expected state — not an error, and not a reason to show the member a wall.
+- The `mode` field on those responses already exists and reads `"byok"` today. It was
+  declared ahead of time for exactly this change. **Read it. Never infer the mode from
+  whether a key came back**, because "no key" and "no key yet" are different answers with
+  different fixes.
+
+### Two ways this has already gone wrong
+
+Both were found by pointing a real client at a hub in credit mode, and both are the
+same mistake wearing different clothes: **the mode was read as an afterthought.**
+
+- **The extension read `mode` inside the "a key came back" branch.** So on every path
+  where a key was *withheld* — which is every path in credit mode — the one field that
+  explained the situation was parsed and dropped. The member was shown "the hub could
+  not release your key", a sentence about a fault, for an account with nothing wrong
+  with it. Read `mode` at the TOP of the parse, before you look at any slot.
+
+- **The desktop app deserialised the mode into a strict enum that did not contain the
+  hub's word.** It expected `"platform"`; the hub has always sent `"credit"`. Worse than
+  the wrong word was the strictness: an unrecognised value is a HARD PARSE ERROR that
+  fails the whole response, not just the field, so a perfectly entitled member could not
+  read their keys at all. **An unknown mode must degrade, never throw** — the hub is
+  explicitly allowed to add values, and a client that breaks when it does has turned
+  their roadmap into your outage. The same applies to the withheld `reason` strings.
+
+Neither had a test. Both now do, and both tests were confirmed to FAIL against the code
+they were written for — a test that passes against the bug proves nothing.
+
+### Testing the credit path locally
+
+You cannot iterate against production: `credit_mode_enabled` is a **global** kill switch,
+so turning it on to test turns it on for everybody. Use a local hub — the whole stack runs
+under `supabase start`, credit mode can stay on permanently, and a fake upstream can stand
+in for the providers so client work costs nothing.
+
+**One trap will cost you an hour if nobody warns you, so consider yourself warned:**
+
+> Local GoTrue signs its JWTs with **ES256**, while the local Edge Runtime verifies with
+> the **HS256** shared secret. So a perfectly good session token minted by the local auth
+> server is rejected at the function gateway with `{"msg":"Invalid JWT"}` — before your
+> function runs, and with nothing in your logs to say why. It looks exactly like an auth
+> bug in the code you just wrote.
+>
+> Serve functions with **`supabase functions serve --no-verify-jwt`** locally.
+
+This does **not** weaken the test. `verify_jwt` was never the authorisation — the gate
+inside the function calls `supabase.auth.getUser(jwt)` against the auth server and that is
+what actually decides. Turning the gateway check off locally removes a duplicate that only
+works in production anyway; every rule the function enforces is still enforced.
