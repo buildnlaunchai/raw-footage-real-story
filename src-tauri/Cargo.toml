@@ -52,13 +52,20 @@ tauri-plugin-dialog = "2.7.2"
 
 # For `setrlimit` only. A GUI app inherits macOS's 256-descriptor soft limit
 # from launchd, and a long film opens far more than that — see
+# Only `sync`, and only for one Mutex: refresh tokens rotate, so the credit-mode
+# session refresh has to be serialised or two concurrent calls spend two tokens
+# and the loser's rotation kills the winner's session. See platform::fresh_access.
+# tokio is already in the tree via tauri; this makes the dependency explicit
+# rather than relying on a re-export.
+tokio = { version = "1", features = ["sync"] }
+
 # `raise_file_limit` in ffmpeg.rs.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]
 # Integration tests drive the async Ollama commands directly.
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 
 # keyring's platform backends are opt-in features. Without one it compiles
 # against its **mock** store (`pub use mock as default`), which accepts a write,

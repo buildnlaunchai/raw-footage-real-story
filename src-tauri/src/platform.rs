@@ -636,6 +636,66 @@ async fn read<T: serde::de::DeserializeOwned>(resp: reqwest::Response) -> Result
 }
 
 #[cfg(test)]
+mod access_tests {
+    use super::*;
+
+    /// A token shaped like a real one: header.payload.signature, payload base64url.
+    fn token_with_exp(exp: u64) -> String {
+        use base64::Engine;
+        let payload = serde_json::json!({ "sub": "u1", "exp": exp }).to_string();
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload);
+        format!("header.{b64}.signature")
+    }
+
+    #[test]
+    fn the_expiry_is_read_out_of_the_token_itself() {
+        assert_eq!(token_expiry(&token_with_exp(1_800_000_000)), Some(1_800_000_000));
+    }
+
+    #[test]
+    fn an_unreadable_token_expires_immediately_rather_than_never() {
+        // The direction matters. Treating an unparseable token as "no expiry
+        // known, assume fine" buys a silent 401 in the middle of somebody's
+        // narration run; treating it as expired costs one refresh.
+        for bad in ["", "not-a-jwt", "a.b", "a.!!!.c", "a.e30.c"] {
+            assert!(token_expiry(bad).is_none(), "{bad} should not yield an expiry");
+        }
+
+        remember_access("not-a-jwt");
+        assert!(
+            access_valid_for(0).is_none(),
+            "an unreadable token must not be handed out as valid"
+        );
+        forget_access();
+    }
+
+    #[test]
+    fn a_token_inside_the_margin_is_not_good_enough() {
+        // A call that starts valid and expires in flight fails for a reason the
+        // member cannot act on, so the margin is the whole point of this check.
+        remember_access(&token_with_exp(now_unix() + 30));
+        assert!(access_valid_for(0).is_some(), "still valid right now");
+        assert!(
+            access_valid_for(REFRESH_MARGIN_SECS).is_none(),
+            "30s left is inside a 60s margin and must be refreshed"
+        );
+
+        remember_access(&token_with_exp(now_unix() + 3600));
+        assert!(access_valid_for(REFRESH_MARGIN_SECS).is_some(), "an hour is plenty");
+        forget_access();
+    }
+
+    #[test]
+    fn forgetting_the_session_forgets_the_token_with_it() {
+        remember_access(&token_with_exp(now_unix() + 3600));
+        assert!(current_access().is_some());
+        forget_access();
+        assert!(current_access().is_none(), "a signed-out session must not keep a token");
+        assert!(access_valid_for(0).is_none());
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::io::{Read, Write};
@@ -1178,16 +1238,116 @@ fn resolve(base: Option<String>, anon_key: Option<String>, provider: Option<Stri
 /// Deliberately not written to disk, for the reason [`crate::session`] gives:
 /// it lives about an hour and is derivable from the refresh token, so putting
 /// it at rest would be a second credential for no benefit.
-static ACCESS: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+///
+/// THE EXPIRY IS STORED WITH IT, and that is new. It did not matter while this
+/// token was spent once at launch to fetch a key that then lived in memory. In
+/// credit mode it is spent on EVERY provider call, and a narration run is one
+/// call per line for as long as the script takes — so "still valid?" became a
+/// question asked hundreds of times, and a bare String cannot answer it.
+struct Access {
+    token: String,
+    /// Unix seconds, read from the token's own `exp`. Zero when unreadable,
+    /// which reads as "already expired" and costs one refresh rather than one
+    /// silent 401 in the middle of somebody's script.
+    expires_at: u64,
+}
+
+static ACCESS: std::sync::RwLock<Option<Access>> = std::sync::RwLock::new(None);
+
+/// Serialises refreshing, and ONLY refreshing.
+///
+/// THE REASON THIS EXISTS IS WORTH SPELLING OUT. Refresh tokens rotate: spending
+/// one retires it and yields the next. Two calls that refresh concurrently
+/// therefore spend two tokens, and the loser's rotation invalidates the
+/// winner's — the session dies, mid-run, for a user who did nothing wrong.
+/// Narration calls one line at a time, so this should never contend; "should
+/// never" is exactly the kind of claim that a hundred sequential calls and one
+/// unlucky overlap turn into a support ticket.
+static REFRESHING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Refresh this long before the token actually dies.
+///
+/// A call that starts valid and expires in flight fails for a reason the member
+/// cannot act on. Sixty seconds is longer than any single gateway call.
+const REFRESH_MARGIN_SECS: u64 = 60;
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// The `exp` claim, read WITHOUT verifying the signature.
+///
+/// Deliberately unverified, and that is not a shortcut: this value is only ever
+/// used to decide when to refresh EARLY. The server remains the only thing that
+/// decides whether a token is accepted, so a forged `exp` buys an attacker one
+/// pointless refresh of their own session. Verifying here would mean shipping a
+/// key to check a hint with.
+fn token_expiry(token: &str) -> Option<u64> {
+    use base64::Engine;
+    let payload = token.split('.').nth(1)?;
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload).ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&raw).ok()?;
+    claims.get("exp")?.as_u64()
+}
 
 pub(crate) fn remember_access(token: &str) {
     if let Ok(mut slot) = ACCESS.write() {
-        *slot = Some(token.to_string());
+        *slot = Some(Access {
+            token: token.to_string(),
+            expires_at: token_expiry(token).unwrap_or(0),
+        });
     }
 }
 
 pub(crate) fn current_access() -> Option<String> {
-    ACCESS.read().ok().and_then(|s| s.clone())
+    ACCESS.read().ok().and_then(|s| s.as_ref().map(|a| a.token.clone()))
+}
+
+/// The token if it will still be good in `margin` seconds, else nothing.
+fn access_valid_for(margin: u64) -> Option<String> {
+    let slot = ACCESS.read().ok()?;
+    let a = slot.as_ref()?;
+    (a.expires_at > now_unix() + margin).then(|| a.token.clone())
+}
+
+/// An access token that will still be valid when the call lands.
+///
+/// What every gateway call goes through, so no call site carries refresh logic
+/// and no two of them can disagree about when to spend a rotation.
+///
+/// The double check around the lock is the whole point, not defensiveness: the
+/// first one keeps the common case lock-free, and the second means that when
+/// several calls do arrive together, ONE refreshes and the rest take its result.
+/// Without it the mutex would serialise the damage instead of preventing it —
+/// each waiter would wake up and spend its own refresh token in turn.
+pub(crate) async fn fresh_access() -> Result<String, PlatformError> {
+    if let Some(t) = access_valid_for(REFRESH_MARGIN_SECS) {
+        return Ok(t);
+    }
+
+    let _guard = REFRESHING.lock().await;
+
+    // Somebody refreshed while we waited. Their token is this token.
+    if let Some(t) = access_valid_for(REFRESH_MARGIN_SECS) {
+        return Ok(t);
+    }
+
+    let cfg = config().ok_or_else(|| PlatformError::Unreachable("not configured".into()))?;
+    let stored = crate::session::load()
+        .ok_or_else(|| PlatformError::Refused { status: 401, message: "signed out".into() })?;
+
+    let tokens = refresh(&cfg.base, &cfg.anon_key, &stored.refresh_token).await?;
+
+    // Written down BEFORE it is used, for the reason session::replace gives: a
+    // rotated token spent but never saved signs somebody out permanently.
+    crate::session::replace(&stored, &tokens.refresh_token, &now_iso())
+        .map_err(|e| PlatformError::Malformed(e.to_string()))?;
+    remember_access(&tokens.access_token);
+
+    Ok(tokens.access_token)
 }
 
 /// Drop the token, and whatever was fetched with it.

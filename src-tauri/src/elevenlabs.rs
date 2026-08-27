@@ -124,6 +124,27 @@ fn classify(status: u16, body: &str) -> ElevenLabsError {
 ///
 /// The keychain is no longer consulted; see [`crate::provider_keys`] for why
 /// there is only one source now.
+///
+/// ─── THIS DOES NOT WORK IN CREDIT MODE, AND THAT IS A KNOWN HOLE ────────────
+///
+/// A member on credits has no ElevenLabs key — that is the whole point of the
+/// mode — so every caller of this function fails for them. Synthesis is fine:
+/// it goes through `target_for` and the hub's gateway instead. The three that
+/// are left are `elevenlabs_voices`, `elevenlabs_usage` and `fetch_catalogue`,
+/// and they are left because the gateway carries exactly one ElevenLabs route,
+/// `/v1/text-to-speech/{voice}` — the one that spends money and therefore the
+/// one that needed metering.
+///
+/// The consequence is not cosmetic: without `elevenlabs_voices` a credit member
+/// has no voice list, and no voice list means no narration. So credit mode is
+/// not shippable for this app until either the gateway gains read-only
+/// passthrough routes for `/v2/voices` and `/v1/models`, or the app stops
+/// needing to ask.
+///
+/// `elevenlabs_usage` is a different case and should NOT be routed: it reports
+/// the quota on the key that made the call, which in credit mode is OURS. A
+/// member must never be shown our account's balance. It should be hidden in
+/// credit mode, where their credit balance is the number that means anything.
 async fn key() -> Result<String, ElevenLabsError> {
     crate::provider_keys::key_for(crate::provider_keys::Provider::ElevenLabs)
         .await
@@ -274,14 +295,32 @@ pub async fn synthesize_bytes(
         }
     }
 
-    let resp = client()?
-        .post(format!("{API}/v1/text-to-speech/{voice_id}"))
+    // ─── The one call that spends money, and therefore the one that is routed ──
+    //
+    // In credit mode this leaves for the hub's gateway carrying the member's
+    // SESSION, and the hub spends its own ElevenLabs key against credit they
+    // bought. In byok it goes straight to ElevenLabs on their key. Both are a
+    // base and a set of headers, so nothing below branches on which.
+    //
+    // The other three ElevenLabs calls in this file — voices, models, usage —
+    // are NOT routed, and cannot be until the gateway carries a route for them.
+    // See the note above `key()`.
+    let target = crate::provider_keys::target_for(
+        crate::provider_keys::Provider::ElevenLabs,
+        API,
+    )
+    .await
+        .map_err(ElevenLabsError::from_key_problem)?;
+
+    let mut req = client()?
+        .post(format!("{}/v1/text-to-speech/{voice_id}", target.base))
         .query(&[("output_format", format!("wav_{TARGET_SAMPLE_RATE}"))])
-        .header("xi-api-key", key().await?)
-        .json(&body)
-        .send()
-        .await
-        .map_err(transport_error)?;
+        .json(&body);
+    for (name, value) in &target.headers {
+        req = req.header(name.as_str(), value.as_str());
+    }
+
+    let resp = req.send().await.map_err(transport_error)?;
 
     let status = resp.status().as_u16();
     if !(200..300).contains(&status) {
