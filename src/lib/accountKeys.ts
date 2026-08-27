@@ -30,8 +30,15 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 
 export type ProviderSlug = "openai" | "elevenlabs";
 
-/** Whose key, and therefore who is billed. `platform` does not exist yet. */
-export type KeyMode = "byok" | "platform";
+/**
+ * Whose key, and therefore who is billed.
+ *
+ * `credit` is the platform's word, not one invented here — the previous
+ * spelling, `platform`, matched nothing the hub ever sent and made a credit
+ * account unreadable. `unknown` is what a build sees when the hub adds a mode
+ * it predates; it is a real state to render ("update the app"), not an error.
+ */
+export type KeyMode = "byok" | "credit" | "unknown";
 
 /**
  * Why a provider is withheld, in the platform's own word.

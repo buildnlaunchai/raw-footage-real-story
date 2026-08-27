@@ -40,16 +40,54 @@ use serde::{Deserialize, Serialize};
 /// Where the credentials for a cloud provider came from.
 ///
 /// `Byok` is the user's own key, held on the platform on their behalf and
-/// billed to them. `Platform` is the platform's own key, spent against credits
-/// they have bought — which does not exist yet, and is named here so that
-/// adding it later is a branch rather than a redesign. The distinction has to
-/// reach the UI either way: "your key" and "your credits" fail differently and
-/// a person needs to know which they are looking at.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// billed to them. `Credit` is the platform's own key, spent against credits
+/// they have bought. The distinction has to reach the UI either way: "your key"
+/// and "your credits" fail differently and a person needs to know which they
+/// are looking at.
+///
+/// ── TWO THINGS THIS TYPE GOT WRONG, BOTH FIXED HERE ──────────────────────
+///
+/// 1. THE WORD. This variant was called `Platform` and therefore deserialised
+///    `"platform"`. The hub has always sent `"credit"` — that string is in
+///    `desktop-keys` and in the gateway's own mode check. So the moment a
+///    member's account entered credit mode, this app could not read the keys
+///    response AT ALL and showed them a platform error, when the true answer
+///    was "you are on credits". A vocabulary invented on this side of a
+///    contract is not a vocabulary.
+///
+/// 2. STRICTNESS. Worse than the wrong word was that an unrecognised one was
+///    FATAL. `#[serde(default)]` only fills a field that is ABSENT; a field
+///    present with an unknown value is a hard error, and it failed the whole
+///    `ProviderKeys` parse rather than the one field. The hub's contract says
+///    the opposite — that it may add a value safely and an older build should
+///    fall through to its generic wall. So an unknown mode is now `Unknown`,
+///    not an error, and the next mode the hub invents will not brick every
+///    build shipped before it. That is the actual bug; the missing variant was
+///    only the first time it fired.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum KeyMode {
     Byok,
-    Platform,
+    Credit,
+    /// A mode this build has not been taught. Decides nothing on its own — the
+    /// per-provider slots still say what is available and why — but it lets the
+    /// UI say "update the app" instead of guessing.
+    Unknown,
+}
+
+impl<'de> Deserialize<'de> for KeyMode {
+    /// Hand-written for exactly one reason: to never fail. See note 2 above.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Ok(match raw.as_str() {
+            "byok" => KeyMode::Byok,
+            "credit" => KeyMode::Credit,
+            _ => KeyMode::Unknown,
+        })
+    }
 }
 
 /// Why a provider slot is withheld, in the platform's own word.
@@ -994,32 +1032,60 @@ mod tests {
         assert!(r.entitled(), "an unknown reason locked out a paying account");
     }
 
-    /// Credits mode does not exist yet; the shape that will carry it does.
+    /// Credit mode, in the hub's own spelling and in its real shape.
     ///
-    /// It is carried at the top level in the confirmed response, and a slot may
-    /// still override it. Reading both means the two spellings never have to be
-    /// told apart — and means a per-slot `platform` arriving one day is
-    /// understood rather than silently read as the user's own key.
+    /// The JSON here is copied from `desktop-keys`, not imagined: in credit
+    /// mode every slot comes back WITHHELD, because the member is entitled to
+    /// run and not to a key — we spend ours. So this test also pins that credit
+    /// mode is not a failure to read a key; it is a different answer.
     #[test]
-    fn the_platform_mode_is_understood_before_it_is_offered() {
-        let k: ProviderKeys =
-            serde_json::from_str(r#"{"mode":"platform","openai":{"present":true,"key":"x"}}"#)
-                .expect("parses");
-        assert_eq!(k.mode, KeyMode::Platform);
-        assert_eq!(k.mode_of(&k.openai), KeyMode::Platform, "the top-level mode did not reach the slot");
+    fn credit_mode_is_read_in_the_hub_s_own_word() {
+        let k: ProviderKeys = serde_json::from_str(
+            r#"{"mode":"credit",
+                "openai":{"present":false,"reason":"credit_mode","consent_url":"https://x/credits"},
+                "elevenlabs":{"present":false,"reason":"credit_mode","consent_url":"https://x/credits"}}"#,
+        )
+        .expect("the hub's own credit-mode response must parse");
+
+        assert_eq!(k.mode, KeyMode::Credit);
+        assert_eq!(k.mode_of(&k.openai), KeyMode::Credit, "the top-level mode did not reach the slot");
+        assert!(!k.openai.present, "credit mode releases no key");
 
         // A slot that disagrees wins for that slot only.
         let k: ProviderKeys = serde_json::from_str(
-            r#"{"mode":"platform","openai":{"present":true,"key":"x","mode":"byok"}}"#,
+            r#"{"mode":"credit","openai":{"present":true,"key":"x","mode":"byok"}}"#,
         )
         .expect("parses");
         assert_eq!(k.mode_of(&k.openai), KeyMode::Byok);
-        assert_eq!(k.mode_of(&k.elevenlabs), KeyMode::Platform, "one slot's override leaked");
+        assert_eq!(k.mode_of(&k.elevenlabs), KeyMode::Credit, "one slot's override leaked");
 
         // And a response that omits it entirely still means the user's own key.
         let k: ProviderKeys =
             serde_json::from_str(r#"{"openai":{"present":true,"key":"x"}}"#).expect("parses");
         assert_eq!(k.mode_of(&k.openai), KeyMode::Byok);
+    }
+
+    /// The bug this type actually had: an unknown mode was FATAL.
+    ///
+    /// `"platform"` is in here on purpose — it is the word this build used to
+    /// expect, and it must now be treated like any other word the hub does not
+    /// send. If a future rename ever makes this test pass for the wrong reason,
+    /// the third case (`"mode":"quantum"`) still fails it.
+    #[test]
+    fn an_unknown_mode_does_not_destroy_the_whole_response() {
+        for raw in [r#""platform""#, r#""quantum""#, r#""""#] {
+            let json = format!(
+                r#"{{"mode":{raw},"openai":{{"present":true,"key":"x"}}}}"#
+            );
+            let k: ProviderKeys = serde_json::from_str(&json)
+                .unwrap_or_else(|e| panic!("mode {raw} must not fail the parse: {e}"));
+
+            assert_eq!(k.mode, KeyMode::Unknown, "mode {raw}");
+            // The key is still there and still readable. An unknown MODE must
+            // not cost the member the slot they were actually sent.
+            assert!(k.openai.present, "mode {raw} lost the slot");
+            assert_eq!(k.openai.key.as_deref(), Some("x"), "mode {raw} lost the key");
+        }
     }
 }
 
