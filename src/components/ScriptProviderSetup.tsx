@@ -20,6 +20,7 @@ import {
   openKeyManagement,
   statusFor,
   type ProviderStatus,
+  offlineModeNote,
 } from "../lib/accountKeys";
 import type { ScriptLanguage } from "../lib/languages";
 
@@ -51,6 +52,7 @@ export function ScriptProviderSetup({
    * collapsing them tells an offline user to go and add a key they already
    * have.
    */
+  const offlineNote = offlineModeNote();
   const [problem, setProblem] = useState<
     { message: string; consentUrl: string | null; actionLabel: string | null } | null
   >(null);
@@ -138,6 +140,13 @@ export function ScriptProviderSetup({
         <div className="warning" role="status">
           <strong>Couldn’t check your account.</strong>
           <span>{problem.message}</span>
+          {/* For a member on their own key, being offline is inconvenient and
+              the sentence above says enough. For a member on CREDITS it is the
+              whole story — the platform is in the data path, so there is
+              nothing to generate with until it is reachable — and without this
+              they are left reading a network error and wondering whether their
+              account has broken. See offlineModeNote. */}
+          {offlineNote && <span className="hint">{offlineNote}</span>}
           <div className="actions" style={{ marginTop: "0.6rem" }}>
             <button
               type="button"

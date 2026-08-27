@@ -151,6 +151,39 @@ fn client() -> Result<reqwest::Client, ElevenLabsError> {
         .map_err(|e| ElevenLabsError::new("CLIENT_INIT", e.to_string()))
 }
 
+/// Would this failure hit every remaining line the same way?
+///
+/// If so the run stops, because the alternative is the wall of identical errors
+/// this check has always existed to prevent.
+///
+/// THE ORIGINAL LIST WAS KEY AND QUOTA PROBLEMS, and it was complete while the
+/// app called ElevenLabs directly on the member's key: a network failure then
+/// was usually a blip in one request, and trying the next line was reasonable.
+///
+/// On credit the platform is in the data path, so "no connection" is not a blip
+/// — it is the state of the whole run, and every line after it fails
+/// identically. A member on a plane would have watched a fifty-line script
+/// produce fifty copies of the same sentence, which is exactly the outcome the
+/// original comment promised would not happen.
+fn stops_the_run(code: &str) -> bool {
+    matches!(
+        code,
+        // The member's own key. Unchanged.
+        "MISSING_API_KEY"
+            | "INVALID_API_KEY"
+            | "QUOTA_EXCEEDED"
+            // The platform could not be reached, or would not answer. Every one
+            // of these is a fact about the run, not about the line.
+            | "NETWORK"
+            | "PLATFORM"
+            | "NOT_CONFIGURED"
+            | "KEYS_UNREACHABLE"
+            | "KEYS_SIGNED_OUT"
+            | "KEYS_NOT_CONFIGURED"
+            | "KEY_NOT_LINKED"
+    )
+}
+
 fn transport_error(e: reqwest::Error) -> ElevenLabsError {
     if e.is_timeout() {
         ElevenLabsError::new("TIMEOUT", "ElevenLabs took too long to respond.")
@@ -390,6 +423,47 @@ impl WavShape {
     /// Already in the pipeline's canonical format, so no conversion is needed.
     pub fn is_canonical(&self) -> bool {
         self.channels == 1 && self.sample_rate == TARGET_SAMPLE_RATE && self.bits == 16
+    }
+}
+
+#[cfg(test)]
+mod run_stopping_tests {
+    use super::*;
+
+    #[test]
+    fn a_problem_with_the_platform_stops_the_whole_run() {
+        // The bug this closes: on credit the hub is in the data path, so an
+        // unreachable platform fails every line. Before this, only key and quota
+        // problems stopped the loop, and a fifty-line script offline produced
+        // fifty copies of the same error.
+        for code in [
+            "NETWORK",
+            "PLATFORM",
+            "NOT_CONFIGURED",
+            "KEYS_UNREACHABLE",
+            "KEYS_SIGNED_OUT",
+            "KEYS_NOT_CONFIGURED",
+            "KEY_NOT_LINKED",
+        ] {
+            assert!(stops_the_run(code), "{code} should have stopped the run");
+        }
+    }
+
+    #[test]
+    fn the_original_key_and_quota_cases_still_stop_it() {
+        for code in ["MISSING_API_KEY", "INVALID_API_KEY", "QUOTA_EXCEEDED"] {
+            assert!(stops_the_run(code), "{code} regressed");
+        }
+    }
+
+    #[test]
+    fn a_problem_with_one_line_does_not_stop_the_rest() {
+        // The other half of the rule, and the reason this is a list rather than
+        // "stop on any error": one bad line — a voice that rejects the text, a
+        // single timeout — must not throw away the forty-nine that would work.
+        for code in ["BAD_PROJECT_ID", "TIMEOUT", "REQUEST_FAILED", "BAD_RESPONSE", "UNKNOWN"] {
+            assert!(!stops_the_run(code), "{code} should not have stopped the run");
+        }
     }
 }
 
@@ -793,12 +867,7 @@ pub async fn elevenlabs_synthesize(
                 }
             }
             Err(e) => {
-                // A key or quota problem will hit every remaining line the same
-                // way; stopping avoids a wall of identical errors.
-                let fatal = matches!(
-                    e.code.as_str(),
-                    "MISSING_API_KEY" | "INVALID_API_KEY" | "QUOTA_EXCEEDED"
-                );
+                let fatal = stops_the_run(&e.code);
                 failures.push(LineFailure {
                     line_number: i + 1,
                     clip_id: line.clip_id.clone(),

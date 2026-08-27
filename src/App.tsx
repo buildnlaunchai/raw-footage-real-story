@@ -113,7 +113,7 @@ import {
   type TimelineDoc,
 } from "./lib/timeline";
 import { coverageFor, suggestedWordCount } from "./lib/scriptComposerCore";
-import { providerKeyStatus } from "./lib/accountKeys";
+import { forgetMode, providerKeyStatus } from "./lib/accountKeys";
 import { audioUrl, concatNarration } from "./lib/voiceover";
 import {
   characterCount,
@@ -911,6 +911,8 @@ function App() {
   async function onGateSignOut() {
     try {
       await invoke("auth_sign_out");
+      // The next person to open this app is not this person.
+      forgetMode();
     } catch {
       // Nothing useful to say: the session is being abandoned either way.
     }

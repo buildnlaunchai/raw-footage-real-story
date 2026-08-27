@@ -26,6 +26,7 @@
     "src/lib/captions.ts",
     "src/lib/playback.ts",
     "src/lib/entitlement.ts",
+    "src/lib/accountMode.ts",
     "src/lib/semver.ts",
     "src/lib/updateGate.ts"
   ]

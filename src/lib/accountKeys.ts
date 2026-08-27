@@ -26,19 +26,22 @@
  * grant the permission being asked for.
  */
 import { invoke } from "@tauri-apps/api/core";
+import { rememberMode, type KeyMode } from "./accountMode";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
 export type ProviderSlug = "openai" | "elevenlabs";
 
-/**
- * Whose key, and therefore who is billed.
- *
- * `credit` is the platform's word, not one invented here — the previous
- * spelling, `platform`, matched nothing the hub ever sent and made a credit
- * account unreadable. `unknown` is what a build sees when the hub adds a mode
- * it predates; it is a real state to render ("update the app"), not an error.
- */
-export type KeyMode = "byok" | "credit" | "unknown";
+// KeyMode and the remembered-mode helpers live in ./accountMode, which imports
+// nothing from Tauri — so the test build can reach them without dragging a host
+// bridge into a suite that is deliberately pure. Re-exported here because every
+// screen already imports this module.
+export type { KeyMode } from "./accountMode";
+export {
+  forgetMode,
+  lastKnownMode,
+  offlineModeNote,
+  rememberMode,
+} from "./accountMode";
 
 /**
  * Why a provider is withheld, in the platform's own word.
@@ -147,11 +150,16 @@ export function asAccountKeyError(err: unknown): AccountKeyError {
  */
 export async function providerKeyStatus(refresh = false): Promise<ProviderStatus[]> {
   try {
-    return await invoke<ProviderStatus[]>("provider_key_status", { refresh });
+    const all = await invoke<ProviderStatus[]>("provider_key_status", { refresh });
+    // Every successful answer refreshes the offline hint. See ./accountMode.
+    rememberMode(all.map((s) => s.mode));
+    return all;
   } catch (err) {
     throw asAccountKeyError(err);
   }
 }
+
+
 
 export async function statusFor(
   provider: ProviderSlug,
