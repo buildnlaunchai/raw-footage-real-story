@@ -13,8 +13,6 @@
 use serde::Serialize;
 use std::time::Duration;
 
-const API: &str = "https://api.openai.com/v1/responses";
-
 /// A frontier model writing a few hundred words is not fast, and a 300-clip
 /// selection run is many calls; this only guards against a hung connection.
 /// How long to wait when the caller has no opinion.
@@ -134,17 +132,6 @@ fn classify(status: u16, body: &str) -> OpenAiError {
             ),
         ),
     }
-}
-
-/// The key to call OpenAI with, from the account it belongs to.
-///
-/// There is no local alternative to fall back to any more, so this either
-/// returns the account's key or returns the reason it cannot — including,
-/// where one exists, the page that fixes it. See [`crate::provider_keys`].
-async fn key() -> Result<String, OpenAiError> {
-    crate::provider_keys::key_for(crate::provider_keys::Provider::OpenAi)
-        .await
-        .map_err(OpenAiError::from_key_problem)
 }
 
 /// Adapt one of our JSON schemas to OpenAI's strict mode.

@@ -372,6 +372,49 @@ async fn post_tokens(
     read(resp).await
 }
 
+/// What the member has left, in the platform's own units.
+///
+/// Read straight from the database rather than through an Edge Function: the
+/// row is theirs, RLS scopes `credit_balances` to `user_id = auth.uid()`, and a
+/// function that added nothing but a hop would be a second thing to keep in
+/// step with the schema.
+///
+/// This exists because the ElevenLabs quota call must NOT be forwarded in credit
+/// mode — that endpoint reports the quota of whichever key made the call, which
+/// there is ours. Showing a member our account's balance would be a leak, and a
+/// confusing one, since the number that means anything to them is this one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct CreditBalance {
+    #[serde(default)]
+    pub balance: i64,
+    /// Reserved by calls still in flight. Spendable is `balance - held`.
+    #[serde(default)]
+    pub held: i64,
+}
+
+pub async fn credit_balance(
+    base: &str,
+    anon_key: &str,
+    access_token: &str,
+) -> Result<CreditBalance, PlatformError> {
+    let url = format!(
+        "{}/rest/v1/credit_balances?select=balance,held",
+        base.trim_end_matches('/')
+    );
+    let resp = client()?
+        .get(url)
+        .header("apikey", anon_key)
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .map_err(|e| PlatformError::Unreachable(e.to_string()))?;
+
+    // A member with no balance row has no credit, which is a number and not an
+    // error: PostgREST answers `[]` and this reads as zero.
+    let rows: Vec<CreditBalance> = read(resp).await?;
+    Ok(rows.into_iter().next().unwrap_or_default())
+}
+
 /// Ask what keys this person has stored with the platform.
 ///
 /// Authenticated with the access token, never with anything long-lived, and
