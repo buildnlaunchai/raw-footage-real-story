@@ -1,7 +1,7 @@
 {
   "name": "raw-footage-real-story",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -10,7 +10,8 @@
     "tauri": "tauri",
     "preflight": "./scripts/preflight.sh",
     "test": "tsc -p tsconfig.test.json && node scripts/esm-extensions.mjs && node scripts/run-tests.mjs",
-    "build:app": "./scripts/build-app.sh"
+    "build:app": "./scripts/build-app.sh",
+    "verify:release": "node scripts/verify-release.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
