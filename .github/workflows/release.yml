@@ -154,6 +154,48 @@ jobs:
       # Everything that guards the app itself has to pass before we spend
       # twenty minutes bundling it. This was briefly non-blocking while the
       # Windows ONNX segfault was being chased; it is not any more.
+      # DIAGNOSTIC BRANCH ONLY. Five hypotheses about this failure have been
+      # wrong — the runner image, tokio's features, a poisoned cache, twice over
+      # — every one of them reasoned rather than measured. 0xc0000139 means a DLL
+      # loaded WITHOUT a function the binary imports, so the import table and
+      # where each DLL resolves from is the actual evidence, and none of it has
+      # been looked at.
+      - name: Diagnose the Windows entrypoint failure
+        if: matrix.os == 'windows-2022'
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          cd src-tauri
+          cargo test --lib --no-run 2>&1 | Select-Object -Last 5
+          $exe = Get-ChildItem target\debug\deps\raw_footage_real_story_lib-*.exe |
+                 Sort-Object LastWriteTime | Select-Object -Last 1
+          Write-Host "`n=== BINARY ==="; Write-Host $exe.FullName "  $([math]::Round($exe.Length/1MB,1)) MB"
+
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC" -Recurse -Filter dumpbin.exe -ErrorAction SilentlyContinue |
+                     Where-Object { $_.FullName -match 'x64' } | Select-Object -First 1
+
+          Write-Host "`n=== DLLS THIS BINARY IMPORTS ==="
+          $deps = & $dumpbin.FullName /dependents $exe.FullName 2>$null |
+                  Select-String -Pattern '^\s+(\S+\.dll)$' | ForEach-Object { $_.Matches[0].Groups[1].Value }
+          $deps | ForEach-Object { Write-Host "  $_" }
+
+          Write-Host "`n=== WHERE EACH ONE RESOLVES FROM ==="
+          foreach ($d in $deps) {
+            $found = (Get-Command $d -ErrorAction SilentlyContinue).Source
+            if (-not $found) { $found = (where.exe $d 2>$null | Select-Object -First 1) }
+            Write-Host ("  {0,-34} {1}" -f $d, $(if ($found) { $found } else { "NOT ON PATH" }))
+          }
+
+          Write-Host "`n=== onnxruntime.dll copies visible to this process ==="
+          where.exe onnxruntime.dll 2>$null
+          Get-ChildItem -Path target\debug -Recurse -Filter onnxruntime*.dll -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Host "  built: $($_.FullName)  $([math]::Round($_.Length/1MB,1)) MB" }
+
+          Write-Host "`n=== RUNNING IT ==="
+          & $exe.FullName --list 2>&1 | Select-Object -First 10
+          Write-Host "exit: $LASTEXITCODE"
+
       - name: Test
         shell: bash
         run: |
