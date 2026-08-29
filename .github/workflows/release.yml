@@ -208,12 +208,14 @@ jobs:
           # LoadLibrary + GetProcAddress is what Windows itself does when it
           # starts the process, so it cannot disagree with the loader about what
           # resolves. Forwarders resolve; genuinely absent exports do not.
-          Add-Type -Namespace W -Name K -MemberDefinition @"
-            [DllImport("kernel32", SetLastError=true, CharSet=CharSet.Ansi)]
-            public static extern IntPtr LoadLibraryA(string name);
-            [DllImport("kernel32", SetLastError=true, CharSet=CharSet.Ansi)]
-            public static extern IntPtr GetProcAddress(IntPtr h, string proc);
-"@
+          # One line, and not a here-string. A PowerShell here-string must be
+          # terminated by "@ at COLUMN 0, and a column-0 line ends a YAML block
+          # scalar — so the previous version silently made this whole workflow
+          # unparseable, and GitHub reported it as "does not have a
+          # workflow_dispatch trigger". The file had no triggers because it had
+          # no valid YAML.
+          $sig = '[DllImport("kernel32", SetLastError=true, CharSet=CharSet.Ansi)] public static extern IntPtr LoadLibraryA(string name); [DllImport("kernel32", SetLastError=true, CharSet=CharSet.Ansi)] public static extern IntPtr GetProcAddress(IntPtr h, string proc);'
+          Add-Type -Namespace W -Name K -MemberDefinition $sig
           Write-Host "`n=== EVERY IMPORT, RESOLVED THE WAY THE LOADER RESOLVES IT ==="
           $bad = 0
           foreach ($dll in ($imports.Keys | Sort-Object)) {
