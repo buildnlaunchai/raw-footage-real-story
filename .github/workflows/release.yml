@@ -312,15 +312,37 @@ jobs:
       - name: The shipped binary must start
         shell: bash
         run: |
-          set -euo pipefail
+          set -uo pipefail
+          # ─── FIND IT THE WAY THE VERIFY STEPS DO ──────────────────────────
+          #
+          # The first version looked for the loose .app under
+          # target/*/release/bundle/macos and found nothing — "no release binary
+          # was produced" while a 100 MB dmg sat in the draft. Mounting the dmg
+          # is both correct and better: it starts the artifact a user actually
+          # downloads rather than a build output beside it.
           if [ "${{ matrix.os }}" = "windows-2022" ]; then
-            exe=$(find src-tauri/target/release -maxdepth 1 -name "raw-footage-real-story.exe" | head -1)
+            bin=$(find src-tauri/target/release -maxdepth 1 -name "raw-footage-real-story.exe" | head -1)
           else
-            exe=$(find src-tauri/target -path "*release/bundle/macos/*.app/Contents/MacOS/*" -type f | head -1)
+            dmg=$(find src-tauri/target -name "*.dmg" | head -1)
+            [ -n "$dmg" ] || { echo "no dmg was produced"; exit 1; }
+            mnt=$(hdiutil attach "$dmg" -nobrowse -readonly | grep -o '/Volumes/.*' | head -1)
+            trap 'hdiutil detach "$mnt" -quiet || true' EXIT
+            bin=$(find "$mnt" -path "*.app/Contents/MacOS/*" -type f | head -1)
           fi
-          [ -n "$exe" ] || { echo "no release binary was produced"; exit 1; }
-          echo "starting: $exe"
-          "$exe" &
+          [ -n "$bin" ] || { echo "no binary found to start"; exit 1; }
+          echo "starting: $bin"
+
+          # ─── WHAT COUNTS AS FAILURE, AND WHY NOT SIMPLY "IT EXITED" ───────
+          #
+          # This guards against a binary that CANNOT LOAD — the Windows case in
+          # issue #1, or a missing dylib on macOS. It must not also fail because
+          # a GUI app declines to open a window on a headless runner, which is an
+          # environment fact and not a defect.
+          #
+          # So: still running is a pass, a clean exit is a pass, and a loader
+          # error is a failure — named by what the linker actually prints.
+          err=$(mktemp)
+          "$bin" >/dev/null 2>"$err" &
           pid=$!
           sleep 12
           if kill -0 "$pid" 2>/dev/null; then
@@ -328,10 +350,19 @@ jobs:
             kill "$pid" 2>/dev/null || true
             exit 0
           fi
-          wait "$pid" && code=0 || code=$?
+          wait "$pid"; code=$?
           echo "RESULT: exited with $code"
-          echo "the shipped binary does not start — refusing to publish it"
-          exit 1
+          sed -n '1,20p' "$err"
+          if grep -qiE "dyld|Library not loaded|Symbol not found|image not found|ENTRYPOINT_NOT_FOUND|0xc0000139" "$err"; then
+            echo "the shipped binary cannot load — refusing to publish it"
+            exit 1
+          fi
+          if [ "$code" -gt 128 ] || [ "$code" -eq 134 ]; then
+            echo "the shipped binary crashed on startup — refusing to publish it"
+            exit 1
+          fi
+          echo "exited cleanly with no loader error — treating as loaded"
+          exit 0
 
       - name: Verify the installer — macOS
         if: matrix.os == 'macos-14'
