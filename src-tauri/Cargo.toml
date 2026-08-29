@@ -57,7 +57,7 @@ tauri-plugin-dialog = "2.7.2"
 # and the loser's rotation kills the winner's session. See platform::fresh_access.
 # tokio is already in the tree via tauri; this makes the dependency explicit
 # rather than relying on a re-export.
-tokio = { version = "1", features = ["sync"] }
+tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "macros"] }
 
 # `raise_file_limit` in ffmpeg.rs.
 [target.'cfg(unix)'.dependencies]
