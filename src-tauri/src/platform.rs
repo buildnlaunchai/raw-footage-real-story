@@ -682,6 +682,30 @@ async fn read<T: serde::de::DeserializeOwned>(resp: reqwest::Response) -> Result
 mod access_tests {
     use super::*;
 
+    /// ─── THESE TESTS SHARE ONE GLOBAL, SO THEY TAKE TURNS ───────────────
+    ///
+    /// `ACCESS` is a process-wide RwLock<Option<Access>>, and cargo runs tests
+    /// in parallel threads inside one process. Three tests here write it and
+    /// clear it, so without this they interleave: one sets a token good for an
+    /// hour, another calls forget_access() before the first can assert, and the
+    /// first fails with "an hour is plenty" — a token that was fine, wiped by a
+    /// neighbour.
+    ///
+    /// That is exactly how it failed: green on this machine, red on CI, because
+    /// the race depends on core count and scheduling. It was introduced with the
+    /// credit session work and went unnoticed because `main` had no CI to notice
+    /// it — the first push-triggered run caught it within minutes.
+    ///
+    /// `unwrap_or_else(|e| e.into_inner())` rather than `unwrap()`: a panic in
+    /// one test poisons the mutex, and a poisoned mutex would turn a single
+    /// failure into every remaining test failing for a reason that has nothing
+    /// to do with them.
+    static ACCESS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn access_guard() -> std::sync::MutexGuard<'static, ()> {
+        ACCESS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// A token shaped like a real one: header.payload.signature, payload base64url.
     fn token_with_exp(exp: u64) -> String {
         use base64::Engine;
@@ -697,6 +721,7 @@ mod access_tests {
 
     #[test]
     fn an_unreadable_token_expires_immediately_rather_than_never() {
+        let _serialised = access_guard();
         // The direction matters. Treating an unparseable token as "no expiry
         // known, assume fine" buys a silent 401 in the middle of somebody's
         // narration run; treating it as expired costs one refresh.
@@ -714,6 +739,7 @@ mod access_tests {
 
     #[test]
     fn a_token_inside_the_margin_is_not_good_enough() {
+        let _serialised = access_guard();
         // A call that starts valid and expires in flight fails for a reason the
         // member cannot act on, so the margin is the whole point of this check.
         remember_access(&token_with_exp(now_unix() + 30));
@@ -730,6 +756,7 @@ mod access_tests {
 
     #[test]
     fn forgetting_the_session_forgets_the_token_with_it() {
+        let _serialised = access_guard();
         remember_access(&token_with_exp(now_unix() + 3600));
         assert!(current_access().is_some());
         forget_access();
