@@ -49,11 +49,25 @@ jobs:
     name: ${{ matrix.label }}
     steps:
       - uses: actions/checkout@v4
-        # No LFS. The voice packs are ~55 binary files and this check never
-        # bundles them; release.yml still pulls and verifies them, which is
-        # where a bad smudge would actually ship something mute.
+        # ─── THE TESTS NEED THE MODEL AND THE VOICES ────────────────────────
+        #
+        # This started as `lfs: false` with no model fetch, reasoning that a
+        # check which never bundles does not need the assets. That was reasoning
+        # about the BUNDLE while the job runs TESTS —
+        # tts::synthesizes_audio_from_hardcoded_phonemes calls load_session(),
+        # which loads the ONNX model, and it failed on the first green-ish run
+        # for want of a file nobody had fetched.
+        #
+        # A check that provides less than the release build tests something
+        # different from what the release build tests, and will therefore miss
+        # things it appears to cover. It costs LFS bandwidth on every push; being
+        # able to trust the result is worth more.
         with:
-          lfs: false
+          lfs: true
+      - name: Fetch the model
+        shell: bash
+        run: ./scripts/fetch-model.sh
+
       - uses: actions/setup-node@v4
         with:
           node-version: 20
