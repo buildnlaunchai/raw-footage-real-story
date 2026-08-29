@@ -243,11 +243,33 @@ jobs:
               Select-String -Pattern 'delay|Delay' -Context 0,12
           }
 
+      # DIAGNOSTIC BRANCH: non-blocking so the release build downstream actually
+      # happens. The question this branch exists to answer is whether the failure
+      # is confined to the CI test binary or reaches the thing users install, and
+      # that cannot be answered while Test stops the job before anything is built.
       - name: Test
+        continue-on-error: true
         shell: bash
         run: |
           npm test
           cd src-tauri && cargo test --lib
+
+      # ─── IS THIS DEBUG-ONLY? ────────────────────────────────────────────────
+      #
+      # The failing binary is a DEBUG build of the lib tests, run out of
+      # target\debug\deps. What ships is a RELEASE build, bundled by NSIS,
+      # installed next to its own DLLs on a machine with none of this runner's
+      # PATH pollution. Those are different enough that "CI is broken" and "the
+      # product is broken" are separate questions, and only one of them blocks a
+      # release.
+      - name: Does the RELEASE test binary start? (Windows)
+        if: matrix.os == 'windows-2022'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          cd src-tauri
+          cargo test --release --lib 2>&1 | Select-Object -Last 6
+          Write-Host "release cargo test exit: $LASTEXITCODE"
 
       # Proof the line above did what it claims, printed whether the tests pass
       # or fail. A fix that is invisible is a fix nobody can check later.
@@ -421,6 +443,34 @@ jobs:
           codesign -dv "$app" 2>&1 | grep -q "Sealed Resources"
 
           "$app/Contents/MacOS/raw-footage-real-story" --selftest
+
+      # ─── AND DOES THE SHIPPED BINARY RUN? ───────────────────────────────────
+      #
+      # The existing verification below checks the release exe's resources and
+      # the DLLs beside it. It has never STARTED it, so a binary that cannot
+      # load would pass every check this workflow makes and ship.
+      - name: Does the SHIPPED exe start? (Windows)
+        if: matrix.os == 'windows-2022'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem src-tauri\target -Recurse -Filter raw-footage-real-story.exe |
+                 Where-Object { $_.FullName -notmatch '\\deps\\|\\build\\' } |
+                 Select-Object -First 1
+          if (-not $exe) { Write-Host "no release exe was produced"; exit 0 }
+          Write-Host "exe: $($exe.FullName)  $([math]::Round($exe.Length/1MB,1)) MB"
+          $p = Start-Process -FilePath $exe.FullName -PassThru -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 12
+          if ($p -and -not $p.HasExited) {
+            Write-Host "RESULT: still running after 12s — it loaded. Killing it."
+            Stop-Process -Id $p.Id -Force
+          } elseif ($p) {
+            $code = $p.ExitCode
+            Write-Host "RESULT: exited with $code"
+            if ($code -eq -1073741511) { Write-Host "  that is 0xC0000139 — THE SHIPPED BINARY HAS THE SAME FAULT" }
+          } else {
+            Write-Host "RESULT: would not start at all"
+          }
 
       - name: Verify the installer — Windows
         if: matrix.os == 'windows-2022'
