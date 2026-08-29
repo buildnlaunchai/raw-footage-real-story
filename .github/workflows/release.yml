@@ -142,10 +142,14 @@ jobs:
           # today — see the architecture check below for why.
           targets: ""
 
+      # EXPERIMENT: a key nothing can restore. Every Windows run so far produced
+      # the SAME test-binary hash — v0.4.0 twice and the tokio branch — which a
+      # changed Cargo.toml should not do. `key: ${{ matrix.target }}` is "" on
+      # Windows, so every Windows run on every branch shares one cache entry.
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-          key: ${{ matrix.target }}
+          key: nocache-${{ github.run_id }}
 
       - run: npm ci
 
