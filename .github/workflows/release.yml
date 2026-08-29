@@ -154,11 +154,58 @@ jobs:
       # Everything that guards the app itself has to pass before we spend
       # twenty minutes bundling it. This was briefly non-blocking while the
       # Windows ONNX segfault was being chased; it is not any more.
+      # ─── THE C RUNTIME MUST COME FROM THE SYSTEM, NOT FROM WHATEVER TOOL
+      #     HAPPENS TO BE FIRST ON PATH ─────────────────────────────────────
+      #
+      # The v0.4.0 Windows test binary would not start: 0xc0000139,
+      # STATUS_ENTRYPOINT_NOT_FOUND. Measured rather than guessed, it took two
+      # facts that are only fatal together.
+      #
+      # fbefc1e pulled the GUI/COM stack into the LIB TEST binary — it gained
+      # user32, gdi32, comctl32, dwmapi, shell32, ole32, oleaut32 as imports,
+      # which 78ef75f's test binary does not have. Those DLLs need a current
+      # C++ runtime.
+      #
+      # And on this runner the C++ runtime does not come from the system:
+      #
+      #   MSVCP140.dll        ...\Java_Temurin-Hotspot_jdk\8.0.502-7\x64\bin
+      #   MSVCP140_1.dll      ...\ImageMagick-7.1.2-Q16-HDRI
+      #   VCRUNTIME140.dll    ...\Mercurial
+      #   VCRUNTIME140_1.dll  ...\Python\3.12.10\x64
+      #
+      # Four runtime DLLs of four different vintages, shipped by four unrelated
+      # tools that happen to precede System32 on PATH. That was harmless while
+      # nothing in the test binary needed them and became a hard failure the
+      # moment something did.
+      #
+      # So System32 goes first. This is not a workaround for our code — it is
+      # the runner's PATH being wrong about which C runtime a Windows program
+      # should load, and every hypothesis that failed before this one failed
+      # because none of them touched PATH.
+      - name: Put the system C runtime first (Windows)
+        if: matrix.os == 'windows-2022'
+        shell: pwsh
+        run: |
+          "PATH=$env:SystemRoot\System32;$env:PATH" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "prepended $env:SystemRoot\System32"
+
       - name: Test
         shell: bash
         run: |
           npm test
           cd src-tauri && cargo test --lib
+
+      # Proof the line above did what it claims, printed whether the tests pass
+      # or fail. A fix that is invisible is a fix nobody can check later.
+      - name: Where the C runtime resolved from (Windows)
+        if: matrix.os == 'windows-2022' && always()
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          foreach ($d in "msvcp140.dll","msvcp140_1.dll","vcruntime140.dll","vcruntime140_1.dll") {
+            $p = (where.exe $d 2>$null | Select-Object -First 1)
+            Write-Host ("  {0,-22} {1}" -f $d, $(if ($p) { $p } else { "not found" }))
+          }
 
       # ─────────────────────────────────────────────────────────────────────
       # Signing goes here. Deliberately inert rather than absent: tauri-action
@@ -473,7 +520,14 @@ jobs:
             esac
           fi
 
+      # Convenience only, and it must never decide whether a build passed.
+      # tauri-action has already attached the installers to the release by this
+      # point; this step exists so a dispatch check can be downloaded. It has
+      # been failing on GitHub's artifact storage quota — which recalculates
+      # every 6-12 hours, so it stays red for hours after the space is freed —
+      # and a red run that shipped correctly is worse than no artifact.
       - uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: installers-${{ matrix.label }}
           if-no-files-found: error
