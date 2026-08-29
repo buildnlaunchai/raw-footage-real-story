@@ -46,19 +46,26 @@ jobs:
       # build tells you half of what the run was for.
       fail-fast: false
       matrix:
-        # ─── WINDOWS IS PINNED, AND THAT IS NOT CAUTION ─────────────────────
+        # ─── WINDOWS IS PINNED, AND NOT FOR THE REASON FIRST WRITTEN ───────
         #
-        # `windows-latest` moved image, and the v0.4.0 build died on it: the
-        # Rust lib compiled clean in 8m12s and then the test binary refused to
-        # start with 0xc0000139, STATUS_ENTRYPOINT_NOT_FOUND — a DLL loaded that
-        # was missing a function it imports. Nothing in the tree explains it.
-        # Cargo.lock changed by exactly two lines since v0.3.0, the version bump,
-        # and v0.3.0 passed on Windows nine days earlier.
+        # This pin was added believing `windows-latest` had rolled to a new
+        # image and broken the v0.4.0 build, which died with 0xc0000139,
+        # STATUS_ENTRYPOINT_NOT_FOUND — a DLL loading without a function it
+        # imports. That belief was wrong twice over. Pinning to windows-2022
+        # produced the identical failure, down to the same test-binary hash. And
+        # a dispatch of v0.3.0's tree on Windows the same day passed its Test
+        # step outright.
         #
-        # `latest` is a moving target that changes without a commit, which makes
-        # it the one input to a release build nobody can review. Pinned to the
-        # image that is known to work; moving it is then a diff like everything
-        # else, and the failure it produces belongs to whoever moved it.
+        # So the environment builds v0.3.0 fine today and the regression is in
+        # this repository, in the credit commits — which had reached a tagged
+        # release without Windows ever building them, because the last Windows
+        # run before v0.4.0 was v0.3.0 itself.
+        #
+        # THE PIN STAYS ANYWAY, on its own merits rather than as a fix. `latest`
+        # is an input to a release build that changes without a commit, which
+        # makes it the one thing about a build nobody can review. Pinned, moving
+        # it is a diff like everything else and the failure it causes belongs to
+        # whoever moved it.
         #
         # Built from the dispatch input rather than filtered by a job-level
         # `if`, which cannot see `matrix` — that expression is evaluated before
