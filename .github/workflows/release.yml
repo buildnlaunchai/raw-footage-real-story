@@ -186,41 +186,60 @@ jobs:
           $dumpbin = (Get-ChildItem "$vs\VC\Tools\MSVC" -Recurse -Filter dumpbin.exe -ErrorAction SilentlyContinue |
                       Where-Object { $_.FullName -match '\\x64\\' } | Select-Object -First 1).FullName
 
-          # imports: a DLL header line, then indented "ordinal name" rows.
           $imports = @{}
           $current = $null
           & $dumpbin /imports $exe.FullName 2>$null | ForEach-Object {
-            $line = $_
-            if ($line -match '^\s{4}(\S+\.dll)\s*$') { $current = $Matches[1]; $imports[$current] = @() }
-            elseif ($current -and $line -match '^\s+[0-9A-Fa-f]+\s+([A-Za-z_?@][^\s]*)\s*$') {
+            if ($_ -match '^\s{4}(\S+\.dll)\s*$') { $current = $Matches[1]; $imports[$current] = @() }
+            elseif ($current -and $_ -match '^\s+[0-9A-Fa-f]+\s+([A-Za-z_?@][^\s]*)\s*$') {
               $imports[$current] += $Matches[1]
             }
           }
-          Write-Host "`n=== imported functions, per DLL ==="
-          $imports.GetEnumerator() | Sort-Object Key | ForEach-Object {
-            Write-Host ("  {0,-36} {1} functions" -f $_.Key, $_.Value.Count)
-          }
 
-          Write-Host "`n=== CHECKING EACH AGAINST THE DLL ON THIS MACHINE ==="
-          $missingAny = $false
-          foreach ($dll in $imports.Keys) {
-            $path = (where.exe $dll 2>$null | Select-Object -First 1)
-            if (-not $path) { Write-Host "  $dll  NOT FOUND ON PATH"; $missingAny = $true; continue }
-            $exports = New-Object System.Collections.Generic.HashSet[string]
-            & $dumpbin /exports $path 2>$null | ForEach-Object {
-              if ($_ -match '^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+(\S+)') { [void]$exports.Add($Matches[1]) }
-              elseif ($_ -match '^\s+\d+\s+[0-9A-Fa-f]+\s+(\S+)\s*$') { [void]$exports.Add($Matches[1]) }
+          # ─── ASK THE LOADER, NOT A TEXT DUMP ───────────────────────────────
+          #
+          # The previous version parsed `dumpbin /exports` and reported
+          # CoInitializeEx, DefWindowProcW and AcquireSRWLockShared as missing
+          # from ole32, user32 and kernel32 — which is absurd on its face. They
+          # are FORWARDED exports: dumpbin prints those with no RVA and a
+          # trailing "(forwarded to ...)", and the regex wanted ordinal, hint,
+          # RVA, name. A broken instrument reporting confident nonsense, which is
+          # the third time in this investigation that the tool was the bug.
+          #
+          # LoadLibrary + GetProcAddress is what Windows itself does when it
+          # starts the process, so it cannot disagree with the loader about what
+          # resolves. Forwarders resolve; genuinely absent exports do not.
+          Add-Type -Namespace W -Name K -MemberDefinition @"
+            [DllImport("kernel32", SetLastError=true, CharSet=CharSet.Ansi)]
+            public static extern IntPtr LoadLibraryA(string name);
+            [DllImport("kernel32", SetLastError=true, CharSet=CharSet.Ansi)]
+            public static extern IntPtr GetProcAddress(IntPtr h, string proc);
+"@
+          Write-Host "`n=== EVERY IMPORT, RESOLVED THE WAY THE LOADER RESOLVES IT ==="
+          $bad = 0
+          foreach ($dll in ($imports.Keys | Sort-Object)) {
+            $h = [W.K]::LoadLibraryA($dll)
+            if ($h -eq [IntPtr]::Zero) {
+              Write-Host "  *** $dll  WILL NOT LOAD (LastError $([Runtime.InteropServices.Marshal]::GetLastWin32Error()))"
+              $bad++
+              continue
             }
-            if ($exports.Count -eq 0) { continue }   # forwarders / api-sets export nothing readable
-            $missing = $imports[$dll] | Where-Object { -not $exports.Contains($_) }
-            if ($missing) {
-              $missingAny = $true
-              Write-Host "`n  *** $dll  ($path)"
-              Write-Host "      exports $($exports.Count), and does NOT export:"
+            $missing = @()
+            foreach ($fn in $imports[$dll]) {
+              if ([W.K]::GetProcAddress($h, $fn) -eq [IntPtr]::Zero) { $missing += $fn }
+            }
+            if ($missing.Count -gt 0) {
+              $bad++
+              Write-Host "  *** $dll  loads, but does NOT resolve:"
               $missing | ForEach-Object { Write-Host "        $_" }
             }
           }
-          if (-not $missingAny) { Write-Host "`n  every imported function is exported — the fault is in a DELAY-LOADED or dynamically loaded DLL" }
+          if ($bad -eq 0) {
+            Write-Host "  every statically imported function resolves."
+            Write-Host "  => the fault is a DELAY-LOADED or LoadLibrary'd DLL, not the static import table."
+            Write-Host "`n=== DELAY-LOADED DLLS ==="
+            & $dumpbin /dependents $exe.FullName 2>$null |
+              Select-String -Pattern 'delay|Delay' -Context 0,12
+          }
 
       - name: Test
         shell: bash
