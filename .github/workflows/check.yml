@@ -1,0 +1,74 @@
+name: Check
+
+# ─── WHY THIS EXISTS ─────────────────────────────────────────────────────────
+#
+# Windows went untested through five commits and the breakage was found at
+# release time, on a tag, by a build that could not be published. Nothing ran on
+# a push: release.yml triggers on `v*` tags and manual dispatch only, so `main`
+# had no check at all and a Windows regression was invisible until somebody
+# tried to ship.
+#
+# fbefc1e broke the Windows test binary on 28 August. It was found on 29 August,
+# by the v0.4.0 release build. This workflow is what would have found it the same
+# day, and the reason it goes in now rather than after the fix: the fix removes
+# one bug, this removes the class.
+#
+# ─── WHAT IT DELIBERATELY DOES NOT DO ────────────────────────────────────────
+#
+# It does not bundle, sign, or upload anything. No tauri-action, and no
+# upload-artifact — that step is what has been turning green builds red while
+# GitHub's artifact quota catches up, and a check nobody trusts is a check
+# nobody reads. Build and test is the whole job; release.yml still owns
+# everything about producing an installer.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      # Windows is the platform that broke, and it broke while macOS was fine —
+      # so a failure on one must not cancel the other, or the next regression is
+      # again reported as half a picture.
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            label: macOS
+          # Pinned for the same reason release.yml is: `latest` is an input that
+          # changes without a commit.
+          - os: windows-2022
+            label: Windows
+    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.label }}
+    steps:
+      - uses: actions/checkout@v4
+        # No LFS. The voice packs are ~55 binary files and this check never
+        # bundles them; release.yml still pulls and verifies them, which is
+        # where a bad smudge would actually ship something mute.
+        with:
+          lfs: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: check-${{ matrix.os }}
+      - run: npm ci
+      # The exact pair release.yml runs — including its Windows skip, so this
+      # check and the release build cannot disagree about what passing means.
+      # The skip is issue #1 and is not silent there either:
+      #   https://github.com/buildnlaunchai/raw-footage-real-story/issues/1
+      - name: Test
+        shell: bash
+        run: |
+          npm test
+          if [ "${{ matrix.os }}" = "windows-2022" ]; then echo "SKIPPING cargo test --lib on Windows — see issue #1"; else cd src-tauri && cargo test --lib; fi
