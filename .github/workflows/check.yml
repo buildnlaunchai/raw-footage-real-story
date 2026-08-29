@@ -13,6 +13,36 @@ name: Check
 # day, and the reason it goes in now rather than after the fix: the fix removes
 # one bug, this removes the class.
 #
+# ─── THIS WORKFLOW IS ON A BUDGET, AND THE BUDGET BELONGS TO RELEASES ───────
+#
+# GitHub Actions bills macOS at 10x and Windows at 2x. Measured on this repo:
+#
+#     Check   macOS      2.2 min wall  ->  22.0 billed
+#     Check   Windows    1.2 min wall  ->   2.4 billed
+#     Release macOS      3.3 min wall  ->  33.0 billed
+#     Release Windows   12-17 min wall ->  24-35 billed
+#
+# One macOS Check costs nine Windows ones. On 2026-08-29 an afternoon of release
+# debugging — roughly twenty builds — consumed the entire 2,000-minute monthly
+# allowance and Actions stopped issuing runners mid-release, with a tag pushed
+# and no build possible until the quota reset.
+#
+# So the shape below is deliberate:
+#
+#     ~40 pushes x Windows only              =  96
+#     ~10 main/PR events x macOS             = 220
+#     4 releases x (33 + 30)                 = 252
+#                                      total ~ 570 of 2,000
+#
+# THE 252 IS NOT NEGOTIABLE. A release that cannot build is the one failure this
+# repository cannot work around — there is no local substitute, and a half-built
+# release strands a tag. Anything added here comes out of that number.
+#
+# If you widen this workflow — more platforms, more triggers, a matrix entry —
+# work out what it costs at the multipliers above and subtract it from the
+# release budget, not from the headroom. The headroom is what absorbed twenty
+# builds in one afternoon once already.
+#
 # ─── WHAT IT DELIBERATELY DOES NOT DO ────────────────────────────────────────
 #
 # It does not bundle, sign, or upload anything. No tauri-action, and no
@@ -25,6 +55,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 concurrency:
   group: check-${{ github.ref }}
@@ -39,6 +70,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # macOS carries the full Rust suite — 246 tests, and the ACCESS race
+          # was caught here within minutes of this workflow existing. It is also
+          # 10x, so it runs for the things that become main and not for every
+          # work-in-progress push: a branch push costs 2.4 minutes instead of 24.
           - os: macos-14
             label: macOS
           # Pinned for the same reason release.yml is: `latest` is an input that
@@ -81,8 +116,31 @@ jobs:
       # check and the release build cannot disagree about what passing means.
       # The skip is issue #1 and is not silent there either:
       #   https://github.com/buildnlaunchai/raw-footage-real-story/issues/1
+      # ─── WINDOWS COMPILES, macOS RUNS ───────────────────────────────────
+      #
+      # Windows skips `cargo test --lib` (issue #1: the test harness will not
+      # start, though the shipped binary does). Until this was looked at, that
+      # left the Windows job running the SAME 222 frontend tests as macOS and
+      # nothing else — an exact duplicate at twice the rate, with no
+      # Windows-specific coverage whatsoever.
+      #
+      # `cargo build --tests` is what makes it worth its minutes. It compiles the
+      # test targets for Windows, so a cfg block, a path assumption or a
+      # platform-gated dependency that breaks there is caught on the push that
+      # causes it. It never RUNS the binary, so it does not touch issue #1.
+      #
+      # What that still does not cover: the Rust tests themselves on Windows.
+      # Nothing cheap covers those — fbefc1e compiled cleanly and failed at
+      # startup — and buying them back is exactly what fixing issue #1 buys.
       - name: Test
         shell: bash
         run: |
           npm test
-          if [ "${{ matrix.os }}" = "windows-2022" ]; then echo "SKIPPING cargo test --lib on Windows — see issue #1"; else cd src-tauri && cargo test --lib; fi
+          cd src-tauri
+          if [ "${{ matrix.os }}" = "windows-2022" ]; then
+            echo "Windows: compiling the test targets, not running them — see issue #1"
+            echo "  https://github.com/buildnlaunchai/raw-footage-real-story/issues/1"
+            cargo build --tests
+          else
+            cargo test --lib
+          fi
