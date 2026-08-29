@@ -46,6 +46,20 @@ jobs:
       # build tells you half of what the run was for.
       fail-fast: false
       matrix:
+        # ─── WINDOWS IS PINNED, AND THAT IS NOT CAUTION ─────────────────────
+        #
+        # `windows-latest` moved image, and the v0.4.0 build died on it: the
+        # Rust lib compiled clean in 8m12s and then the test binary refused to
+        # start with 0xc0000139, STATUS_ENTRYPOINT_NOT_FOUND — a DLL loaded that
+        # was missing a function it imports. Nothing in the tree explains it.
+        # Cargo.lock changed by exactly two lines since v0.3.0, the version bump,
+        # and v0.3.0 passed on Windows nine days earlier.
+        #
+        # `latest` is a moving target that changes without a commit, which makes
+        # it the one input to a release build nobody can review. Pinned to the
+        # image that is known to work; moving it is then a diff like everything
+        # else, and the failure it produces belongs to whoever moved it.
+        #
         # Built from the dispatch input rather than filtered by a job-level
         # `if`, which cannot see `matrix` — that expression is evaluated before
         # the matrix exists. Chasing a Windows-only fault should not rebuild
@@ -53,10 +67,10 @@ jobs:
         include: >-
           ${{ fromJSON(
             (github.event_name != 'workflow_dispatch' || inputs.platforms == 'both')
-              && '[{"os":"macos-14","label":"macOS","target":"aarch64-apple-darwin","args":""},{"os":"windows-latest","label":"Windows","target":"","args":""}]'
+              && '[{"os":"macos-14","label":"macOS","target":"aarch64-apple-darwin","args":""},{"os":"windows-2022","label":"Windows","target":"","args":""}]'
             || inputs.platforms == 'macos'
               && '[{"os":"macos-14","label":"macOS","target":"aarch64-apple-darwin","args":""}]'
-            || '[{"os":"windows-latest","label":"Windows","target":"","args":""}]'
+            || '[{"os":"windows-2022","label":"Windows","target":"","args":""}]'
           ) }}
 
     runs-on: ${{ matrix.os }}
@@ -98,7 +112,7 @@ jobs:
       # lookup paths for winget and scoop were written from documentation and
       # had never met a real install.
       - name: Install ffmpeg (Windows)
-        if: matrix.os == 'windows-latest'
+        if: matrix.os == 'windows-2022'
         shell: pwsh
         continue-on-error: true
         run: |
@@ -301,7 +315,7 @@ jobs:
           "$app/Contents/MacOS/raw-footage-real-story" --selftest
 
       - name: Verify the installer — Windows
-        if: matrix.os == 'windows-latest'
+        if: matrix.os == 'windows-2022'
         shell: bash
         run: |
           set -euo pipefail
